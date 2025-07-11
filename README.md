@@ -1,6 +1,6 @@
 # BaaLS - Blockchain as a Local Service
 
-## The Embeddable Ledger. Local First, Trust Always.
+## The Embeddable Ledger
 
 BaaLS is designed to be the foundational layer for decentralized applications that prioritize local data integrity, embeddability, and optional peer-to-peer trust. Imagine a database that not only stores data but also guarantees its immutability, auditability, and deterministic processing, all within your application's local environment. This is BaaLS: a lightweight, production-grade blockchain engine written in Rust, engineered for seamless integration into desktop, mobile, and IoT applications. It's the "SQLite of blockchains" – providing a local, trustable ledger with the flexibility for optional network syncing and pluggable consensus mechanisms.
 
