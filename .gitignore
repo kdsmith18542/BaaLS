@@ -1,0 +1,17 @@
+# Rust
+/target
+
+# IDEs and editors
+.idea/
+.vscode/
+*.iml
+.DS_Store
+.env
+
+# Build artifacts
+/build
+
+# OS generated files
+.Trashes
+ehthumbs.db
+Thumbs.db 
