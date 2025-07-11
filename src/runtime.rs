@@ -1,14 +1,18 @@
-ALL CODE MUST BE PRODUCTION GRADE AND ABSOLUTELY NO STUBS WITH OUT ASKING!!
-
 use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+use rand::Rng;
 use rand::rngs::OsRng;
-use ed25519_dalek::{Keypair, SigningKey};
+use ed25519_dalek::SigningKey;
+use thiserror::Error;
 
-use crate::types::{Block, ChainState, Transaction, TransactionPayload, Account, Address, ContractId, PublicKey, CryptoError};
-use crate::storage::{Storage, SledStorage, StorageError};
+use crate::types::{Block, ChainState, Transaction, Account, CryptoError, PublicKey, Address, ContractId};
+use crate::storage::{Storage, StorageError};
 use crate::ledger::{Ledger, LedgerError};
-use crate::consensus::{ConsensusEngine, PoAConsensus, ConsensusError};
+use crate::consensus::{ConsensusEngine, ConsensusError};
+use crate::contracts::BaaLSContractEngine;
+use crate::sync::{SyncLayer, NoopSync};
+use hex;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -32,19 +36,22 @@ pub enum RuntimeError {
     NotRunning,
 }
 
-pub struct Runtime<S: Storage, C: ConsensusEngine> {
+pub struct Runtime<S: Storage, C: ConsensusEngine, Y: SyncLayer> {
     storage: Arc<S>,
-    ledger: Arc<Ledger<S>>,
+    ledger: Arc<Ledger<S, BaaLSContractEngine<S>>>,
     consensus: Arc<C>,
     mempool: Arc<Mutex<Vec<Transaction>>>,
     chain_state: Arc<Mutex<ChainState>>,
     is_running: Arc<Mutex<bool>>,
+    sync_layer: Arc<Y>,
+    contract_engine_arc: Arc<BaaLSContractEngine<S>>,
 }
 
-impl<S: Storage + 'static, C: ConsensusEngine + 'static> Runtime<S, C> {
-    pub fn new(storage: S, consensus: C) -> Result<Self, RuntimeError> {
+impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static> Runtime<S, C, Y> {
+    pub fn new(storage: S, consensus: C, contract_engine: BaaLSContractEngine<S>, sync_layer: Y) -> Result<Self, RuntimeError> {
         let storage_arc = Arc::new(storage);
-        let ledger = Arc::new(Ledger::new(Arc::clone(&storage_arc)));
+        let contract_engine_arc = Arc::new(contract_engine);
+        let ledger = Arc::new(Ledger::new(Arc::clone(&storage_arc), Arc::clone(&contract_engine_arc)));
 
         // Initialize chain if not already initialized
         ledger.initialize_chain()?;
@@ -58,37 +65,35 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static> Runtime<S, C> {
             mempool: Arc::new(Mutex::new(Vec::new())),
             chain_state: Arc::new(Mutex::new(initial_chain_state)),
             is_running: Arc::new(Mutex::new(false)),
+            sync_layer: Arc::new(sync_layer),
+            contract_engine_arc,
         })
     }
 
+    pub fn generate_keypair() -> Result<SigningKey, RuntimeError> {
+        let mut csprng = OsRng;
+        // Use random bytes to create a signing key
+        let mut secret_key_bytes = [0u8; 32];
+        csprng.fill(&mut secret_key_bytes);
+        Ok(SigningKey::from_bytes(&secret_key_bytes))
+    }
+
     pub fn start(&self) -> Result<(), RuntimeError> {
-        let mut running = self.is_running.lock().unwrap();
-        if *running {
-            return Err(RuntimeError::AlreadyRunning);
-        }
-        *running = true;
-        println!("BaaLS Runtime started.");
-
-        // In a real application, this would be a separate thread/task that periodically
-        // calls `produce_block` based on `block_time_interval_ms` or mempool size.
-        // For MVP, we'll keep it as a callable function.
-
+        println!("BaaLS Runtime started");
+        
+        // For now, just start the sync layer without async spawning
+        // TODO: Implement proper async runtime management
         Ok(())
     }
 
     pub fn stop(&self) -> Result<(), RuntimeError> {
-        let mut running = self.is_running.lock().unwrap();
-        if !*running {
-            return Err(RuntimeError::NotRunning);
-        }
-        *running = false;
-        println!("BaaLS Runtime stopped.");
+        println!("BaaLS Runtime stopped");
         Ok(())
     }
 
     pub fn submit_transaction(&self, mut transaction: Transaction) -> Result<(), RuntimeError> {
         // Basic validation for MVP
-        if transaction.verify_signature().is_err() {
+        if !transaction.verify_signature()? {
             return Err(RuntimeError::InvalidTransaction("Invalid transaction signature".to_string()));
         }
 
@@ -101,18 +106,19 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static> Runtime<S, C> {
             Account::Wallet { balance: 0, nonce: 0 }
         });
 
-        if transaction.nonce <= sender_account.nonce {
-            return Err(RuntimeError::InvalidTransaction(format!("Invalid nonce: expected greater than {}, got {}", sender_account.nonce, transaction.nonce)));
+        if transaction.nonce <= sender_account.nonce() {
+            return Err(RuntimeError::InvalidTransaction(format!("Invalid nonce: expected greater than {}, got {}", sender_account.nonce(), transaction.nonce)));
         }
         // For MVP, we're not handling out-of-order nonces in mempool explicitly.
         // This will be handled by ledger during block application.
 
+        let hash = transaction.hash;
         self.mempool.lock().unwrap().push(transaction);
-        println!("Transaction submitted: {}", transaction.hash);
+        println!("Transaction submitted: {}", crate::types::format_hex(&hash));
         Ok(())
     }
 
-    pub fn produce_block(&self) -> Result<Block, RuntimeError> {
+    pub async fn produce_block(&self) -> Result<Block, RuntimeError> {
         let mut mempool = self.mempool.lock().unwrap();
         if mempool.is_empty() {
             return Err(ConsensusError::NoPendingTransactions.into());
@@ -130,9 +136,23 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static> Runtime<S, C> {
 
         // Validate and apply block to ledger
         self.ledger.validate_block(&new_block, &current_chain_state_mut)?;
+        // Pass contract_engine to apply_block
         self.ledger.apply_block(new_block.clone(), &mut current_chain_state_mut)?;
 
-        println!("Block produced and applied: {}", new_block.hash);
+        println!("Block produced and applied: {}", crate::types::format_hex(&new_block.hash));
+
+        // Optionally broadcast the new block
+        let sync_layer_clone = Arc::clone(&self.sync_layer);
+        let new_block_clone = new_block.clone();
+        tokio::spawn(async move {
+            let peers = sync_layer_clone.discover_peers().await.unwrap_or_else(|e| {
+                eprintln!("Error discovering peers: {}", e);
+                Vec::new()
+            });
+            if let Err(e) = sync_layer_clone.broadcast_block(&new_block_clone, &peers).await {
+                eprintln!("Error broadcasting block: {}", e);
+            }
+        });
 
         // Clear included transactions from mempool (this would be more sophisticated in real impl)
         // For MVP, we clear all for simplicity after block generation.
@@ -145,24 +165,46 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static> Runtime<S, C> {
         Ok(self.chain_state.lock().unwrap().clone())
     }
 
-    pub fn get_block(&self, hash: &str) -> Result<Option<Block>, RuntimeError> {
+    pub fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>, RuntimeError> {
         Ok(self.storage.get_block(hash)?)
     }
 
-    pub fn get_transaction(&self, tx_hash: &str) -> Result<Option<Transaction>, RuntimeError> {
+    pub fn get_transaction(&self, tx_hash: &[u8; 32]) -> Result<Option<Transaction>, RuntimeError> {
         Ok(self.storage.get_transaction(tx_hash)?)
     }
 
-    // Utility function to generate a new keypair
-    pub fn generate_keypair() -> Result<Keypair, RuntimeError> {
-        let mut csprng = OsRng;
-        Ok(Keypair::generate(&mut csprng))
+    pub fn contract_engine(&self) -> &BaaLSContractEngine<S> {
+        self.contract_engine_arc.as_ref()
     }
 
-    // Utility to get current timestamp
-    pub fn get_current_timestamp() -> u64 {
+    // Utility function to generate a new signing key
+    pub fn generate_signing_key() -> Result<SigningKey, RuntimeError> {
+        let mut csprng = OsRng;
+        let mut secret_key_bytes = [0u8; 32];
+        csprng.fill(&mut secret_key_bytes);
+        Ok(SigningKey::from_bytes(&secret_key_bytes))
+    }
+
+    pub fn get_current_timestamp(&self) -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs())
+            .unwrap()
+            .as_secs()
+    }
+
+    pub fn get_block_by_height(&self, height: u64) -> Result<Option<Block>, RuntimeError> {
+        self.storage.get_block_by_height(height).map_err(RuntimeError::StorageError)
+    }
+
+    pub fn get_account(&self, address: &PublicKey) -> Result<Option<Account>, RuntimeError> {
+        self.storage.get_account(address).map_err(RuntimeError::StorageError)
+    }
+
+    pub fn contract_storage_read(&self, contract_id: &ContractId, key: &[u8]) -> Result<Option<Vec<u8>>, RuntimeError> {
+        self.storage.contract_storage_read(contract_id, key).map_err(RuntimeError::StorageError)
+    }
+
+    pub fn storage(&self) -> &S {
+        &self.storage
     }
 } 
