@@ -1,5 +1,7 @@
 # Rust
-/target
+/target/
+**/*.rs.bk
+Cargo.lock
 
 # IDEs and editors
 .idea/
@@ -9,11 +11,19 @@
 .env
 
 # Build artifacts
-/build
+/build/
+/dist/
 
 # OS generated files
 .Trashes
 ehthumbs.db
-Thumbs.db 
+Thumbs.db
 
-plan.md 
+# Project specific
+plan.md
+/data/
+*.log
+
+# Temporary files
+*.tmp
+*.temp 
