@@ -1,11 +1,16 @@
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
+//! Block validation and state transition logic.
+//!
+//! The ledger module is responsible for validating blocks, executing transactions,
+//! and maintaining the chain state. It ensures that all state transitions are
+//! valid and deterministic.
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use thiserror::Error;
 
-use crate::types::{Block, Transaction, ChainState, Account, ContractId, CryptoError, TransactionPayload, PublicKey};
-use crate::storage::{Storage, StorageError, StorageBatch, StorageOperation};
-use crate::contracts::{ContractEngine, ContractError};
+use crate::contracts::ContractEngine;
+use crate::storage::{Storage, StorageBatch, StorageError, StorageOperation};
+use crate::types::{Account, Block, ChainState, CryptoError, PublicKey, TransactionPayload};
 
 #[derive(Debug, Error)]
 pub enum LedgerError {
@@ -44,7 +49,10 @@ pub struct Ledger<S: Storage, C: ContractEngine> {
 
 impl<S: Storage, C: ContractEngine> Ledger<S, C> {
     pub fn new(storage: Arc<S>, contract_engine: Arc<C>) -> Self {
-        Ledger { storage, contract_engine }
+        Ledger {
+            storage,
+            contract_engine,
+        }
     }
 
     pub fn initialize_chain(&self) -> Result<(), LedgerError> {
@@ -59,7 +67,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             index: 0,
             timestamp: 0,
             prev_hash: [0; 32], // Genesis block has no previous hash
-            hash: [0; 32], // Will be calculated after creation
+            hash: [0; 32],      // Will be calculated after creation
             nonce: 0,
             transactions: Vec::new(),
             metadata: None,
@@ -73,7 +81,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             latest_block_hash: genesis_block.hash,
             latest_block_index: 0,
             accounts_root_hash: [0; 32], // Placeholder, will be updated by Merkle tree impl
-            total_supply: 0, // No native token for now
+            total_supply: 0,             // No native token for now
         };
 
         let mut batch = StorageBatch::default();
@@ -87,11 +95,18 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         ));
 
         self.storage.apply_batch(batch)?;
-        println!("Chain initialized with genesis block: {}", crate::types::format_hex(&genesis_block.hash));
+        println!(
+            "Chain initialized with genesis block: {}",
+            crate::types::format_hex(&genesis_block.hash)
+        );
         Ok(())
     }
 
-    pub fn validate_block(&self, block: &Block, current_chain_state: &ChainState) -> Result<(), LedgerError> {
+    pub fn validate_block(
+        &self,
+        block: &Block,
+        current_chain_state: &ChainState,
+    ) -> Result<(), LedgerError> {
         // Basic Block Header Validation
         if block.index != current_chain_state.latest_block_index + 1 {
             return Err(LedgerError::BlockValidation(format!(
@@ -103,8 +118,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         if block.prev_hash != current_chain_state.latest_block_hash {
             return Err(LedgerError::BlockValidation(format!(
                 "Invalid previous hash: expected {:x?}, got {:x?}",
-                current_chain_state.latest_block_hash,
-                block.prev_hash
+                current_chain_state.latest_block_hash, block.prev_hash
             )));
         }
 
@@ -112,24 +126,31 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         if calculated_hash != block.hash {
             return Err(LedgerError::BlockValidation(format!(
                 "Invalid block hash: expected {:x?}, got {:x?}",
-                calculated_hash,
-                block.hash
+                calculated_hash, block.hash
             )));
         }
 
         // Timestamp check (simplified for MVP, typically more robust logic needed)
-        if block.index > 0 && block.timestamp <= self.storage.get_block(&block.prev_hash)?.ok_or(LedgerError::NotFound)?.timestamp {
+        if block.index > 0
+            && block.timestamp
+                <= self
+                    .storage
+                    .get_block(&block.prev_hash)?
+                    .ok_or(LedgerError::NotFound)?
+                    .timestamp
+        {
             return Err(LedgerError::BlockValidation(
-                "Block timestamp is not greater than previous block's timestamp".to_string()
+                "Block timestamp is not greater than previous block's timestamp".to_string(),
             ));
         }
 
         // Transaction Validation (within the block) - only basic checks for MVP
         for tx in &block.transactions {
             if !tx.verify_signature()? {
-                return Err(LedgerError::BlockValidation(
-                    format!("Invalid signature for transaction: {:x?}", tx.hash)
-                ));
+                return Err(LedgerError::BlockValidation(format!(
+                    "Invalid signature for transaction: {:x?}",
+                    tx.hash
+                )));
             }
             // Further transaction validation (nonce, balance) will happen during state transition
         }
@@ -164,49 +185,83 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
 
             match &tx.payload {
                 TransactionPayload::Transfer { amount } => {
-                    if let Account::Wallet { balance, .. } = accounts_to_update.get_mut(&tx.sender).unwrap() {
+                    let sender_account =
+                        accounts_to_update.get_mut(&tx.sender).ok_or_else(|| {
+                            LedgerError::StateTransition(
+                                "Sender account not found in update map".to_string(),
+                            )
+                        })?;
+
+                    if let Account::Wallet { balance, .. } = sender_account {
                         if *balance < *amount {
-                            return Err(LedgerError::InsufficientBalance(format!("{:?}", tx.sender)));
+                            return Err(LedgerError::InsufficientBalance(format!(
+                                "{:?}",
+                                tx.sender
+                            )));
                         }
                         *balance -= *amount;
                     } else {
-                        return Err(LedgerError::StateTransition("Sender is not a wallet account".to_string()));
+                        return Err(LedgerError::StateTransition(
+                            "Sender is not a wallet account".to_string(),
+                        ));
                     }
 
                     if let Some(mut recipient_account) = match tx.recipient {
                         crate::types::Address::Wallet(pk) => self.storage.get_account(&pk)?,
-                        crate::types::Address::Contract(_) => return Err(LedgerError::StateTransition("Cannot transfer native token to a contract directly".to_string())),
+                        crate::types::Address::Contract(_) => {
+                            return Err(LedgerError::StateTransition(
+                                "Cannot transfer native token to a contract directly".to_string(),
+                            ))
+                        }
                     } {
                         if let Account::Wallet { balance, .. } = &mut recipient_account {
                             *balance += amount;
-                            accounts_to_update.insert(match tx.recipient { crate::types::Address::Wallet(pk) => pk, _ => unreachable!()}, recipient_account);
+                            accounts_to_update.insert(
+                                match tx.recipient {
+                                    crate::types::Address::Wallet(pk) => pk,
+                                    _ => unreachable!(),
+                                },
+                                recipient_account,
+                            );
                         } else {
-                            return Err(LedgerError::StateTransition("Recipient is not a wallet account".to_string()));
+                            return Err(LedgerError::StateTransition(
+                                "Recipient is not a wallet account".to_string(),
+                            ));
                         }
-                    } else { // Create new account if recipient doesn't exist
+                    } else {
+                        // Create new account if recipient doesn't exist
                         if let crate::types::Address::Wallet(pk) = tx.recipient {
-                            accounts_to_update.insert(pk, Account::Wallet { balance: *amount, nonce: 0 });
+                            accounts_to_update.insert(
+                                pk,
+                                Account::Wallet {
+                                    balance: *amount,
+                                    nonce: 0,
+                                },
+                            );
                         } else {
-                             // Should be unreachable due to previous check
+                            // Should be unreachable due to previous check
                         }
                     }
-                },
+                }
                 TransactionPayload::ContractDeploy { wasm_bytes } => {
                     // Full WASM validation/execution in ContractEngine module.
                     let contract_id = self.contract_engine.deploy_contract(
                         &tx.sender,
-                        &wasm_bytes,
+                        wasm_bytes,
                         None, // No init_payload in new variant
                         self.storage.as_ref(),
                         tx.gas_limit,
                     )?;
                     // Update sender account to reflect new contract (if it's a contract account)
-                    accounts_to_update.insert(tx.sender, Account::Contract {
-                        code_hash: contract_id.id, // Use actual contract ID hash
-                        storage_root_hash: [0; 32], // Placeholder, will be updated by Merkle tree impl
-                        nonce: sender_account.nonce(),
-                    });
-                },
+                    accounts_to_update.insert(
+                        tx.sender,
+                        Account::Contract {
+                            code_hash: contract_id.id,  // Use actual contract ID hash
+                            storage_root_hash: [0; 32], // Placeholder, will be updated by Merkle tree impl
+                            nonce: sender_account.nonce(),
+                        },
+                    );
+                }
                 TransactionPayload::ContractCall { method, args } => {
                     // Extract contract_id from recipient address
                     let contract_id = match &tx.recipient {
@@ -221,14 +276,16 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                         self.storage.as_ref(),
                     );
                     // TODO: Handle execution result
-                },
+                }
                 TransactionPayload::Data { data: _ } => {
                     // For MVP, just allow storing data. No specific state changes yet.
                 }
             }
 
             // Remove from mempool after successful processing
-            batch.ops.push(StorageOperation::Delete(bincode::serialize(&tx.hash)?));
+            batch
+                .ops
+                .push(StorageOperation::Delete(bincode::serialize(&tx.hash)?));
         }
 
         // Apply account updates (Merkle root calculation would go here in a full implementation)
@@ -250,10 +307,11 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
 
         // Index transactions by block hash as part of the batch
         for (i, tx) in block.transactions.iter().enumerate() {
-            self.storage.index_transaction(&tx.hash, &block.hash, i as u32)?;
+            self.storage
+                .index_transaction(&tx.hash, &block.hash, i as u32)?;
         }
 
         self.storage.apply_batch(batch)?;
         Ok(())
     }
-} 
+}

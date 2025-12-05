@@ -1,10 +1,13 @@
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-use ed25519_dalek::{Signature, Signer, Verifier, SigningKey};
-use std::collections::BTreeMap;
-use hex;
+//! Consensus engine implementation.
+//!
+//! This module defines the consensus mechanism for block generation and validation.
+//! Currently implements Proof-of-Authority (PoA) consensus, but designed to be
+//! pluggable for other consensus algorithms.
 
-use crate::types::{Block, ChainState, Transaction, CryptoError, PublicKey};
+use ed25519_dalek::{Signer, SigningKey};
+use thiserror::Error;
+
+use crate::types::{Block, ChainState, CryptoError, PublicKey, Transaction};
 
 #[derive(Debug, Error)]
 pub enum ConsensusError {
@@ -25,7 +28,8 @@ pub enum ConsensusError {
 }
 
 pub trait ConsensusEngine: Send + Sync {
-    fn validate_block(&self, block: &Block, chain_state: &ChainState) -> Result<(), ConsensusError>;
+    fn validate_block(&self, block: &Block, chain_state: &ChainState)
+        -> Result<(), ConsensusError>;
     fn generate_block(
         &self,
         pending_transactions: &[Transaction],
@@ -36,41 +40,49 @@ pub trait ConsensusEngine: Send + Sync {
 
 pub struct PoAConsensus {
     authorized_signer_key: PublicKey,
-    block_time_interval_ms: u64,
+    _block_time_interval_ms: u64,
 }
 
 impl PoAConsensus {
     pub fn new(authorized_signer_key: PublicKey, block_time_interval_ms: u64) -> Self {
         Self {
             authorized_signer_key,
-            block_time_interval_ms,
+            _block_time_interval_ms: block_time_interval_ms,
         }
     }
 
-    pub fn validate_block(&self, block: &Block) -> Result<(), ConsensusError> {
+    pub fn validate_block(&self, _block: &Block) -> Result<(), ConsensusError> {
         // For PoA, we just check if the block is signed by an authorized signer
         // In a real implementation, you'd check the signature against the authorized key
-        
+
         // For now, just return Ok() - implement actual signature verification later
         Ok(())
     }
 
-    pub fn sign_block(&self, block: &mut Block, private_key: &SigningKey) -> Result<(), ConsensusError> {
+    pub fn sign_block(
+        &self,
+        block: &mut Block,
+        private_key: &SigningKey,
+    ) -> Result<(), ConsensusError> {
         // Verify the private key corresponds to the authorized signer
         if private_key.verifying_key().to_bytes() != self.authorized_signer_key.to_bytes() {
             return Err(ConsensusError::UnauthorizedSigner);
         }
 
         // Sign the block
-        let signature = private_key.sign(&block.hash);
+        let _signature = private_key.sign(&block.hash);
         // TODO: Add signature to block metadata or create a signed block type
-        
+
         Ok(())
     }
-} 
+}
 
 impl crate::consensus::ConsensusEngine for PoAConsensus {
-    fn validate_block(&self, block: &Block, _chain_state: &ChainState) -> Result<(), ConsensusError> {
+    fn validate_block(
+        &self,
+        block: &Block,
+        _chain_state: &ChainState,
+    ) -> Result<(), ConsensusError> {
         self.validate_block(block)
     }
 
@@ -96,7 +108,9 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
             transactions,
             metadata: None,
         };
-        block.hash = block.calculate_hash().map_err(|e| ConsensusError::ValidationFailed(format!("Hash error: {:?}", e)))?;
+        block.hash = block
+            .calculate_hash()
+            .map_err(|e| ConsensusError::ValidationFailed(format!("Hash error: {:?}", e)))?;
         Ok(block)
     }
-} 
+}

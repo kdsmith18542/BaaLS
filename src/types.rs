@@ -1,9 +1,15 @@
+//! Core type definitions for BaaLS blockchain.
+//!
+//! This module contains all the fundamental data structures used throughout
+//! the BaaLS blockchain system, including blocks, transactions, accounts,
+//! and cryptographic types.
+
+use ed25519_dalek::{Signature, SignatureError, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use ed25519_dalek::{Signature, VerifyingKey, Verifier, SigningKey, SignatureError, Signer};
-use sha2::{Sha256, Digest};
-use sha2::digest::FixedOutput;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+/// Errors that can occur during cryptographic operations.
 #[derive(Debug, Error)]
 pub enum CryptoError {
     #[error("Hash conversion error")]
@@ -16,7 +22,10 @@ pub enum CryptoError {
     InvalidSignature,
 }
 
-// Remove serde derive from PublicKey since VerifyingKey doesn't support it
+/// Wrapper around ed25519 public key for blockchain operations.
+///
+/// This type provides a safe and convenient interface for working with
+/// ed25519 public keys, including verification of signatures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PublicKey(VerifyingKey);
 
@@ -30,11 +39,11 @@ impl PublicKey {
     pub fn to_bytes(&self) -> [u8; 32] {
         self.0.to_bytes()
     }
-    
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         self.0.as_bytes()
     }
-    
+
     pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), SignatureError> {
         self.0.verify(message, signature)
     }
@@ -72,13 +81,18 @@ impl<'de> Deserialize<'de> for PublicKey {
     }
 }
 
-// Remove serde derive from Signature since ed25519_dalek::Signature doesn't support it
+/// Wrapper around ed25519 signature for transaction signing.
+///
+/// This type ensures that transaction signatures can be serialized and
+/// deserialized consistently across the system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransactionSignature(ed25519_dalek::Signature);
 
 impl TransactionSignature {
     pub fn from_bytes(bytes: &[u8; 64]) -> Result<Self, CryptoError> {
-        Ok(TransactionSignature(ed25519_dalek::Signature::from_bytes(bytes)))
+        Ok(TransactionSignature(ed25519_dalek::Signature::from_bytes(
+            bytes,
+        )))
     }
 
     pub fn to_bytes(&self) -> [u8; 64] {
@@ -117,14 +131,16 @@ impl<'de> Deserialize<'de> for TransactionSignature {
         if bytes.len() != 64 {
             return Err(serde::de::Error::custom("Invalid signature length"));
         }
-        let bytes_array: [u8; 64] = bytes.try_into().map_err(|_| serde::de::Error::custom("Invalid signature length"))?;
+        let bytes_array: [u8; 64] = bytes
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("Invalid signature length"))?;
         TransactionSignature::from_bytes(&bytes_array).map_err(serde::de::Error::custom)
     }
 }
 
 impl PartialOrd for PublicKey {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.0.to_bytes().cmp(&other.0.to_bytes()))
+        Some(self.cmp(other))
     }
 }
 
@@ -134,33 +150,66 @@ impl Ord for PublicKey {
     }
 }
 
-// Helper function for hex formatting
+/// Format a 32-byte hash as a hexadecimal string.
+///
+/// # Arguments
+///
+/// * `bytes` - The 32-byte hash to format
+///
+/// # Returns
+///
+/// A lowercase hexadecimal string representation
 pub fn format_hex(bytes: &[u8; 32]) -> String {
     hex::encode(bytes)
 }
 
+/// A block in the blockchain.
+///
+/// Blocks contain a list of transactions and form the immutable
+/// chain that makes up the blockchain ledger.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct Block {
+    /// Sequential block number starting from 0 (genesis)
     pub index: u64,
+    /// Unix timestamp in seconds
     pub timestamp: u64,
+    /// Hash of the previous block
     pub prev_hash: [u8; 32],
+    /// Hash of this block (calculated from all fields)
     pub hash: [u8; 32],
+    /// Proof-of-work nonce (currently unused in PoA)
     pub nonce: u64,
+    /// List of transactions included in this block
     pub transactions: Vec<Transaction>,
-    pub metadata: Option<std::collections::BTreeMap<String, String>>, // Using BTreeMap for deterministic serialization
+    /// Optional metadata for extensibility (using BTreeMap for deterministic serialization)
+    pub metadata: Option<std::collections::BTreeMap<String, String>>,
 }
 
+/// A transaction in the blockchain.
+///
+/// Transactions represent state changes, including transfers, contract
+/// deployments, contract calls, and arbitrary data storage.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct Transaction {
+    /// Hash of the transaction (calculated from fields)
     pub hash: [u8; 32],
+    /// Public key of the transaction sender
     pub sender: PublicKey,
+    /// Sender's nonce to prevent replay attacks
     pub nonce: u64,
+    /// Unix timestamp in seconds
     pub timestamp: u64,
+    /// Recipient address (wallet or contract)
     pub recipient: Address,
+    /// Transaction payload (type-specific data)
     pub payload: TransactionPayload,
+    /// Ed25519 signature by the sender
     pub signature: TransactionSignature,
+    /// Maximum gas to consume (for contract execution)
     pub gas_limit: u64,
+    /// Transaction priority (higher = processed first)
     pub priority: u8,
+    /// Optional metadata for extensibility
     pub metadata: Option<std::collections::BTreeMap<String, String>>,
 }
 
@@ -197,22 +246,12 @@ impl From<ContractId> for Address {
     }
 }
 
-
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub enum TransactionPayload {
-    Transfer {
-        amount: u64,
-    },
-    ContractDeploy {
-        wasm_bytes: Vec<u8>,
-    },
-    ContractCall {
-        method: String,
-        args: Vec<u8>,
-    },
-    Data {
-        data: Vec<u8>,
-    },
+    Transfer { amount: u64 },
+    ContractDeploy { wasm_bytes: Vec<u8> },
+    ContractCall { method: String, args: Vec<u8> },
+    Data { data: Vec<u8> },
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -220,7 +259,7 @@ pub struct ChainState {
     pub latest_block_hash: [u8; 32],
     pub latest_block_index: u64,
     pub accounts_root_hash: [u8; 32], // Merkle root of the accounts/contract state tree
-    pub total_supply: u64, // (Optional) If BaaLS has a native token
+    pub total_supply: u64,            // (Optional) If BaaLS has a native token
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -230,7 +269,7 @@ pub enum Account {
         nonce: u64,
     },
     Contract {
-        code_hash: [u8; 32], // Hash of the deployed WASM module
+        code_hash: [u8; 32],         // Hash of the deployed WASM module
         storage_root_hash: [u8; 32], // Merkle root of the contract's internal key-value storage
         nonce: u64,
     },
@@ -243,7 +282,7 @@ impl Account {
             Account::Contract { nonce, .. } => *nonce,
         }
     }
-    
+
     pub fn set_nonce(&mut self, new_nonce: u64) {
         match self {
             Account::Wallet { nonce, .. } => *nonce = new_nonce,
@@ -253,6 +292,14 @@ impl Account {
 }
 
 impl Block {
+    /// Calculate the SHA-256 hash of the block.
+    ///
+    /// The hash is computed from all block fields (except the hash itself)
+    /// and serves as the block's unique identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CryptoError::HashConversionError` if serialization fails.
     pub fn calculate_hash(&self) -> Result<[u8; 32], CryptoError> {
         let mut hasher = Sha256::new();
         hasher.update(self.index.to_le_bytes());
@@ -261,14 +308,14 @@ impl Block {
         hasher.update(self.nonce.to_le_bytes());
 
         // Serialize transactions deterministically
-        let serialized_txns = bincode::serialize(&self.transactions)
-            .map_err(|_| CryptoError::HashConversionError)?;
+        let serialized_txns =
+            bincode::serialize(&self.transactions).map_err(|_| CryptoError::HashConversionError)?;
         hasher.update(serialized_txns);
 
         // Serialize metadata deterministically
         if let Some(metadata) = &self.metadata {
-            let serialized_metadata = bincode::serialize(metadata)
-                .map_err(|_| CryptoError::HashConversionError)?;
+            let serialized_metadata =
+                bincode::serialize(metadata).map_err(|_| CryptoError::HashConversionError)?;
             hasher.update(serialized_metadata);
         }
 
@@ -277,6 +324,14 @@ impl Block {
 }
 
 impl Transaction {
+    /// Calculate the SHA-256 hash of the transaction.
+    ///
+    /// The hash is computed from all transaction fields (except hash and signature)
+    /// and is used as the transaction identifier and signing target.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CryptoError::HashConversionError` if serialization fails.
     pub fn calculate_hash(&self) -> Result<[u8; 32], CryptoError> {
         let mut hasher = Sha256::new();
         hasher.update(self.sender.as_bytes());
@@ -284,25 +339,37 @@ impl Transaction {
         hasher.update(self.timestamp.to_le_bytes());
 
         // Serialize recipient deterministically
-        let serialized_recipient = bincode::serialize(&self.recipient)
-            .map_err(|_| CryptoError::HashConversionError)?;
+        let serialized_recipient =
+            bincode::serialize(&self.recipient).map_err(|_| CryptoError::HashConversionError)?;
         hasher.update(serialized_recipient);
 
         // Serialize payload deterministically
-        let serialized_payload = bincode::serialize(&self.payload)
-            .map_err(|_| CryptoError::HashConversionError)?;
+        let serialized_payload =
+            bincode::serialize(&self.payload).map_err(|_| CryptoError::HashConversionError)?;
         hasher.update(serialized_payload);
 
         // Serialize metadata deterministically
         if let Some(metadata) = &self.metadata {
-            let serialized_metadata = bincode::serialize(metadata)
-                .map_err(|_| CryptoError::HashConversionError)?;
+            let serialized_metadata =
+                bincode::serialize(metadata).map_err(|_| CryptoError::HashConversionError)?;
             hasher.update(serialized_metadata);
         }
-        
+
         Ok(hasher.finalize().into())
     }
 
+    /// Sign the transaction with a private key.
+    ///
+    /// This calculates the transaction hash and creates an ed25519 signature.
+    /// The signature and hash are stored in the transaction.
+    ///
+    /// # Arguments
+    ///
+    /// * `private_key` - The ed25519 signing key to use
+    ///
+    /// # Errors
+    ///
+    /// Returns `CryptoError::HashConversionError` if hash calculation fails.
     pub fn sign(&mut self, private_key: &SigningKey) -> Result<(), CryptoError> {
         self.hash = self.calculate_hash()?; // Calculate hash first
         let signature = private_key.sign(&self.hash);
@@ -310,6 +377,20 @@ impl Transaction {
         Ok(())
     }
 
+    /// Verify the transaction's signature.
+    ///
+    /// This checks that:
+    /// 1. The stored hash matches the calculated hash
+    /// 2. The signature is valid for the hash and sender's public key
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(true)` - Signature is valid
+    /// * `Ok(false)` - Signature is invalid or hash mismatch
+    ///
+    /// # Errors
+    ///
+    /// Returns `CryptoError::HashConversionError` if hash calculation fails.
     pub fn verify_signature(&self) -> Result<bool, CryptoError> {
         let public_key: PublicKey = self.sender; // Clone the public key
         let expected_hash = self.calculate_hash()?; // Recalculate hash for verification
@@ -325,13 +406,15 @@ impl Transaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::Keypair;
     use rand::rngs::OsRng;
 
     #[test]
     fn test_block_hash_calculation() {
-        let keypair = Keypair::generate(&mut OsRng);
-        let sender_pk = keypair.public;
+        let mut rng = OsRng;
+        let mut secret_bytes = [0u8; 32];
+        rand::Rng::fill(&mut rng, &mut secret_bytes);
+        let signing_key = SigningKey::from_bytes(&secret_bytes);
+        let sender_pk = PublicKey::from(signing_key.verifying_key());
 
         let tx1 = Transaction {
             hash: [0; 32],
@@ -339,7 +422,9 @@ mod tests {
             nonce: 1,
             timestamp: 1234567890,
             recipient: Address::Wallet(sender_pk),
-            payload: TransactionPayload::Data { data: vec![1, 2, 3] },
+            payload: TransactionPayload::Data {
+                data: vec![1, 2, 3],
+            },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
             gas_limit: 0,
             priority: 0,
@@ -351,7 +436,9 @@ mod tests {
             nonce: 2,
             timestamp: 1234567891,
             recipient: Address::Wallet(sender_pk),
-            payload: TransactionPayload::Data { data: vec![4, 5, 6] },
+            payload: TransactionPayload::Data {
+                data: vec![4, 5, 6],
+            },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
             gas_limit: 0,
             priority: 0,
@@ -383,10 +470,11 @@ mod tests {
 
     #[test]
     fn test_transaction_signing_and_verification() {
-        let mut csprng = OsRng;
-        let keypair = Keypair::generate(&mut csprng);
-        let public_key = keypair.public;
-        let private_key = keypair.signing_key;
+        let mut rng = OsRng;
+        let mut secret_bytes = [0u8; 32];
+        rand::Rng::fill(&mut rng, &mut secret_bytes);
+        let signing_key = SigningKey::from_bytes(&secret_bytes);
+        let public_key = PublicKey::from(signing_key.verifying_key());
 
         let mut tx = Transaction {
             hash: [0; 32],
@@ -394,7 +482,9 @@ mod tests {
             nonce: 1,
             timestamp: 1234567890,
             recipient: Address::Wallet(public_key),
-            payload: TransactionPayload::Data { data: vec![1, 2, 3] },
+            payload: TransactionPayload::Data {
+                data: vec![1, 2, 3],
+            },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
             gas_limit: 0,
             priority: 0,
@@ -405,7 +495,7 @@ mod tests {
         assert!(!tx.verify_signature().unwrap());
 
         // Sign the transaction
-        tx.sign(&private_key).unwrap();
+        tx.sign(&signing_key).unwrap();
         assert_ne!(tx.hash, [0; 32]); // Hash should be calculated
 
         // After signing, verification should pass
@@ -425,4 +515,4 @@ mod tests {
         tampered_sig_tx.signature = TransactionSignature::from_bytes(&[1; 64]).unwrap(); // Invalid signature
         assert!(!tampered_sig_tx.verify_signature().unwrap());
     }
-} 
+}

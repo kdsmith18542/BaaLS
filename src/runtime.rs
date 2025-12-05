@@ -1,18 +1,21 @@
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
-use rand::Rng;
-use rand::rngs::OsRng;
-use ed25519_dalek::SigningKey;
-use thiserror::Error;
+//! Main runtime orchestrator for BaaLS.
+//!
+//! The runtime module ties together all components of the blockchain system:
+//! storage, ledger, consensus, and sync. It manages the transaction mempool,
+//! block production, and provides the main API for interacting with the blockchain.
 
-use crate::types::{Block, ChainState, Transaction, Account, CryptoError, PublicKey, Address, ContractId};
-use crate::storage::{Storage, StorageError};
-use crate::ledger::{Ledger, LedgerError};
+use ed25519_dalek::SigningKey;
+use rand::rngs::OsRng;
+use rand::Rng;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use crate::consensus::{ConsensusEngine, ConsensusError};
 use crate::contracts::BaaLSContractEngine;
-use crate::sync::{SyncLayer, NoopSync};
-use hex;
+use crate::ledger::{Ledger, LedgerError};
+use crate::storage::{Storage, StorageError};
+use crate::sync::SyncLayer;
+use crate::types::{Account, Block, ChainState, ContractId, CryptoError, PublicKey, Transaction};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -36,27 +39,61 @@ pub enum RuntimeError {
     NotRunning,
 }
 
+/// The main runtime orchestrator for BaaLS blockchain.
+///
+/// The runtime connects storage, consensus, ledger, and sync components
+/// and provides the primary API for interacting with the blockchain.
+///
+/// # Type Parameters
+///
+/// * `S` - Storage backend implementation
+/// * `C` - Consensus engine implementation
+/// * `Y` - Sync layer implementation
 pub struct Runtime<S: Storage, C: ConsensusEngine, Y: SyncLayer> {
     storage: Arc<S>,
     ledger: Arc<Ledger<S, BaaLSContractEngine<S>>>,
     consensus: Arc<C>,
     mempool: Arc<Mutex<Vec<Transaction>>>,
     chain_state: Arc<Mutex<ChainState>>,
-    is_running: Arc<Mutex<bool>>,
+    _is_running: Arc<Mutex<bool>>,
     sync_layer: Arc<Y>,
     contract_engine_arc: Arc<BaaLSContractEngine<S>>,
 }
 
 impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static> Runtime<S, C, Y> {
-    pub fn new(storage: S, consensus: C, contract_engine: BaaLSContractEngine<S>, sync_layer: Y) -> Result<Self, RuntimeError> {
+    /// Create a new runtime instance.
+    ///
+    /// Initializes the blockchain (creating genesis if needed) and sets up all components.
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Storage backend for persistence
+    /// * `consensus` - Consensus engine for block validation
+    /// * `contract_engine` - Smart contract execution engine
+    /// * `sync_layer` - Network sync layer
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if chain initialization fails.
+    pub fn new(
+        storage: S,
+        consensus: C,
+        contract_engine: BaaLSContractEngine<S>,
+        sync_layer: Y,
+    ) -> Result<Self, RuntimeError> {
         let storage_arc = Arc::new(storage);
         let contract_engine_arc = Arc::new(contract_engine);
-        let ledger = Arc::new(Ledger::new(Arc::clone(&storage_arc), Arc::clone(&contract_engine_arc)));
+        let ledger = Arc::new(Ledger::new(
+            Arc::clone(&storage_arc),
+            Arc::clone(&contract_engine_arc),
+        ));
 
         // Initialize chain if not already initialized
         ledger.initialize_chain()?;
 
-        let initial_chain_state = storage_arc.get_chain_state()?.ok_or(RuntimeError::ChainInitializationError)?;
+        let initial_chain_state = storage_arc
+            .get_chain_state()?
+            .ok_or(RuntimeError::ChainInitializationError)?;
 
         Ok(Runtime {
             storage: storage_arc,
@@ -64,7 +101,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             consensus: Arc::new(consensus),
             mempool: Arc::new(Mutex::new(Vec::new())),
             chain_state: Arc::new(Mutex::new(initial_chain_state)),
-            is_running: Arc::new(Mutex::new(false)),
+            _is_running: Arc::new(Mutex::new(false)),
             sync_layer: Arc::new(sync_layer),
             contract_engine_arc,
         })
@@ -80,7 +117,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
     pub fn start(&self) -> Result<(), RuntimeError> {
         println!("BaaLS Runtime started");
-        
+
         // For now, just start the sync layer without async spawning
         // TODO: Implement proper async runtime management
         Ok(())
@@ -91,55 +128,122 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         Ok(())
     }
 
-    pub fn submit_transaction(&self, mut transaction: Transaction) -> Result<(), RuntimeError> {
+    /// Submit a transaction to the mempool.
+    ///
+    /// The transaction is validated (signature and nonce checks) before being
+    /// added to the mempool. Invalid transactions are rejected.
+    ///
+    /// # Arguments
+    ///
+    /// * `transaction` - The signed transaction to submit
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Transaction signature is invalid
+    /// - Nonce is incorrect
+    /// - Verification fails for any other reason
+    pub fn submit_transaction(&self, transaction: Transaction) -> Result<(), RuntimeError> {
         // Basic validation for MVP
         if !transaction.verify_signature()? {
-            return Err(RuntimeError::InvalidTransaction("Invalid transaction signature".to_string()));
+            return Err(RuntimeError::InvalidTransaction(
+                "Invalid transaction signature".to_string(),
+            ));
         }
 
         // Check sender account nonce from current chain state
-        let current_chain_state = self.chain_state.lock().unwrap();
+        let _current_chain_state = self.chain_state.lock().map_err(|_| {
+            RuntimeError::InvalidTransaction("Failed to acquire chain state lock".to_string())
+        })?;
         let sender_pk = transaction.sender;
-        let sender_account = self.storage.get_account(&sender_pk)?.unwrap_or_else(|| {
+        let sender_account = self.storage.get_account(&sender_pk)?.unwrap_or({
             // If account doesn't exist, allow it for now, Ledger will create it for transfers.
             // For production, stricter rules might apply, e.g., requiring initial balance.
-            Account::Wallet { balance: 0, nonce: 0 }
+            Account::Wallet {
+                balance: 0,
+                nonce: 0,
+            }
         });
 
         if transaction.nonce <= sender_account.nonce() {
-            return Err(RuntimeError::InvalidTransaction(format!("Invalid nonce: expected greater than {}, got {}", sender_account.nonce(), transaction.nonce)));
+            return Err(RuntimeError::InvalidTransaction(format!(
+                "Invalid nonce: expected greater than {}, got {}",
+                sender_account.nonce(),
+                transaction.nonce
+            )));
         }
         // For MVP, we're not handling out-of-order nonces in mempool explicitly.
         // This will be handled by ledger during block application.
 
         let hash = transaction.hash;
-        self.mempool.lock().unwrap().push(transaction);
+        self.mempool
+            .lock()
+            .map_err(|_| {
+                RuntimeError::InvalidTransaction("Failed to acquire mempool lock".to_string())
+            })?
+            .push(transaction);
         println!("Transaction submitted: {}", crate::types::format_hex(&hash));
         Ok(())
     }
 
+    /// Produce a new block from pending transactions.
+    ///
+    /// This method:
+    /// 1. Collects transactions from the mempool
+    /// 2. Uses the consensus engine to create a new block
+    /// 3. Validates and applies the block to the ledger
+    /// 4. Broadcasts the block to peers (if sync is enabled)
+    /// 5. Clears processed transactions from the mempool
+    ///
+    /// # Returns
+    ///
+    /// The newly created and applied block.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Mempool is empty
+    /// - Block generation fails
+    /// - Block validation fails
+    /// - Block application to ledger fails
     pub async fn produce_block(&self) -> Result<Block, RuntimeError> {
-        let mut mempool = self.mempool.lock().unwrap();
+        let mempool = self.mempool.lock().map_err(|_| {
+            RuntimeError::InvalidTransaction("Failed to acquire mempool lock".to_string())
+        })?;
         if mempool.is_empty() {
             return Err(ConsensusError::NoPendingTransactions.into());
         }
 
-        let current_chain_state = self.chain_state.lock().unwrap();
-        let prev_block = self.storage.get_block(&current_chain_state.latest_block_hash)?.ok_or(StorageError::NotFound)?;
+        let current_chain_state = self.chain_state.lock().map_err(|_| {
+            RuntimeError::InvalidTransaction("Failed to acquire chain state lock".to_string())
+        })?;
+        let prev_block = self
+            .storage
+            .get_block(&current_chain_state.latest_block_hash)?
+            .ok_or(StorageError::NotFound)?;
 
-        let new_block = self.consensus.generate_block(&mempool, &prev_block, &current_chain_state)?;
-        
+        let new_block =
+            self.consensus
+                .generate_block(&mempool, &prev_block, &current_chain_state)?;
+
         // Release mempool lock before acquiring chain_state lock to avoid deadlock if called from external thread
         drop(mempool);
 
-        let mut current_chain_state_mut = self.chain_state.lock().unwrap();
+        let mut current_chain_state_mut = self.chain_state.lock().map_err(|_| {
+            RuntimeError::InvalidTransaction("Failed to acquire chain state lock".to_string())
+        })?;
 
         // Validate and apply block to ledger
-        self.ledger.validate_block(&new_block, &current_chain_state_mut)?;
+        self.ledger
+            .validate_block(&new_block, &current_chain_state_mut)?;
         // Pass contract_engine to apply_block
-        self.ledger.apply_block(new_block.clone(), &mut current_chain_state_mut)?;
+        self.ledger
+            .apply_block(new_block.clone(), &mut current_chain_state_mut)?;
 
-        println!("Block produced and applied: {}", crate::types::format_hex(&new_block.hash));
+        println!(
+            "Block produced and applied: {}",
+            crate::types::format_hex(&new_block.hash)
+        );
 
         // Optionally broadcast the new block
         let sync_layer_clone = Arc::clone(&self.sync_layer);
@@ -149,20 +253,34 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                 eprintln!("Error discovering peers: {}", e);
                 Vec::new()
             });
-            if let Err(e) = sync_layer_clone.broadcast_block(&new_block_clone, &peers).await {
+            if let Err(e) = sync_layer_clone
+                .broadcast_block(&new_block_clone, &peers)
+                .await
+            {
                 eprintln!("Error broadcasting block: {}", e);
             }
         });
 
         // Clear included transactions from mempool (this would be more sophisticated in real impl)
         // For MVP, we clear all for simplicity after block generation.
-        self.mempool.lock().unwrap().clear();
+        self.mempool
+            .lock()
+            .map_err(|_| {
+                RuntimeError::InvalidTransaction("Failed to acquire mempool lock".to_string())
+            })?
+            .clear();
 
         Ok(new_block)
     }
 
     pub fn get_chain_state(&self) -> Result<ChainState, RuntimeError> {
-        Ok(self.chain_state.lock().unwrap().clone())
+        Ok(self
+            .chain_state
+            .lock()
+            .map_err(|_| {
+                RuntimeError::InvalidTransaction("Failed to acquire chain state lock".to_string())
+            })?
+            .clone())
     }
 
     pub fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>, RuntimeError> {
@@ -193,18 +311,28 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
     }
 
     pub fn get_block_by_height(&self, height: u64) -> Result<Option<Block>, RuntimeError> {
-        self.storage.get_block_by_height(height).map_err(RuntimeError::StorageError)
+        self.storage
+            .get_block_by_height(height)
+            .map_err(RuntimeError::StorageError)
     }
 
     pub fn get_account(&self, address: &PublicKey) -> Result<Option<Account>, RuntimeError> {
-        self.storage.get_account(address).map_err(RuntimeError::StorageError)
+        self.storage
+            .get_account(address)
+            .map_err(RuntimeError::StorageError)
     }
 
-    pub fn contract_storage_read(&self, contract_id: &ContractId, key: &[u8]) -> Result<Option<Vec<u8>>, RuntimeError> {
-        self.storage.contract_storage_read(contract_id, key).map_err(RuntimeError::StorageError)
+    pub fn contract_storage_read(
+        &self,
+        contract_id: &ContractId,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, RuntimeError> {
+        self.storage
+            .contract_storage_read(contract_id, key)
+            .map_err(RuntimeError::StorageError)
     }
 
     pub fn storage(&self) -> &S {
         &self.storage
     }
-} 
+}
