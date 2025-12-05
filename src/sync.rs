@@ -282,7 +282,7 @@ impl SyncLayer for CustomSync {
         };
         
         for peer in peers {
-            if let Ok(mut stream) = timeout(
+            if let Ok(stream) = timeout(
                 Duration::from_secs(2),
                 TcpStream::connect(peer.address)
             ).await {

@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use ed25519_dalek::{Signature, VerifyingKey, Verifier, SigningKey, SignatureError, Signer};
 use sha2::{Sha256, Digest};
-use sha2::digest::FixedOutput;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -325,13 +324,15 @@ impl Transaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::Keypair;
     use rand::rngs::OsRng;
 
     #[test]
     fn test_block_hash_calculation() {
-        let keypair = Keypair::generate(&mut OsRng);
-        let sender_pk = keypair.public;
+        let mut rng = OsRng;
+        let mut secret_bytes = [0u8; 32];
+        rand::Rng::fill(&mut rng, &mut secret_bytes);
+        let signing_key = SigningKey::from_bytes(&secret_bytes);
+        let sender_pk = PublicKey::from(signing_key.verifying_key());
 
         let tx1 = Transaction {
             hash: [0; 32],
@@ -383,10 +384,11 @@ mod tests {
 
     #[test]
     fn test_transaction_signing_and_verification() {
-        let mut csprng = OsRng;
-        let keypair = Keypair::generate(&mut csprng);
-        let public_key = keypair.public;
-        let private_key = keypair.signing_key;
+        let mut rng = OsRng;
+        let mut secret_bytes = [0u8; 32];
+        rand::Rng::fill(&mut rng, &mut secret_bytes);
+        let signing_key = SigningKey::from_bytes(&secret_bytes);
+        let public_key = PublicKey::from(signing_key.verifying_key());
 
         let mut tx = Transaction {
             hash: [0; 32],
@@ -405,7 +407,7 @@ mod tests {
         assert!(!tx.verify_signature().unwrap());
 
         // Sign the transaction
-        tx.sign(&private_key).unwrap();
+        tx.sign(&signing_key).unwrap();
         assert_ne!(tx.hash, [0; 32]); // Hash should be calculated
 
         // After signing, verification should pass

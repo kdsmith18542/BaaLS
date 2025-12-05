@@ -1,18 +1,15 @@
 use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use rand::Rng;
 use rand::rngs::OsRng;
 use ed25519_dalek::SigningKey;
-use thiserror::Error;
 
-use crate::types::{Block, ChainState, Transaction, Account, CryptoError, PublicKey, Address, ContractId};
+use crate::types::{Block, ChainState, Transaction, Account, CryptoError, PublicKey, ContractId};
 use crate::storage::{Storage, StorageError};
 use crate::ledger::{Ledger, LedgerError};
 use crate::consensus::{ConsensusEngine, ConsensusError};
 use crate::contracts::BaaLSContractEngine;
-use crate::sync::{SyncLayer, NoopSync};
-use hex;
+use crate::sync::SyncLayer;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -42,7 +39,7 @@ pub struct Runtime<S: Storage, C: ConsensusEngine, Y: SyncLayer> {
     consensus: Arc<C>,
     mempool: Arc<Mutex<Vec<Transaction>>>,
     chain_state: Arc<Mutex<ChainState>>,
-    is_running: Arc<Mutex<bool>>,
+    _is_running: Arc<Mutex<bool>>,
     sync_layer: Arc<Y>,
     contract_engine_arc: Arc<BaaLSContractEngine<S>>,
 }
@@ -64,7 +61,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             consensus: Arc::new(consensus),
             mempool: Arc::new(Mutex::new(Vec::new())),
             chain_state: Arc::new(Mutex::new(initial_chain_state)),
-            is_running: Arc::new(Mutex::new(false)),
+            _is_running: Arc::new(Mutex::new(false)),
             sync_layer: Arc::new(sync_layer),
             contract_engine_arc,
         })
@@ -91,14 +88,14 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         Ok(())
     }
 
-    pub fn submit_transaction(&self, mut transaction: Transaction) -> Result<(), RuntimeError> {
+    pub fn submit_transaction(&self, transaction: Transaction) -> Result<(), RuntimeError> {
         // Basic validation for MVP
         if !transaction.verify_signature()? {
             return Err(RuntimeError::InvalidTransaction("Invalid transaction signature".to_string()));
         }
 
         // Check sender account nonce from current chain state
-        let current_chain_state = self.chain_state.lock().unwrap();
+        let _current_chain_state = self.chain_state.lock().unwrap();
         let sender_pk = transaction.sender;
         let sender_account = self.storage.get_account(&sender_pk)?.unwrap_or_else(|| {
             // If account doesn't exist, allow it for now, Ledger will create it for transfers.
@@ -119,7 +116,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
     }
 
     pub async fn produce_block(&self) -> Result<Block, RuntimeError> {
-        let mut mempool = self.mempool.lock().unwrap();
+        let mempool = self.mempool.lock().unwrap();
         if mempool.is_empty() {
             return Err(ConsensusError::NoPendingTransactions.into());
         }

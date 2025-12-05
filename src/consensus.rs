@@ -1,8 +1,5 @@
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use ed25519_dalek::{Signature, Signer, Verifier, SigningKey};
-use std::collections::BTreeMap;
-use hex;
+use ed25519_dalek::{Signer, SigningKey};
 
 use crate::types::{Block, ChainState, Transaction, CryptoError, PublicKey};
 
@@ -36,18 +33,18 @@ pub trait ConsensusEngine: Send + Sync {
 
 pub struct PoAConsensus {
     authorized_signer_key: PublicKey,
-    block_time_interval_ms: u64,
+    _block_time_interval_ms: u64,
 }
 
 impl PoAConsensus {
     pub fn new(authorized_signer_key: PublicKey, block_time_interval_ms: u64) -> Self {
         Self {
             authorized_signer_key,
-            block_time_interval_ms,
+            _block_time_interval_ms: block_time_interval_ms,
         }
     }
 
-    pub fn validate_block(&self, block: &Block) -> Result<(), ConsensusError> {
+    pub fn validate_block(&self, _block: &Block) -> Result<(), ConsensusError> {
         // For PoA, we just check if the block is signed by an authorized signer
         // In a real implementation, you'd check the signature against the authorized key
         
@@ -62,7 +59,7 @@ impl PoAConsensus {
         }
 
         // Sign the block
-        let signature = private_key.sign(&block.hash);
+        let _signature = private_key.sign(&block.hash);
         // TODO: Add signature to block metadata or create a signed block type
         
         Ok(())

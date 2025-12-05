@@ -1,6 +1,5 @@
 use sled::{Db, Tree};
 use bincode;
-use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
 use hex;

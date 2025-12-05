@@ -1,11 +1,10 @@
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::types::{Block, Transaction, ChainState, Account, ContractId, CryptoError, TransactionPayload, PublicKey};
+use crate::types::{Block, ChainState, Account, CryptoError, TransactionPayload, PublicKey};
 use crate::storage::{Storage, StorageError, StorageBatch, StorageOperation};
-use crate::contracts::{ContractEngine, ContractError};
+use crate::contracts::ContractEngine;
 
 #[derive(Debug, Error)]
 pub enum LedgerError {

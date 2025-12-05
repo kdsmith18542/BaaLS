@@ -52,12 +52,12 @@ pub struct ContractExecutionResult {
 }
 
 pub struct BaaLSContractEngine<S: Storage> {
-    storage: S,
+    _storage: S,
 }
 
 impl<S: Storage> BaaLSContractEngine<S> {
     pub fn new(storage: S) -> Self {
-        Self { storage }
+        Self { _storage: storage }
     }
 }
 

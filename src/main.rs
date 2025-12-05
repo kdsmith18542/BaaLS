@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use baals::consensus::PoAConsensus;
 use baals::sync::NoopSync;
-use baals::types::{PublicKey, Address, ContractId, Transaction, TransactionPayload, format_hex, TransactionSignature};
+use baals::types::{PublicKey, Address, ContractId, Transaction, TransactionPayload, format_hex};
 use baals::storage::SledStorage;
 use baals::runtime::Runtime;
 use baals::contracts::{BaaLSContractEngine, ContractEngine};
@@ -157,9 +157,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Wallet { action } => {
             match action {
                 WalletCommands::Generate => {
-                    // Use a dummy key for PoAConsensus
-                    let test_key = PublicKey::from_bytes(&[1u8; 32])?;
-                    let consensus = PoAConsensus::new(test_key, 1000);
                     let signing_key = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key()?;
                     let public_key = PublicKey::from(signing_key.verifying_key());
                     println!("Generated new wallet:");
