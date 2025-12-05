@@ -4,10 +4,10 @@
 //! Contracts are compiled to WebAssembly and executed in a sandboxed environment
 //! for deterministic and secure execution.
 
-use serde::{Deserialize, Serialize};
-use crate::types::{ContractId, PublicKey};
 use crate::storage::Storage;
-use sha2::{Sha256, Digest};
+use crate::types::{ContractId, PublicKey};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -84,13 +84,15 @@ impl<S: Storage> ContractEngine for BaaLSContractEngine<S> {
         let contract_id = ContractId::from_bytes(&contract_id_bytes.into());
 
         // Store contract code
-        storage.put_contract_code(&contract_id, wasm_bytes)
+        storage
+            .put_contract_code(&contract_id, wasm_bytes)
             .map_err(ContractError::StorageError)?;
 
         // TODO: Execute init function if provided
         if let Some(payload) = init_payload {
             // For now, just store the init payload
-            storage.contract_storage_write(&contract_id, b"init_payload", payload)
+            storage
+                .contract_storage_write(&contract_id, b"init_payload", payload)
                 .map_err(ContractError::StorageError)?;
         }
 
@@ -126,4 +128,4 @@ impl WasmtimeRuntime {
     pub fn new() -> Result<Self, ContractError> {
         Ok(Self)
     }
-} 
+}

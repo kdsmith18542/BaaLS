@@ -4,9 +4,9 @@
 //! the BaaLS blockchain system, including blocks, transactions, accounts,
 //! and cryptographic types.
 
+use ed25519_dalek::{Signature, SignatureError, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use ed25519_dalek::{Signature, VerifyingKey, Verifier, SigningKey, SignatureError, Signer};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Errors that can occur during cryptographic operations.
@@ -39,11 +39,11 @@ impl PublicKey {
     pub fn to_bytes(&self) -> [u8; 32] {
         self.0.to_bytes()
     }
-    
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         self.0.as_bytes()
     }
-    
+
     pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), SignatureError> {
         self.0.verify(message, signature)
     }
@@ -90,7 +90,9 @@ pub struct TransactionSignature(ed25519_dalek::Signature);
 
 impl TransactionSignature {
     pub fn from_bytes(bytes: &[u8; 64]) -> Result<Self, CryptoError> {
-        Ok(TransactionSignature(ed25519_dalek::Signature::from_bytes(bytes)))
+        Ok(TransactionSignature(ed25519_dalek::Signature::from_bytes(
+            bytes,
+        )))
     }
 
     pub fn to_bytes(&self) -> [u8; 64] {
@@ -129,14 +131,16 @@ impl<'de> Deserialize<'de> for TransactionSignature {
         if bytes.len() != 64 {
             return Err(serde::de::Error::custom("Invalid signature length"));
         }
-        let bytes_array: [u8; 64] = bytes.try_into().map_err(|_| serde::de::Error::custom("Invalid signature length"))?;
+        let bytes_array: [u8; 64] = bytes
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("Invalid signature length"))?;
         TransactionSignature::from_bytes(&bytes_array).map_err(serde::de::Error::custom)
     }
 }
 
 impl PartialOrd for PublicKey {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.0.to_bytes().cmp(&other.0.to_bytes()))
+        Some(self.cmp(other))
     }
 }
 
@@ -242,22 +246,12 @@ impl From<ContractId> for Address {
     }
 }
 
-
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub enum TransactionPayload {
-    Transfer {
-        amount: u64,
-    },
-    ContractDeploy {
-        wasm_bytes: Vec<u8>,
-    },
-    ContractCall {
-        method: String,
-        args: Vec<u8>,
-    },
-    Data {
-        data: Vec<u8>,
-    },
+    Transfer { amount: u64 },
+    ContractDeploy { wasm_bytes: Vec<u8> },
+    ContractCall { method: String, args: Vec<u8> },
+    Data { data: Vec<u8> },
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -265,7 +259,7 @@ pub struct ChainState {
     pub latest_block_hash: [u8; 32],
     pub latest_block_index: u64,
     pub accounts_root_hash: [u8; 32], // Merkle root of the accounts/contract state tree
-    pub total_supply: u64, // (Optional) If BaaLS has a native token
+    pub total_supply: u64,            // (Optional) If BaaLS has a native token
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -275,7 +269,7 @@ pub enum Account {
         nonce: u64,
     },
     Contract {
-        code_hash: [u8; 32], // Hash of the deployed WASM module
+        code_hash: [u8; 32],         // Hash of the deployed WASM module
         storage_root_hash: [u8; 32], // Merkle root of the contract's internal key-value storage
         nonce: u64,
     },
@@ -288,7 +282,7 @@ impl Account {
             Account::Contract { nonce, .. } => *nonce,
         }
     }
-    
+
     pub fn set_nonce(&mut self, new_nonce: u64) {
         match self {
             Account::Wallet { nonce, .. } => *nonce = new_nonce,
@@ -314,14 +308,14 @@ impl Block {
         hasher.update(self.nonce.to_le_bytes());
 
         // Serialize transactions deterministically
-        let serialized_txns = bincode::serialize(&self.transactions)
-            .map_err(|_| CryptoError::HashConversionError)?;
+        let serialized_txns =
+            bincode::serialize(&self.transactions).map_err(|_| CryptoError::HashConversionError)?;
         hasher.update(serialized_txns);
 
         // Serialize metadata deterministically
         if let Some(metadata) = &self.metadata {
-            let serialized_metadata = bincode::serialize(metadata)
-                .map_err(|_| CryptoError::HashConversionError)?;
+            let serialized_metadata =
+                bincode::serialize(metadata).map_err(|_| CryptoError::HashConversionError)?;
             hasher.update(serialized_metadata);
         }
 
@@ -345,22 +339,22 @@ impl Transaction {
         hasher.update(self.timestamp.to_le_bytes());
 
         // Serialize recipient deterministically
-        let serialized_recipient = bincode::serialize(&self.recipient)
-            .map_err(|_| CryptoError::HashConversionError)?;
+        let serialized_recipient =
+            bincode::serialize(&self.recipient).map_err(|_| CryptoError::HashConversionError)?;
         hasher.update(serialized_recipient);
 
         // Serialize payload deterministically
-        let serialized_payload = bincode::serialize(&self.payload)
-            .map_err(|_| CryptoError::HashConversionError)?;
+        let serialized_payload =
+            bincode::serialize(&self.payload).map_err(|_| CryptoError::HashConversionError)?;
         hasher.update(serialized_payload);
 
         // Serialize metadata deterministically
         if let Some(metadata) = &self.metadata {
-            let serialized_metadata = bincode::serialize(metadata)
-                .map_err(|_| CryptoError::HashConversionError)?;
+            let serialized_metadata =
+                bincode::serialize(metadata).map_err(|_| CryptoError::HashConversionError)?;
             hasher.update(serialized_metadata);
         }
-        
+
         Ok(hasher.finalize().into())
     }
 
@@ -428,7 +422,9 @@ mod tests {
             nonce: 1,
             timestamp: 1234567890,
             recipient: Address::Wallet(sender_pk),
-            payload: TransactionPayload::Data { data: vec![1, 2, 3] },
+            payload: TransactionPayload::Data {
+                data: vec![1, 2, 3],
+            },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
             gas_limit: 0,
             priority: 0,
@@ -440,7 +436,9 @@ mod tests {
             nonce: 2,
             timestamp: 1234567891,
             recipient: Address::Wallet(sender_pk),
-            payload: TransactionPayload::Data { data: vec![4, 5, 6] },
+            payload: TransactionPayload::Data {
+                data: vec![4, 5, 6],
+            },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
             gas_limit: 0,
             priority: 0,
@@ -484,7 +482,9 @@ mod tests {
             nonce: 1,
             timestamp: 1234567890,
             recipient: Address::Wallet(public_key),
-            payload: TransactionPayload::Data { data: vec![1, 2, 3] },
+            payload: TransactionPayload::Data {
+                data: vec![1, 2, 3],
+            },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
             gas_limit: 0,
             priority: 0,
@@ -515,4 +515,4 @@ mod tests {
         tampered_sig_tx.signature = TransactionSignature::from_bytes(&[1; 64]).unwrap(); // Invalid signature
         assert!(!tampered_sig_tx.verify_signature().unwrap());
     }
-} 
+}

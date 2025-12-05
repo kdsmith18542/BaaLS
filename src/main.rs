@@ -3,11 +3,11 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use baals::consensus::PoAConsensus;
-use baals::sync::NoopSync;
-use baals::types::{PublicKey, Address, ContractId, Transaction, TransactionPayload, format_hex};
-use baals::storage::SledStorage;
-use baals::runtime::Runtime;
 use baals::contracts::{BaaLSContractEngine, ContractEngine};
+use baals::runtime::Runtime;
+use baals::storage::SledStorage;
+use baals::sync::NoopSync;
+use baals::types::{format_hex, Address, ContractId, PublicKey, Transaction, TransactionPayload};
 
 #[derive(Parser)]
 #[command(name = "baals")]
@@ -154,36 +154,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Wallet { action } => {
-            match action {
-                WalletCommands::Generate => {
-                    let signing_key = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key()?;
-                    let public_key = PublicKey::from(signing_key.verifying_key());
-                    println!("Generated new wallet:");
-                    println!("Public Key: {}", format_hex(&public_key.to_bytes()));
-                    println!("Private Key: {}", format_hex(&signing_key.to_bytes()));
-                }
-                WalletCommands::Info { key_file } => {
-                    let key_bytes = std::fs::read(key_file)?;
-                    let key_array: [u8; 32] = key_bytes.as_slice().try_into().map_err(|_| "Invalid key length")?;
-                    let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_array);
-                    let public_key = PublicKey::from(signing_key.verifying_key());
-                    println!("Wallet Info:");
-                    println!("Public Key: {}", format_hex(&public_key.to_bytes()));
-                }
+        Commands::Wallet { action } => match action {
+            WalletCommands::Generate => {
+                let signing_key =
+                    Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key()?;
+                let public_key = PublicKey::from(signing_key.verifying_key());
+                println!("Generated new wallet:");
+                println!("Public Key: {}", format_hex(&public_key.to_bytes()));
+                println!("Private Key: {}", format_hex(&signing_key.to_bytes()));
             }
-        }
+            WalletCommands::Info { key_file } => {
+                let key_bytes = std::fs::read(key_file)?;
+                let key_array: [u8; 32] = key_bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| "Invalid key length")?;
+                let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_array);
+                let public_key = PublicKey::from(signing_key.verifying_key());
+                println!("Wallet Info:");
+                println!("Public Key: {}", format_hex(&public_key.to_bytes()));
+            }
+        },
         Commands::Transaction { action } => {
             match action {
-                TransactionCommands::Transfer { key_file, to, amount } => {
+                TransactionCommands::Transfer {
+                    key_file,
+                    to,
+                    amount,
+                } => {
                     let key_bytes = std::fs::read(key_file)?;
-                    let key_array: [u8; 32] = key_bytes.as_slice().try_into().map_err(|_| "Invalid key length")?;
+                    let key_array: [u8; 32] = key_bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| "Invalid key length")?;
                     let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_array);
                     let public_key = PublicKey::from(signing_key.verifying_key());
                     let recipient_bytes = hex::decode(to)?;
-                    let recipient_array: [u8; 32] = recipient_bytes.as_slice().try_into().map_err(|_| "Invalid recipient length")?;
+                    let recipient_array: [u8; 32] = recipient_bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| "Invalid recipient length")?;
                     let recipient_key = PublicKey::from_bytes(&recipient_array)?;
-                    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                    let timestamp = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
                     let transaction = Transaction {
                         hash: [0u8; 32],
                         sender: public_key,
@@ -196,15 +211,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         priority: 0,
                         metadata: None,
                     };
-                    println!("Transfer transaction created: {}", format_hex(&transaction.hash));
+                    println!(
+                        "Transfer transaction created: {}",
+                        format_hex(&transaction.hash)
+                    );
                 }
                 TransactionCommands::Deploy { key_file, contract } => {
                     let key_bytes = std::fs::read(key_file)?;
-                    let key_array: [u8; 32] = key_bytes.as_slice().try_into().map_err(|_| "Invalid key length")?;
+                    let key_array: [u8; 32] = key_bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| "Invalid key length")?;
                     let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_array);
                     let public_key = PublicKey::from(signing_key.verifying_key());
                     let wasm_bytes = std::fs::read(contract)?;
-                    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                    let timestamp = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
                     let transaction = Transaction {
                         hash: [0u8; 32],
                         sender: public_key,
@@ -217,23 +241,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         priority: 0,
                         metadata: None,
                     };
-                    println!("Deploy transaction created: {}", format_hex(&transaction.hash));
+                    println!(
+                        "Deploy transaction created: {}",
+                        format_hex(&transaction.hash)
+                    );
                 }
-                TransactionCommands::Call { key_file, contract_id, method, args } => {
+                TransactionCommands::Call {
+                    key_file,
+                    contract_id,
+                    method,
+                    args,
+                } => {
                     let key_bytes = std::fs::read(key_file)?;
-                    let key_array: [u8; 32] = key_bytes.as_slice().try_into().map_err(|_| "Invalid key length")?;
+                    let key_array: [u8; 32] = key_bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| "Invalid key length")?;
                     let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_array);
                     let public_key = PublicKey::from(signing_key.verifying_key());
                     let contract_id_bytes = hex::decode(contract_id)?;
-                    let contract_id_array: [u8; 32] = contract_id_bytes.as_slice().try_into().map_err(|_| "Invalid contract_id length")?;
+                    let contract_id_array: [u8; 32] = contract_id_bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| "Invalid contract_id length")?;
                     let contract_id = ContractId::from_bytes(&contract_id_array);
                     let args_bytes = args.as_bytes().to_vec();
-                    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                    let timestamp = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
                     let transaction = Transaction {
                         hash: [0u8; 32],
                         sender: public_key,
                         recipient: Address::Contract(contract_id),
-                        payload: TransactionPayload::ContractCall { method: method.clone(), args: args_bytes },
+                        payload: TransactionPayload::ContractCall {
+                            method: method.clone(),
+                            args: args_bytes,
+                        },
                         nonce: 0, // TODO: Get from chain state
                         timestamp,
                         signature: ed25519_dalek::Signature::from_bytes(&[0u8; 64]).into(),
@@ -241,15 +285,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         priority: 0,
                         metadata: None,
                     };
-                    println!("Call transaction created: {}", format_hex(&transaction.hash));
+                    println!(
+                        "Call transaction created: {}",
+                        format_hex(&transaction.hash)
+                    );
                 }
                 TransactionCommands::Data { key_file, data } => {
                     let key_bytes = std::fs::read(key_file)?;
-                    let key_array: [u8; 32] = key_bytes.as_slice().try_into().map_err(|_| "Invalid key length")?;
+                    let key_array: [u8; 32] = key_bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| "Invalid key length")?;
                     let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_array);
                     let public_key = PublicKey::from(signing_key.verifying_key());
                     let data_bytes = hex::decode(data)?;
-                    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                    let timestamp = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
                     let transaction = Transaction {
                         hash: [0u8; 32],
                         sender: public_key,
@@ -262,7 +315,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         priority: 0,
                         metadata: None,
                     };
-                    println!("Data transaction created: {}", format_hex(&transaction.hash));
+                    println!(
+                        "Data transaction created: {}",
+                        format_hex(&transaction.hash)
+                    );
                 }
             }
         }
@@ -275,19 +331,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let sync_layer = NoopSync;
             let runtime = Runtime::new(storage, consensus, contract_engine, sync_layer)?;
             match action {
-                QueryCommands::Block { height } => {
-                    match runtime.get_block_by_height(*height)? {
-                        Some(block) => {
-                            println!("Block {}: {}", height, format_hex(&block.hash));
-                            println!("  Timestamp: {}", block.timestamp);
-                            println!("  Transactions: {}", block.transactions.len());
-                        }
-                        None => println!("Block not found"),
+                QueryCommands::Block { height } => match runtime.get_block_by_height(*height)? {
+                    Some(block) => {
+                        println!("Block {}: {}", height, format_hex(&block.hash));
+                        println!("  Timestamp: {}", block.timestamp);
+                        println!("  Transactions: {}", block.transactions.len());
                     }
-                }
+                    None => println!("Block not found"),
+                },
                 QueryCommands::Account { address } => {
                     let address_bytes = hex::decode(address)?;
-                    let address_array: [u8; 32] = address_bytes.as_slice().try_into().map_err(|_| "Invalid address length")?;
+                    let address_array: [u8; 32] = address_bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| "Invalid address length")?;
                     let public_key = PublicKey::from_bytes(&address_array)?;
                     match runtime.get_account(&public_key)? {
                         Some(account) => {
@@ -297,10 +354,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 baals::types::Account::Wallet { balance, nonce } => {
                                     println!("  Balance: {}", balance);
                                     println!("  Nonce: {}", nonce);
-                                },
-                                baals::types::Account::Contract { code_hash, storage_root_hash, nonce } => {
+                                }
+                                baals::types::Account::Contract {
+                                    code_hash,
+                                    storage_root_hash,
+                                    nonce,
+                                } => {
                                     println!("  Contract code hash: {}", format_hex(&code_hash));
-                                    println!("  Storage root hash: {}", format_hex(&storage_root_hash));
+                                    println!(
+                                        "  Storage root hash: {}",
+                                        format_hex(&storage_root_hash)
+                                    );
                                     println!("  Nonce: {}", nonce);
                                 }
                             }
@@ -310,7 +374,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 QueryCommands::Storage { contract_id, key } => {
                     let contract_id_bytes = hex::decode(contract_id)?;
-                    let contract_id_array: [u8; 32] = contract_id_bytes.as_slice().try_into().map_err(|_| "Invalid contract_id length")?;
+                    let contract_id_array: [u8; 32] = contract_id_bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| "Invalid contract_id length")?;
                     let contract_id = ContractId::from_bytes(&contract_id_array);
                     let key_bytes = hex::decode(key)?;
                     match runtime.contract_storage_read(&contract_id, &key_bytes)? {
@@ -320,13 +387,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         None => println!("Storage key not found"),
                     }
                 }
-                QueryCommands::Contract { contract_id, payload } => {
+                QueryCommands::Contract {
+                    contract_id,
+                    payload,
+                } => {
                     let contract_id_bytes = hex::decode(contract_id)?;
-                    let contract_id_array: [u8; 32] = contract_id_bytes.as_slice().try_into().map_err(|_| "Invalid contract_id length")?;
+                    let contract_id_array: [u8; 32] = contract_id_bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| "Invalid contract_id length")?;
                     let contract_id = ContractId::from_bytes(&contract_id_array);
                     let payload_bytes = hex::decode(payload)?;
-                    
-                    match runtime.contract_engine().query_contract(&contract_id, &payload_bytes, runtime.storage()) {
+
+                    match runtime.contract_engine().query_contract(
+                        &contract_id,
+                        &payload_bytes,
+                        runtime.storage(),
+                    ) {
                         Ok(result) => {
                             println!("Query result: {}", hex::encode(&result));
                         }
@@ -363,7 +440,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let chain_state = runtime.get_chain_state()?;
                     println!("Chain State:");
                     println!("  Height: {}", chain_state.latest_block_index);
-                    println!("  Latest Block: {}", format_hex(&chain_state.latest_block_hash));
+                    println!(
+                        "  Latest Block: {}",
+                        format_hex(&chain_state.latest_block_hash)
+                    );
                     println!("  Total Supply: {}", chain_state.total_supply);
                 }
             }
@@ -371,4 +451,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-} 
+}

@@ -15,10 +15,10 @@
 //! - [`contracts`]: WASM smart contract execution engine
 //! - [`sync`]: Optional peer-to-peer synchronization
 
-pub mod types;
-pub mod storage;
-pub mod ledger;
 pub mod consensus;
+pub mod contracts;
+pub mod ledger;
 pub mod runtime;
+pub mod storage;
 pub mod sync;
-pub mod contracts; 
+pub mod types;
