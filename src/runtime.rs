@@ -1,3 +1,9 @@
+//! Main runtime orchestrator for BaaLS.
+//!
+//! The runtime module ties together all components of the blockchain system:
+//! storage, ledger, consensus, and sync. It manages the transaction mempool,
+//! block production, and provides the main API for interacting with the blockchain.
+
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use rand::Rng;
@@ -33,6 +39,16 @@ pub enum RuntimeError {
     NotRunning,
 }
 
+/// The main runtime orchestrator for BaaLS blockchain.
+///
+/// The runtime connects storage, consensus, ledger, and sync components
+/// and provides the primary API for interacting with the blockchain.
+///
+/// # Type Parameters
+///
+/// * `S` - Storage backend implementation
+/// * `C` - Consensus engine implementation
+/// * `Y` - Sync layer implementation
 pub struct Runtime<S: Storage, C: ConsensusEngine, Y: SyncLayer> {
     storage: Arc<S>,
     ledger: Arc<Ledger<S, BaaLSContractEngine<S>>>,
@@ -45,6 +61,20 @@ pub struct Runtime<S: Storage, C: ConsensusEngine, Y: SyncLayer> {
 }
 
 impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static> Runtime<S, C, Y> {
+    /// Create a new runtime instance.
+    ///
+    /// Initializes the blockchain (creating genesis if needed) and sets up all components.
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Storage backend for persistence
+    /// * `consensus` - Consensus engine for block validation
+    /// * `contract_engine` - Smart contract execution engine
+    /// * `sync_layer` - Network sync layer
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if chain initialization fails.
     pub fn new(storage: S, consensus: C, contract_engine: BaaLSContractEngine<S>, sync_layer: Y) -> Result<Self, RuntimeError> {
         let storage_arc = Arc::new(storage);
         let contract_engine_arc = Arc::new(contract_engine);
@@ -88,6 +118,21 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         Ok(())
     }
 
+    /// Submit a transaction to the mempool.
+    ///
+    /// The transaction is validated (signature and nonce checks) before being
+    /// added to the mempool. Invalid transactions are rejected.
+    ///
+    /// # Arguments
+    ///
+    /// * `transaction` - The signed transaction to submit
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Transaction signature is invalid
+    /// - Nonce is incorrect
+    /// - Verification fails for any other reason
     pub fn submit_transaction(&self, transaction: Transaction) -> Result<(), RuntimeError> {
         // Basic validation for MVP
         if !transaction.verify_signature()? {
@@ -115,6 +160,26 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         Ok(())
     }
 
+    /// Produce a new block from pending transactions.
+    ///
+    /// This method:
+    /// 1. Collects transactions from the mempool
+    /// 2. Uses the consensus engine to create a new block
+    /// 3. Validates and applies the block to the ledger
+    /// 4. Broadcasts the block to peers (if sync is enabled)
+    /// 5. Clears processed transactions from the mempool
+    ///
+    /// # Returns
+    ///
+    /// The newly created and applied block.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Mempool is empty
+    /// - Block generation fails
+    /// - Block validation fails
+    /// - Block application to ledger fails
     pub async fn produce_block(&self) -> Result<Block, RuntimeError> {
         let mempool = self.mempool.lock().unwrap();
         if mempool.is_empty() {

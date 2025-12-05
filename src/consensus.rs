@@ -1,3 +1,9 @@
+//! Consensus engine implementation.
+//!
+//! This module defines the consensus mechanism for block generation and validation.
+//! Currently implements Proof-of-Authority (PoA) consensus, but designed to be
+//! pluggable for other consensus algorithms.
+
 use thiserror::Error;
 use ed25519_dalek::{Signer, SigningKey};
 

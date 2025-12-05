@@ -1,3 +1,9 @@
+//! Peer-to-peer synchronization layer.
+//!
+//! This module provides optional networking capabilities for synchronizing
+//! blockchain state between multiple BaaLS instances. It supports peer discovery,
+//! block broadcasting, and chain synchronization.
+
 use thiserror::Error;
 use async_trait::async_trait;
 use std::collections::HashMap;

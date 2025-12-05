@@ -1,3 +1,8 @@
+//! Persistent storage layer for BaaLS blockchain.
+//!
+//! This module provides an abstraction over the underlying storage engine (sled)
+//! for persisting blocks, transactions, accounts, and contract state.
+
 use sled::{Db, Tree};
 use bincode;
 use std::path::Path;
@@ -19,17 +24,38 @@ pub enum StorageError {
     CryptoError(#[from] CryptoError),
 }
 
+/// Storage abstraction for blockchain persistence.
+///
+/// This trait defines the interface for storing and retrieving blockchain data.
+/// Implementations must be thread-safe (Send + Sync).
 pub trait Storage: Send + Sync {
+    /// Store a block in the database.
     fn put_block(&self, block: &Block) -> Result<(), StorageError>;
+    
+    /// Retrieve a block by its hash.
     fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>, StorageError>;
+    
+    /// Get the latest block in the chain.
     fn get_latest_block(&self) -> Result<Option<Block>, StorageError>;
+    
+    /// Get the current chain height (latest block index).
     fn get_chain_height(&self) -> Result<u64, StorageError>;
+    
+    /// Retrieve a block by its height (index).
     fn get_block_by_height(&self, height: u64) -> Result<Option<Block>, StorageError>;
 
     // Transaction Management
+    
+    /// Store a transaction in the database.
     fn put_transaction(&self, tx: &Transaction) -> Result<(), StorageError>;
+    
+    /// Retrieve a transaction by its hash.
     fn get_transaction(&self, tx_hash: &[u8; 32]) -> Result<Option<Transaction>, StorageError>;
+    
+    /// Get all pending transactions from the mempool.
     fn get_pending_transactions(&self) -> Result<Vec<Transaction>, StorageError>;
+    
+    /// Remove a pending transaction from the mempool.
     fn remove_pending_transaction(&self, tx_hash: &[u8; 32]) -> Result<(), StorageError>;
 
     // New: Transaction indexing for fast lookup
@@ -38,8 +64,14 @@ pub trait Storage: Send + Sync {
     fn get_transactions_by_block(&self, block_hash: &[u8; 32]) -> Result<Vec<Transaction>, StorageError>;
 
     // Account State Management (used by Ledger)
+    
+    /// Store an account's state.
     fn put_account(&self, address: &PublicKey, account: &Account) -> Result<(), StorageError>;
+    
+    /// Retrieve an account's state.
     fn get_account(&self, address: &PublicKey) -> Result<Option<Account>, StorageError>;
+    
+    /// Delete an account from storage.
     fn delete_account(&self, address: &PublicKey) -> Result<(), StorageError>;
 
     // Global Chain State (used by Runtime/Ledger)

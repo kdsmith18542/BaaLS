@@ -1,3 +1,9 @@
+//! Smart contract execution engine.
+//!
+//! This module provides WASM-based smart contract execution capabilities.
+//! Contracts are compiled to WebAssembly and executed in a sandboxed environment
+//! for deterministic and secure execution.
+
 use serde::{Deserialize, Serialize};
 use crate::types::{ContractId, PublicKey};
 use crate::storage::Storage;

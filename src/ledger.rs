@@ -1,3 +1,9 @@
+//! Block validation and state transition logic.
+//!
+//! The ledger module is responsible for validating blocks, executing transactions,
+//! and maintaining the chain state. It ensures that all state transitions are
+//! valid and deterministic.
+
 use thiserror::Error;
 use std::collections::BTreeMap;
 use std::sync::Arc;

@@ -1,8 +1,15 @@
+//! Core type definitions for BaaLS blockchain.
+//!
+//! This module contains all the fundamental data structures used throughout
+//! the BaaLS blockchain system, including blocks, transactions, accounts,
+//! and cryptographic types.
+
 use serde::{Deserialize, Serialize};
 use ed25519_dalek::{Signature, VerifyingKey, Verifier, SigningKey, SignatureError, Signer};
 use sha2::{Sha256, Digest};
 use thiserror::Error;
 
+/// Errors that can occur during cryptographic operations.
 #[derive(Debug, Error)]
 pub enum CryptoError {
     #[error("Hash conversion error")]
@@ -15,7 +22,10 @@ pub enum CryptoError {
     InvalidSignature,
 }
 
-// Remove serde derive from PublicKey since VerifyingKey doesn't support it
+/// Wrapper around ed25519 public key for blockchain operations.
+///
+/// This type provides a safe and convenient interface for working with
+/// ed25519 public keys, including verification of signatures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PublicKey(VerifyingKey);
 
@@ -71,7 +81,10 @@ impl<'de> Deserialize<'de> for PublicKey {
     }
 }
 
-// Remove serde derive from Signature since ed25519_dalek::Signature doesn't support it
+/// Wrapper around ed25519 signature for transaction signing.
+///
+/// This type ensures that transaction signatures can be serialized and
+/// deserialized consistently across the system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransactionSignature(ed25519_dalek::Signature);
 
@@ -133,33 +146,66 @@ impl Ord for PublicKey {
     }
 }
 
-// Helper function for hex formatting
+/// Format a 32-byte hash as a hexadecimal string.
+///
+/// # Arguments
+///
+/// * `bytes` - The 32-byte hash to format
+///
+/// # Returns
+///
+/// A lowercase hexadecimal string representation
 pub fn format_hex(bytes: &[u8; 32]) -> String {
     hex::encode(bytes)
 }
 
+/// A block in the blockchain.
+///
+/// Blocks contain a list of transactions and form the immutable
+/// chain that makes up the blockchain ledger.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct Block {
+    /// Sequential block number starting from 0 (genesis)
     pub index: u64,
+    /// Unix timestamp in seconds
     pub timestamp: u64,
+    /// Hash of the previous block
     pub prev_hash: [u8; 32],
+    /// Hash of this block (calculated from all fields)
     pub hash: [u8; 32],
+    /// Proof-of-work nonce (currently unused in PoA)
     pub nonce: u64,
+    /// List of transactions included in this block
     pub transactions: Vec<Transaction>,
-    pub metadata: Option<std::collections::BTreeMap<String, String>>, // Using BTreeMap for deterministic serialization
+    /// Optional metadata for extensibility (using BTreeMap for deterministic serialization)
+    pub metadata: Option<std::collections::BTreeMap<String, String>>,
 }
 
+/// A transaction in the blockchain.
+///
+/// Transactions represent state changes, including transfers, contract
+/// deployments, contract calls, and arbitrary data storage.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct Transaction {
+    /// Hash of the transaction (calculated from fields)
     pub hash: [u8; 32],
+    /// Public key of the transaction sender
     pub sender: PublicKey,
+    /// Sender's nonce to prevent replay attacks
     pub nonce: u64,
+    /// Unix timestamp in seconds
     pub timestamp: u64,
+    /// Recipient address (wallet or contract)
     pub recipient: Address,
+    /// Transaction payload (type-specific data)
     pub payload: TransactionPayload,
+    /// Ed25519 signature by the sender
     pub signature: TransactionSignature,
+    /// Maximum gas to consume (for contract execution)
     pub gas_limit: u64,
+    /// Transaction priority (higher = processed first)
     pub priority: u8,
+    /// Optional metadata for extensibility
     pub metadata: Option<std::collections::BTreeMap<String, String>>,
 }
 
@@ -252,6 +298,14 @@ impl Account {
 }
 
 impl Block {
+    /// Calculate the SHA-256 hash of the block.
+    ///
+    /// The hash is computed from all block fields (except the hash itself)
+    /// and serves as the block's unique identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CryptoError::HashConversionError` if serialization fails.
     pub fn calculate_hash(&self) -> Result<[u8; 32], CryptoError> {
         let mut hasher = Sha256::new();
         hasher.update(self.index.to_le_bytes());
@@ -276,6 +330,14 @@ impl Block {
 }
 
 impl Transaction {
+    /// Calculate the SHA-256 hash of the transaction.
+    ///
+    /// The hash is computed from all transaction fields (except hash and signature)
+    /// and is used as the transaction identifier and signing target.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CryptoError::HashConversionError` if serialization fails.
     pub fn calculate_hash(&self) -> Result<[u8; 32], CryptoError> {
         let mut hasher = Sha256::new();
         hasher.update(self.sender.as_bytes());
@@ -302,6 +364,18 @@ impl Transaction {
         Ok(hasher.finalize().into())
     }
 
+    /// Sign the transaction with a private key.
+    ///
+    /// This calculates the transaction hash and creates an ed25519 signature.
+    /// The signature and hash are stored in the transaction.
+    ///
+    /// # Arguments
+    ///
+    /// * `private_key` - The ed25519 signing key to use
+    ///
+    /// # Errors
+    ///
+    /// Returns `CryptoError::HashConversionError` if hash calculation fails.
     pub fn sign(&mut self, private_key: &SigningKey) -> Result<(), CryptoError> {
         self.hash = self.calculate_hash()?; // Calculate hash first
         let signature = private_key.sign(&self.hash);
@@ -309,6 +383,20 @@ impl Transaction {
         Ok(())
     }
 
+    /// Verify the transaction's signature.
+    ///
+    /// This checks that:
+    /// 1. The stored hash matches the calculated hash
+    /// 2. The signature is valid for the hash and sender's public key
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(true)` - Signature is valid
+    /// * `Ok(false)` - Signature is invalid or hash mismatch
+    ///
+    /// # Errors
+    ///
+    /// Returns `CryptoError::HashConversionError` if hash calculation fails.
     pub fn verify_signature(&self) -> Result<bool, CryptoError> {
         let public_key: PublicKey = self.sender; // Clone the public key
         let expected_hash = self.calculate_hash()?; // Recalculate hash for verification
