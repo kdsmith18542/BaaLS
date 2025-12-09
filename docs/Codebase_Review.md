@@ -3,7 +3,7 @@
 Scope: read all documents in `docs/` (overview, runtime, consensus, ledger/state, storage, mempool, smart contracts, CLI/SDK) and reviewed the current Rust implementation under `src/`.
 
 Key gaps and risks
-- **Consensus stubs** (`src/consensus.rs`): `validate_block` is a no-op and `sign_block` drops the signature, so PoA authority is never enforced. Block timestamps are just `prev + 1`, ignoring wall-clock limits and the configured interval.
+- **Consensus stubs** (`src/consensus.rs`): `validate_block` is a no-op and `sign_block` drops the signature, so PoA authority is never enforced. Block timestamps are just `previous + 1`, ignoring wall-clock limits and the configured interval.
 - **Chain initialization/storage** (`src/ledger.rs` + `src/storage.rs`): `Ledger::initialize_chain` writes via `apply_batch`, but `SledStorage::apply_batch` applies to the default DB tree, while reads use dedicated trees (e.g., `chain_state_tree`). As a result, genesis/chain state are not retrievable through the normal getters, so `Runtime::new` can fail with `ChainInitializationError`.
 - **Transaction creation path** (`src/main.rs`): CLI commands build transactions with zeroed hashes, nonces, gas, and signatures; they never call `Transaction::sign` or submit to the runtime, so produced transactions are not valid or chain-aware.
 - **State transition issues** (`src/ledger.rs`): Contract deploy overwrites the sender account with a contract account instead of creating a separate contract entry; contract calls ignore execution results/errors; nonce handling assumes pre-existing accounts (runtime earlier defaults to creating a zero-balance account but ledger requires it to exist).
