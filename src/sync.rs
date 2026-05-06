@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
@@ -165,6 +166,175 @@ pub struct CustomSync {
     block_cache: Arc<Mutex<HashMap<[u8; 32], Block>>>,
     listen_addr: SocketAddr,
     is_running: Arc<Mutex<bool>>,
+    tls_config: Option<Arc<TlsConfig>>,
+}
+
+/// TLS configuration for P2P connections
+pub struct TlsConfig {
+    pub server_config: tokio_rustls::rustls::ServerConfig,
+    pub client_config: tokio_rustls::rustls::ClientConfig,
+}
+
+impl std::fmt::Debug for TlsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsConfig").finish_non_exhaustive()
+    }
+}
+
+impl Clone for TlsConfig {
+    fn clone(&self) -> Self {
+        TlsConfig {
+            server_config: self.server_config.clone(),
+            client_config: self.client_config.clone(),
+        }
+    }
+}
+
+impl TlsConfig {
+    /// Load TLS config from certificate and key files
+    pub fn load(
+        cert_path: &str,
+        key_path: &str,
+        _ca_cert_path: Option<&str>,
+    ) -> Result<Self, SyncError> {
+        use rustls_pemfile::{certs, pkcs8_private_keys};
+        use std::io::BufReader;
+
+        // Load server certificate chain
+        let cert_file = std::fs::File::open(cert_path)
+            .map_err(|e| SyncError::NetworkError(format!("Failed to open cert file: {}", e)))?;
+        let mut cert_reader = BufReader::new(cert_file);
+        let cert_chain: Vec<rustls::pki_types::CertificateDer> = certs(&mut cert_reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| SyncError::NetworkError(format!("Failed to parse cert: {}", e)))?;
+
+        // Load private key
+        let key_file = std::fs::File::open(key_path)
+            .map_err(|e| SyncError::NetworkError(format!("Failed to open key file: {}", e)))?;
+        let mut key_reader = BufReader::new(key_file);
+        let keys: Vec<rustls::pki_types::PrivateKeyDer> = pkcs8_private_keys(&mut key_reader)
+            .filter_map(|k| k.ok())
+            .map(|k| rustls::pki_types::PrivateKeyDer::Pkcs8(k))
+            .collect();
+        if keys.is_empty() {
+            return Err(SyncError::NetworkError(
+                "No private keys found in key file".to_string(),
+            ));
+        }
+
+        // Build server config
+        let server_config = tokio_rustls::rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(cert_chain.clone(), keys[0].clone_key())
+            .map_err(|e| SyncError::NetworkError(format!("Failed to build server TLS config: {}", e)))?;
+
+        // Build client config — accept all certs for P2P mode
+        let client_config = tokio_rustls::rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification::new()))
+            .with_no_client_auth();
+
+        Ok(TlsConfig {
+            server_config,
+            client_config,
+        })
+    }
+
+    /// Generate a self-signed TLS config for development
+    pub fn generate_self_signed() -> Result<Self, SyncError> {
+        use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
+
+        let mut params = CertificateParams::new(Vec::new())
+            .map_err(|e| SyncError::NetworkError(format!("rcgen error: {}", e)))?;
+        params.distinguished_name = DistinguishedName::new();
+        params.distinguished_name.push(DnType::CommonName, "baals-node");
+        params.distinguished_name.push(DnType::OrganizationName, "BaaLS");
+
+        let key_pair = KeyPair::generate().map_err(|e| {
+            SyncError::NetworkError(format!("Failed to generate key pair: {}", e))
+        })?;
+        let cert = params.self_signed(&key_pair).map_err(|e| {
+            SyncError::NetworkError(format!("Failed to generate self-signed cert: {}", e))
+        })?;
+
+        let cert_der = cert.der().clone();
+        let key_der = key_pair.serialize_der();
+
+        let server_config = tokio_rustls::rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert_der],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(key_der),
+                ),
+            )
+            .map_err(|e| SyncError::NetworkError(format!("Server TLS config: {}", e)))?;
+
+        let client_config = tokio_rustls::rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification::new()))
+            .with_no_client_auth();
+
+        Ok(TlsConfig {
+            server_config,
+            client_config,
+        })
+    }
+}
+
+/// No-op certificate verifier for P2P mode (accepts all certs)
+#[derive(Debug)]
+struct NoCertificateVerification(rustls::crypto::CryptoProvider);
+
+impl NoCertificateVerification {
+    fn new() -> Self {
+        Self(rustls::crypto::aws_lc_rs::default_provider())
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer,
+        _intermediates: &[rustls::pki_types::CertificateDer],
+        _server_name: &rustls::pki_types::ServerName,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
 }
 
 impl CustomSync {
@@ -175,7 +345,13 @@ impl CustomSync {
             block_cache: Arc::new(Mutex::new(HashMap::new())),
             listen_addr,
             is_running: Arc::new(Mutex::new(false)),
+            tls_config: None,
         }
+    }
+
+    pub fn with_tls(mut self, tls_config: TlsConfig) -> Self {
+        self.tls_config = Some(Arc::new(tls_config));
+        self
     }
 
     pub async fn cache_block(&self, block: Block) {
@@ -273,6 +449,10 @@ impl CustomSync {
 
         println!("P2P server listening on {}", self.listen_addr);
 
+        let tls_acceptor: Option<tokio_rustls::TlsAcceptor> = self.tls_config.as_ref().map(|tc| {
+            tokio_rustls::TlsAcceptor::from(Arc::new(tc.server_config.clone()))
+        });
+
         loop {
             let (socket, addr) = listener
                 .accept()
@@ -282,24 +462,43 @@ impl CustomSync {
             let peer_id = self.peer_id;
             let peers = Arc::clone(&self.known_peers);
             let block_cache = Arc::clone(&self.block_cache);
+            let tls_acceptor = tls_acceptor.clone();
 
             tokio::spawn(async move {
-                if let Err(e) =
-                    Self::handle_connection(socket, addr, peer_id, peers, block_cache).await
-                {
-                    eprintln!("Connection error: {}", e);
+                if let Some(acceptor) = tls_acceptor {
+                    match acceptor.accept(socket).await {
+                        Ok(tls_stream) => {
+                            if let Err(e) = Self::handle_connection(
+                                tls_stream, addr, peer_id, peers, block_cache,
+                            ).await {
+                                eprintln!("TLS connection error: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("TLS handshake error from {}: {}", addr, e);
+                        }
+                    }
+                } else {
+                    if let Err(e) = Self::handle_connection(
+                        socket, addr, peer_id, peers, block_cache,
+                    ).await {
+                        eprintln!("Connection error: {}", e);
+                    }
                 }
             });
         }
     }
 
-    async fn handle_connection(
-        mut socket: TcpStream,
+    async fn handle_connection<S>(
+        mut socket: S,
         addr: SocketAddr,
         peer_id: PublicKey,
         peers: Arc<Mutex<HashMap<PublicKey, SocketAddr>>>,
         block_cache: Arc<Mutex<HashMap<[u8; 32], Block>>>,
-    ) -> Result<(), SyncError> {
+    ) -> Result<(), SyncError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         // Expect inbound handshake from peer, then ack.
         let inbound = Self::receive_message(&mut socket).await?;
         match inbound {
@@ -407,25 +606,32 @@ impl CustomSync {
         Ok(())
     }
 
-    async fn send_message(
-        stream: &mut TcpStream,
-        message: NetworkMessage,
-    ) -> Result<(), SyncError> {
-        const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
+    async fn send_message<S>(stream: &mut S, message: NetworkMessage) -> Result<(), SyncError>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
         let serialized = bincode::serialize(&message)
             .map_err(|e| SyncError::SerializationError(e.to_string()))?;
-        if serialized.len() > MAX_MESSAGE_SIZE as usize {
+        if serialized.len() > MAX_MESSAGE_SIZE {
             return Err(SyncError::InvalidMessage);
         }
-        let frame = MessageFrame::new(message)?;
-        let bytes = frame.to_bytes()?;
-        tokio::io::AsyncWriteExt::write_all(stream, &bytes)
+        let frame = MessageFrame {
+            length: serialized.len() as u32,
+            message,
+        };
+        let frame_bytes = frame.to_bytes()?;
+        stream
+            .write_all(&frame_bytes)
             .await
             .map_err(|e| SyncError::NetworkError(e.to_string()))?;
         Ok(())
     }
 
-    async fn receive_message(stream: &mut TcpStream) -> Result<NetworkMessage, SyncError> {
+    async fn receive_message<S>(stream: &mut S) -> Result<NetworkMessage, SyncError>
+    where
+        S: AsyncRead + Unpin,
+    {
         let mut length_buffer = [0u8; 4];
         tokio::io::AsyncReadExt::read_exact(stream, &mut length_buffer)
             .await
@@ -448,7 +654,10 @@ impl CustomSync {
 
     // Send peer list to a peer
     #[allow(dead_code)]
-    async fn send_peer_list(&self, stream: &mut TcpStream) -> Result<(), SyncError> {
+    async fn send_peer_list<S>(&self, stream: &mut S) -> Result<(), SyncError>
+    where
+        S: AsyncWrite + Unpin + Send,
+    {
         let peers = self.known_peers.lock().await;
         let peer_list: Vec<(PublicKey, String)> = peers
             .iter()
@@ -471,11 +680,14 @@ impl CustomSync {
     }
 
     // Handle block request
-    async fn handle_block_request(
-        stream: &mut TcpStream,
+    async fn handle_block_request<S>(
+        stream: &mut S,
         message: NetworkMessage,
         block_cache: &Arc<Mutex<HashMap<[u8; 32], Block>>>,
-    ) -> Result<(), SyncError> {
+    ) -> Result<(), SyncError>
+    where
+        S: AsyncWrite + Unpin + Send,
+    {
         let hash = match message {
             NetworkMessage::RequestBlock { hash } => hash,
             _ => return Err(SyncError::InvalidMessage),

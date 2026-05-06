@@ -51,6 +51,14 @@ pub struct NetworkConfig {
     pub max_peers: u32,
     #[serde(default = "default_conn_timeout_ms")]
     pub connection_timeout_ms: u64,
+    #[serde(default)]
+    pub tls_enabled: bool,
+    #[serde(default)]
+    pub tls_cert_path: String,
+    #[serde(default)]
+    pub tls_key_path: String,
+    #[serde(default)]
+    pub tls_ca_cert_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -142,6 +150,10 @@ impl Default for Config {
             network: NetworkConfig {
                 max_peers: default_max_peers(),
                 connection_timeout_ms: default_conn_timeout_ms(),
+                tls_enabled: false,
+                tls_cert_path: String::new(),
+                tls_key_path: String::new(),
+                tls_ca_cert_path: String::new(),
             },
             logging: LoggingConfig {
                 level: default_log_level(),
