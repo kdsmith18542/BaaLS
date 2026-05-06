@@ -121,7 +121,7 @@ pub trait Storage: Send + Sync {
     // New: Performance and maintenance methods
     fn compact(&self) -> Result<(), StorageError>;
     fn get_storage_stats(&self) -> Result<StorageStats, StorageError>;
-    fn clear_mempool(&self) -> Result<(), StorageError>;
+    fn clear_pending_transactions(&self) -> Result<(), StorageError>;
 
     fn clone_storage(&self) -> Box<dyn Storage>;
 
@@ -873,7 +873,7 @@ impl Storage for SledStorage {
         Box::new(self.clone())
     }
 
-    fn clear_mempool(&self) -> Result<(), StorageError> {
+    fn clear_pending_transactions(&self) -> Result<(), StorageError> {
         for item in self.mempool_tree.scan_prefix("pending:") {
             let (_key, _value) = item?;
             self.mempool_tree.remove(_key)?;

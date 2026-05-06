@@ -49,13 +49,17 @@ pub struct Mempool {
 
 impl Mempool {
     pub fn new(size_limit: usize) -> Self {
+        Self::with_ttl(size_limit, 300)
+    }
+
+    pub fn with_ttl(size_limit: usize, ttl_seconds: u64) -> Self {
         Self {
             txs_by_hash: HashMap::new(),
             txs_by_sender: HashMap::new(),
             size_limit,
             total_bytes: 0,
-            ttl_seconds: 300,       // 5-minute default TTL
-            max_tx_per_sender: 100, // max pending txs per sender
+            ttl_seconds,
+            max_tx_per_sender: 100,
         }
     }
 
