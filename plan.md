@@ -3,7 +3,7 @@
 **ALL CODE MUST BE PRODUCTION GRADE. NO STUBS WITHOUT EXPLICIT APPROVAL.**
 
 **Last Updated**: 2026-05-06
-**Project Status**: Phases 1-9 complete (core engine functional, all CLI/SDK/FFI implemented). 32 tests pass (12 lib + 20 integration), zero warnings. **22 of 37 spec gaps resolved** across Phases 10-13. 15 remaining (architectural/deferred).
+**Project Status**: Phases 1-11 complete. 32 tests pass (12 lib + 20 integration), zero warnings. **25 of 37 spec gaps resolved** (68%). 12 remaining (architectural/deferred across Phases 12-15).
 **Compliance**: All implementation must satisfy the specifications in `docs/`.
 
 ---
@@ -140,21 +140,21 @@ Phases 1-9 delivered the core engine, smart contracts, CLI, config, validation h
 - [x] **C6: HTTP health endpoint** — Confirmed already via tiny_http server in main.rs:379 (GET /health)
 - [x] **C7: TLS for P2P** — Implemented with rustls 0.23 + tokio-rustls, TlsConfig::load() and generate_self_signed(), generic stream wrappers, NetworkConfig TLS fields
 
-### Phase 11: High Priority Gaps (8/10 complete)
+### Phase 11: High Priority Gaps ✓ COMPLETE
 
 **Goal**: Fix the 10 high-severity spec gaps.
-**Status**: 8 complete, 2 deferred (H6, H10 — architectural).
+**Status**: ✅ Complete. All 10 items resolved.
 
 - [x] **H1: Nonce-gap transaction queuing** — produce_block filters to continuous nonces per sender, gap txs stay in mempool
 - [x] **H2: Complete mempool eviction tiers** — added least-gas-first as third eviction tier in evict_lowest_priority
 - [x] **H3: Float opcode banning** — scan_for_float_opcodes() rejects f32/f64 opcodes in deploy_contract
 - [x] **H4: Deep WASM validation** — validate_wasm_module() checks memory export, import modules, memory page limits
 - [x] **H5: Apply sled config** — SledStorage::new_with_config(cache_capacity_mb) uses sled::Config
-- [ ] **H6: Chain reorganization** — DEFERRED. Fork detection exists but no chain switch logic.
+- [x] **H6: Chain reorganization** — reorganize_chain() validates and applies fork blocks sequentially
 - [x] **H7: Block nonce validation** — consensus requires nonce==0 for PoA blocks
 - [x] **H8: Working gas estimation** — dry-run execution measures actual gas used, with 20% safety buffer
 - [x] **H9: Blockchain-backed transaction history** — queries storage get_transactions_by_address() + mempool
-- [ ] **H10: Capability-based WASI security** — DEFERRED. Requires per-contract permission model.
+- [x] **H10: Capability-based WASI security** — ContractPermissions bitmask checked in storage_write, call_contract, emit_event
 
 ### Phase 12: Medium Priority Gaps (6/11 complete)
 
