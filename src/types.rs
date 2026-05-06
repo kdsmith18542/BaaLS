@@ -1,15 +1,9 @@
-//! Core type definitions for BaaLS blockchain.
-//!
-//! This module contains all the fundamental data structures used throughout
-//! the BaaLS blockchain system, including blocks, transactions, accounts,
-//! and cryptographic types.
-
 use ed25519_dalek::{Signature, SignatureError, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use thiserror::Error;
 
-/// Errors that can occur during cryptographic operations.
 #[derive(Debug, Error)]
 pub enum CryptoError {
     #[error("Hash conversion error")]
@@ -22,10 +16,191 @@ pub enum CryptoError {
     InvalidSignature,
 }
 
-/// Wrapper around ed25519 public key for blockchain operations.
-///
-/// This type provides a safe and convenient interface for working with
-/// ed25519 public keys, including verification of signatures.
+#[derive(Debug, Error)]
+pub enum MerkleError {
+    #[error("Invalid leaf index")]
+    InvalidLeafIndex,
+    #[error("Invalid proof")]
+    InvalidProof,
+    #[error("Empty tree")]
+    EmptyTree,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashAlgorithm {
+    Sha256,
+    Blake3,
+}
+
+pub fn hash_with_algorithm(data: &[u8], algorithm: HashAlgorithm) -> [u8; 32] {
+    match algorithm {
+        HashAlgorithm::Sha256 => {
+            let mut hasher = Sha256::new();
+            hasher.update(data);
+            hasher.finalize().into()
+        }
+        HashAlgorithm::Blake3 => {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(data);
+            hasher.finalize().into()
+        }
+    }
+}
+
+/// Simple Merkle Tree implementation for state verification
+pub struct MerkleTree {
+    leaves: Vec<[u8; 32]>,
+    root: RefCell<Option<[u8; 32]>>,
+    algorithm: HashAlgorithm,
+}
+
+impl MerkleTree {
+    pub fn new() -> Self {
+        Self {
+            leaves: Vec::new(),
+            root: RefCell::new(None),
+            algorithm: HashAlgorithm::Sha256,
+        }
+    }
+
+    pub fn with_algorithm(algorithm: HashAlgorithm) -> Self {
+        Self {
+            leaves: Vec::new(),
+            root: RefCell::new(None),
+            algorithm,
+        }
+    }
+
+    pub fn add_leaf(&mut self, data: &[u8]) {
+        let hash = self.hash_data(data);
+        self.leaves.push(hash);
+        *self.root.borrow_mut() = None; // Invalidate cached root
+    }
+
+    pub fn add_leaf_hash(&mut self, hash: [u8; 32]) {
+        self.leaves.push(hash);
+        *self.root.borrow_mut() = None; // Invalidate cached root
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.leaves.is_empty()
+    }
+
+    pub fn root(&self) -> Result<[u8; 32], MerkleError> {
+        if self.leaves.is_empty() {
+            return Err(MerkleError::EmptyTree);
+        }
+
+        if let Some(root) = *self.root.borrow() {
+            return Ok(root);
+        }
+
+        let mut current_level = self.leaves.clone();
+        let algo = self.algorithm;
+
+        while current_level.len() > 1 {
+            let mut next_level = Vec::new();
+
+            for chunk in current_level.chunks(2) {
+                let mut combined = Vec::from(chunk[0]);
+                if chunk.len() == 2 {
+                    combined.extend_from_slice(&chunk[1]);
+                } else {
+                    combined.extend_from_slice(&chunk[0]);
+                }
+                let hash = hash_with_algorithm(&combined, algo);
+                next_level.push(hash);
+            }
+
+            current_level = next_level;
+        }
+
+        *self.root.borrow_mut() = Some(current_level[0]);
+        Ok(current_level[0])
+    }
+
+    pub fn generate_proof(&self, leaf_index: usize) -> Result<Vec<[u8; 32]>, MerkleError> {
+        if leaf_index >= self.leaves.len() {
+            return Err(MerkleError::InvalidLeafIndex);
+        }
+
+        let mut proof = Vec::new();
+        let mut current_index = leaf_index;
+        let mut current_level = self.leaves.clone();
+        let algo = self.algorithm;
+
+        while current_level.len() > 1 {
+            let sibling_index = if current_index % 2 == 0 {
+                current_index + 1
+            } else {
+                current_index - 1
+            };
+
+            if sibling_index < current_level.len() {
+                proof.push(current_level[sibling_index]);
+            } else {
+                proof.push(current_level[current_index]);
+            }
+
+            current_index /= 2;
+            let mut next_level = Vec::new();
+
+            for chunk in current_level.chunks(2) {
+                let mut combined = Vec::from(chunk[0]);
+                if chunk.len() == 2 {
+                    combined.extend_from_slice(&chunk[1]);
+                } else {
+                    combined.extend_from_slice(&chunk[0]);
+                }
+                let hash = hash_with_algorithm(&combined, algo);
+                next_level.push(hash);
+            }
+
+            current_level = next_level;
+        }
+
+        Ok(proof)
+    }
+
+    pub fn verify_proof(
+        &self,
+        leaf_index: usize,
+        leaf_data: &[u8],
+        proof: &[[u8; 32]],
+        root: [u8; 32],
+    ) -> Result<bool, MerkleError> {
+        if leaf_index >= self.leaves.len() {
+            return Err(MerkleError::InvalidLeafIndex);
+        }
+
+        let leaf_hash = self.hash_data(leaf_data);
+        let mut current_hash = leaf_hash;
+        let mut current_index = leaf_index;
+        let algo = self.algorithm;
+
+        for proof_element in proof.iter() {
+            let combined: Vec<u8> = if current_index % 2 == 0 {
+                let mut c = Vec::from(current_hash);
+                c.extend_from_slice(proof_element);
+                c
+            } else {
+                let mut c = Vec::from(*proof_element);
+                c.extend_from_slice(&current_hash);
+                c
+            };
+            current_hash = hash_with_algorithm(&combined, algo);
+            current_index /= 2;
+        }
+
+        Ok(current_hash == root)
+    }
+
+    fn hash_data(&self, data: &[u8]) -> [u8; 32] {
+        hash_with_algorithm(data, self.algorithm)
+    }
+}
+
+// Remove serde derive from PublicKey since VerifyingKey doesn't support it
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PublicKey(VerifyingKey);
 
@@ -67,7 +242,7 @@ impl Serialize for PublicKey {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_bytes(&self.to_bytes())
+        self.to_bytes().as_slice().serialize(serializer)
     }
 }
 
@@ -76,15 +251,18 @@ impl<'de> Deserialize<'de> for PublicKey {
     where
         D: serde::Deserializer<'de>,
     {
-        let bytes = <[u8; 32]>::deserialize(deserializer)?;
-        PublicKey::from_bytes(&bytes).map_err(serde::de::Error::custom)
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        if bytes.len() != 32 {
+            return Err(serde::de::Error::custom("Invalid public key length"));
+        }
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("Invalid public key length"))?;
+        PublicKey::from_bytes(&arr).map_err(serde::de::Error::custom)
     }
 }
 
-/// Wrapper around ed25519 signature for transaction signing.
-///
-/// This type ensures that transaction signatures can be serialized and
-/// deserialized consistently across the system.
+// Remove serde derive from Signature since ed25519_dalek::Signature doesn't support it
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransactionSignature(ed25519_dalek::Signature);
 
@@ -112,13 +290,13 @@ impl From<TransactionSignature> for ed25519_dalek::Signature {
     }
 }
 
-// Manual serde implementation for TransactionSignature
+// serde: use Vec<u8> semantics (length prefix + bytes) for bincode compatibility
 impl Serialize for TransactionSignature {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        serializer.serialize_bytes(&self.to_bytes())
+        self.to_bytes().as_slice().serialize(serializer)
     }
 }
 
@@ -129,18 +307,20 @@ impl<'de> Deserialize<'de> for TransactionSignature {
     {
         let bytes = Vec::<u8>::deserialize(deserializer)?;
         if bytes.len() != 64 {
-            return Err(serde::de::Error::custom("Invalid signature length"));
+            return Err(serde::de::Error::custom(
+                "Invalid signature length: expected 64",
+            ));
         }
-        let bytes_array: [u8; 64] = bytes
+        let arr: [u8; 64] = bytes
             .try_into()
             .map_err(|_| serde::de::Error::custom("Invalid signature length"))?;
-        TransactionSignature::from_bytes(&bytes_array).map_err(serde::de::Error::custom)
+        TransactionSignature::from_bytes(&arr).map_err(serde::de::Error::custom)
     }
 }
 
 impl PartialOrd for PublicKey {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
+        Some(self.0.to_bytes().cmp(&other.0.to_bytes()))
     }
 }
 
@@ -150,67 +330,45 @@ impl Ord for PublicKey {
     }
 }
 
-/// Format a 32-byte hash as a hexadecimal string.
-///
-/// # Arguments
-///
-/// * `bytes` - The 32-byte hash to format
-///
-/// # Returns
-///
-/// A lowercase hexadecimal string representation
+// Helper function for hex formatting
 pub fn format_hex(bytes: &[u8; 32]) -> String {
     hex::encode(bytes)
 }
 
-/// A block in the blockchain.
-///
-/// Blocks contain a list of transactions and form the immutable
-/// chain that makes up the blockchain ledger.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct Block {
-    /// Sequential block number starting from 0 (genesis)
     pub index: u64,
-    /// Unix timestamp in seconds
     pub timestamp: u64,
-    /// Hash of the previous block
     pub prev_hash: [u8; 32],
-    /// Hash of this block (calculated from all fields)
     pub hash: [u8; 32],
-    /// Proof-of-work nonce (currently unused in PoA)
     pub nonce: u64,
-    /// List of transactions included in this block
     pub transactions: Vec<Transaction>,
-    /// Optional metadata for extensibility (using BTreeMap for deterministic serialization)
     pub metadata: Option<std::collections::BTreeMap<String, String>>,
 }
 
-/// A transaction in the blockchain.
-///
-/// Transactions represent state changes, including transfers, contract
-/// deployments, contract calls, and arbitrary data storage.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct Transaction {
-    /// Hash of the transaction (calculated from fields)
     pub hash: [u8; 32],
-    /// Public key of the transaction sender
     pub sender: PublicKey,
-    /// Sender's nonce to prevent replay attacks
     pub nonce: u64,
-    /// Unix timestamp in seconds
     pub timestamp: u64,
-    /// Recipient address (wallet or contract)
     pub recipient: Address,
-    /// Transaction payload (type-specific data)
     pub payload: TransactionPayload,
-    /// Ed25519 signature by the sender
     pub signature: TransactionSignature,
-    /// Maximum gas to consume (for contract execution)
     pub gas_limit: u64,
-    /// Transaction priority (higher = processed first)
     pub priority: u8,
-    /// Optional metadata for extensibility
     pub metadata: Option<std::collections::BTreeMap<String, String>>,
+}
+
+impl Transaction {
+    pub fn payload_size_estimate(&self) -> usize {
+        match &self.payload {
+            TransactionPayload::Transfer { .. } => 40,
+            TransactionPayload::ContractDeploy { wasm_bytes } => wasm_bytes.len() + 100,
+            TransactionPayload::ContractCall { method, args, .. } => method.len() + args.len() + 50,
+            TransactionPayload::Data { data } => data.len() + 10,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -219,7 +377,7 @@ pub enum Address {
     Contract(ContractId),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct ContractId {
     pub id: [u8; 32],
 }
@@ -246,11 +404,24 @@ impl From<ContractId> for Address {
     }
 }
 
+impl std::fmt::Display for Address {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Address::Wallet(pk) => write!(f, "Wallet({})", format_hex(&pk.to_bytes())),
+            Address::Contract(cid) => write!(f, "Contract({})", format_hex(&cid.id)),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub enum TransactionPayload {
     Transfer { amount: u64 },
     ContractDeploy { wasm_bytes: Vec<u8> },
-    ContractCall { method: String, args: Vec<u8> },
+    ContractCall {
+        method: String,
+        args: Vec<u8>,
+        value: Option<u64>,
+    },
     Data { data: Vec<u8> },
 }
 
@@ -292,14 +463,6 @@ impl Account {
 }
 
 impl Block {
-    /// Calculate the SHA-256 hash of the block.
-    ///
-    /// The hash is computed from all block fields (except the hash itself)
-    /// and serves as the block's unique identifier.
-    ///
-    /// # Errors
-    ///
-    /// Returns `CryptoError::HashConversionError` if serialization fails.
     pub fn calculate_hash(&self) -> Result<[u8; 32], CryptoError> {
         let mut hasher = Sha256::new();
         hasher.update(self.index.to_le_bytes());
@@ -312,31 +475,18 @@ impl Block {
             bincode::serialize(&self.transactions).map_err(|_| CryptoError::HashConversionError)?;
         hasher.update(serialized_txns);
 
-        // Serialize metadata deterministically
-        if let Some(metadata) = &self.metadata {
-            let serialized_metadata =
-                bincode::serialize(metadata).map_err(|_| CryptoError::HashConversionError)?;
-            hasher.update(serialized_metadata);
-        }
-
         Ok(hasher.finalize().into())
     }
 }
 
 impl Transaction {
-    /// Calculate the SHA-256 hash of the transaction.
-    ///
-    /// The hash is computed from all transaction fields (except hash and signature)
-    /// and is used as the transaction identifier and signing target.
-    ///
-    /// # Errors
-    ///
-    /// Returns `CryptoError::HashConversionError` if serialization fails.
     pub fn calculate_hash(&self) -> Result<[u8; 32], CryptoError> {
         let mut hasher = Sha256::new();
         hasher.update(self.sender.as_bytes());
         hasher.update(self.nonce.to_le_bytes());
         hasher.update(self.timestamp.to_le_bytes());
+        hasher.update(self.gas_limit.to_le_bytes());
+        hasher.update(self.priority.to_le_bytes());
 
         // Serialize recipient deterministically
         let serialized_recipient =
@@ -358,18 +508,6 @@ impl Transaction {
         Ok(hasher.finalize().into())
     }
 
-    /// Sign the transaction with a private key.
-    ///
-    /// This calculates the transaction hash and creates an ed25519 signature.
-    /// The signature and hash are stored in the transaction.
-    ///
-    /// # Arguments
-    ///
-    /// * `private_key` - The ed25519 signing key to use
-    ///
-    /// # Errors
-    ///
-    /// Returns `CryptoError::HashConversionError` if hash calculation fails.
     pub fn sign(&mut self, private_key: &SigningKey) -> Result<(), CryptoError> {
         self.hash = self.calculate_hash()?; // Calculate hash first
         let signature = private_key.sign(&self.hash);
@@ -377,20 +515,6 @@ impl Transaction {
         Ok(())
     }
 
-    /// Verify the transaction's signature.
-    ///
-    /// This checks that:
-    /// 1. The stored hash matches the calculated hash
-    /// 2. The signature is valid for the hash and sender's public key
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(true)` - Signature is valid
-    /// * `Ok(false)` - Signature is invalid or hash mismatch
-    ///
-    /// # Errors
-    ///
-    /// Returns `CryptoError::HashConversionError` if hash calculation fails.
     pub fn verify_signature(&self) -> Result<bool, CryptoError> {
         let public_key: PublicKey = self.sender; // Clone the public key
         let expected_hash = self.calculate_hash()?; // Recalculate hash for verification
@@ -407,13 +531,14 @@ impl Transaction {
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
+    use rand::RngCore;
 
     #[test]
     fn test_block_hash_calculation() {
         let mut rng = OsRng;
-        let mut secret_bytes = [0u8; 32];
-        rand::Rng::fill(&mut rng, &mut secret_bytes);
-        let signing_key = SigningKey::from_bytes(&secret_bytes);
+        let mut sk_bytes = [0u8; 32];
+        rng.fill_bytes(&mut sk_bytes);
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
         let sender_pk = PublicKey::from(signing_key.verifying_key());
 
         let tx1 = Transaction {
@@ -471,10 +596,11 @@ mod tests {
     #[test]
     fn test_transaction_signing_and_verification() {
         let mut rng = OsRng;
-        let mut secret_bytes = [0u8; 32];
-        rand::Rng::fill(&mut rng, &mut secret_bytes);
-        let signing_key = SigningKey::from_bytes(&secret_bytes);
+        let mut sk_bytes = [0u8; 32];
+        rng.fill_bytes(&mut sk_bytes);
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
         let public_key = PublicKey::from(signing_key.verifying_key());
+        let private_key = signing_key;
 
         let mut tx = Transaction {
             hash: [0; 32],
@@ -495,7 +621,7 @@ mod tests {
         assert!(!tx.verify_signature().unwrap());
 
         // Sign the transaction
-        tx.sign(&signing_key).unwrap();
+        tx.sign(&private_key).unwrap();
         assert_ne!(tx.hash, [0; 32]); // Hash should be calculated
 
         // After signing, verification should pass
@@ -514,5 +640,149 @@ mod tests {
         let mut tampered_sig_tx = tx.clone();
         tampered_sig_tx.signature = TransactionSignature::from_bytes(&[1; 64]).unwrap(); // Invalid signature
         assert!(!tampered_sig_tx.verify_signature().unwrap());
+    }
+
+    #[test]
+    fn test_merkle_tree_single_leaf() {
+        let mut tree = MerkleTree::new();
+        tree.add_leaf(b"hello");
+        let root = tree.root().unwrap();
+        let proof = tree.generate_proof(0).unwrap();
+        assert!(proof.is_empty());
+        assert!(tree.verify_proof(0, b"hello", &proof, root).unwrap());
+    }
+
+    #[test]
+    fn test_merkle_tree_two_leaves() {
+        let mut tree = MerkleTree::new();
+        tree.add_leaf(b"left");
+        tree.add_leaf(b"right");
+        let root = tree.root().unwrap();
+
+        // Verify left leaf (index 0)
+        let proof_left = tree.generate_proof(0).unwrap();
+        assert_eq!(proof_left.len(), 1);
+        assert!(tree.verify_proof(0, b"left", &proof_left, root).unwrap());
+
+        // Verify right leaf (index 1)
+        let proof_right = tree.generate_proof(1).unwrap();
+        assert_eq!(proof_right.len(), 1);
+        assert!(tree.verify_proof(1, b"right", &proof_right, root).unwrap());
+
+        // Wrong leaf data should fail
+        assert!(!tree.verify_proof(0, b"wrong", &proof_left, root).unwrap());
+    }
+
+    #[test]
+    fn test_merkle_tree_three_leaves() {
+        let mut tree = MerkleTree::new();
+        tree.add_leaf(b"a");
+        tree.add_leaf(b"b");
+        tree.add_leaf(b"c");
+        let root = tree.root().unwrap();
+
+        // Verify each leaf
+        for (i, data) in [b"a", b"b", b"c"].iter().enumerate() {
+            let proof = tree.generate_proof(i).unwrap();
+            assert!(tree.verify_proof(i, *data, &proof, root).unwrap());
+        }
+
+        // Wrong index should fail (proof for index 0 with index 1)
+        let proof_0 = tree.generate_proof(0).unwrap();
+        assert!(!tree.verify_proof(1, b"a", &proof_0, root).unwrap());
+
+        // With 3 leaves and duplication, tree height is 2
+        let proof_c = tree.generate_proof(2).unwrap();
+        assert_eq!(proof_c.len(), 2);
+        assert!(tree.verify_proof(2, b"c", &proof_c, root).unwrap());
+    }
+
+    #[test]
+    fn test_merkle_tree_four_leaves() {
+        let mut tree = MerkleTree::new();
+        tree.add_leaf(b"leaf0");
+        tree.add_leaf(b"leaf1");
+        tree.add_leaf(b"leaf2");
+        tree.add_leaf(b"leaf3");
+        let root = tree.root().unwrap();
+
+        // Verify each leaf
+        for i in 0..4 {
+            let data = format!("leaf{}", i);
+            let proof = tree.generate_proof(i).unwrap();
+            assert!(tree.verify_proof(i, data.as_bytes(), &proof, root).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_merkle_tree_tampered_proof_fails() {
+        let mut tree = MerkleTree::new();
+        tree.add_leaf(b"alpha");
+        tree.add_leaf(b"beta");
+        tree.add_leaf(b"gamma");
+        tree.add_leaf(b"delta");
+        let root = tree.root().unwrap();
+
+        let proof = tree.generate_proof(0).unwrap();
+        assert!(tree.verify_proof(0, b"alpha", &proof, root).unwrap());
+
+        // Tamper with a proof element
+        let mut tampered_proof = proof.clone();
+        tampered_proof[0] = [0xff; 32];
+        assert!(!tree
+            .verify_proof(0, b"alpha", &tampered_proof, root)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_merkle_tree_wrong_root_fails() {
+        let mut tree = MerkleTree::new();
+        tree.add_leaf(b"x");
+        tree.add_leaf(b"y");
+        let root = tree.root().unwrap();
+
+        let mut other_tree = MerkleTree::new();
+        other_tree.add_leaf(b"a");
+        other_tree.add_leaf(b"b");
+        let other_root = other_tree.root().unwrap();
+
+        let proof = tree.generate_proof(0).unwrap();
+        assert!(tree.verify_proof(0, b"x", &proof, root).unwrap());
+        assert!(!tree.verify_proof(0, b"x", &proof, other_root).unwrap());
+    }
+
+    #[test]
+    fn test_merkle_tree_invalid_leaf_index() {
+        let mut tree = MerkleTree::new();
+        tree.add_leaf(b"only");
+        assert!(matches!(
+            tree.generate_proof(1),
+            Err(MerkleError::InvalidLeafIndex)
+        ));
+        assert!(matches!(
+            tree.verify_proof(1, b"only", &[], [0; 32]),
+            Err(MerkleError::InvalidLeafIndex)
+        ));
+    }
+
+    #[test]
+    fn test_merkle_tree_empty() {
+        let mut tree = MerkleTree::new();
+        assert!(matches!(tree.root(), Err(MerkleError::EmptyTree)));
+    }
+
+    #[test]
+    fn test_merkle_tree_consistency() {
+        let mut tree = MerkleTree::new();
+        tree.add_leaf(b"data1");
+        tree.add_leaf(b"data2");
+        let root1 = tree.root().unwrap();
+        let root2 = tree.root().unwrap();
+        assert_eq!(root1, root2);
+
+        // Adding another leaf invalidates cached root
+        tree.add_leaf(b"data3");
+        let root3 = tree.root().unwrap();
+        assert_ne!(root1, root3);
     }
 }

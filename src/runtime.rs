@@ -1,18 +1,16 @@
-//! Main runtime orchestrator for BaaLS.
-//!
-//! The runtime module ties together all components of the blockchain system:
-//! storage, ledger, consensus, and sync. It manages the transaction mempool,
-//! block production, and provides the main API for interacting with the blockchain.
-
 use ed25519_dalek::SigningKey;
+use log::{debug, error, info};
 use rand::rngs::OsRng;
 use rand::Rng;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::consensus::{ConsensusEngine, ConsensusError};
 use crate::contracts::BaaLSContractEngine;
+use crate::contracts::ContractEngine;
 use crate::ledger::{Ledger, LedgerError};
+use crate::metrics::{time_operation_fn, MetricsCollector};
 use crate::storage::{Storage, StorageError};
 use crate::sync::SyncLayer;
 use crate::types::{Account, Block, ChainState, ContractId, CryptoError, PublicKey, Transaction};
@@ -39,48 +37,183 @@ pub enum RuntimeError {
     NotRunning,
 }
 
-/// The main runtime orchestrator for BaaLS blockchain.
-///
-/// The runtime connects storage, consensus, ledger, and sync components
-/// and provides the primary API for interacting with the blockchain.
-///
-/// # Type Parameters
-///
-/// * `S` - Storage backend implementation
-/// * `C` - Consensus engine implementation
-/// * `Y` - Sync layer implementation
-pub struct Runtime<S: Storage, C: ConsensusEngine, Y: SyncLayer> {
+#[derive(Debug, Clone)]
+pub struct Mempool {
+    pub txs_by_hash: HashMap<[u8; 32], Transaction>,
+    pub txs_by_sender: HashMap<PublicKey, BTreeMap<u64, [u8; 32]>>,
+    pub size_limit: usize,
+    pub total_bytes: usize,
+    pub ttl_seconds: u64,
+    pub max_tx_per_sender: usize,
+}
+
+impl Mempool {
+    pub fn new(size_limit: usize) -> Self {
+        Self {
+            txs_by_hash: HashMap::new(),
+            txs_by_sender: HashMap::new(),
+            size_limit,
+            total_bytes: 0,
+            ttl_seconds: 300,       // 5-minute default TTL
+            max_tx_per_sender: 100, // max pending txs per sender
+        }
+    }
+
+    pub fn insert(&mut self, tx: Transaction) -> Result<(), RuntimeError> {
+        if self.txs_by_hash.len() >= self.size_limit {
+            self.evict_lowest_priority()?;
+        }
+        if self.txs_by_hash.contains_key(&tx.hash) {
+            return Err(RuntimeError::InvalidTransaction(
+                "Duplicate transaction".to_string(),
+            ));
+        }
+        // Per-sender rate limiting
+        if let Some(map) = self.txs_by_sender.get(&tx.sender) {
+            if map.len() >= self.max_tx_per_sender {
+                return Err(RuntimeError::InvalidTransaction(format!(
+                    "Too many pending transactions from sender: {}",
+                    self.max_tx_per_sender
+                )));
+            }
+        }
+        let tx_size = std::mem::size_of_val(&tx);
+        self.total_bytes += tx_size;
+        let sender = tx.sender;
+        let nonce = tx.nonce;
+        self.txs_by_sender
+            .entry(sender)
+            .or_default()
+            .insert(nonce, tx.hash);
+        self.txs_by_hash.insert(tx.hash, tx);
+        Ok(())
+    }
+
+    pub fn remove(&mut self, hash: &[u8; 32]) {
+        if let Some(tx) = self.txs_by_hash.remove(hash) {
+            let tx_size = std::mem::size_of_val(&tx);
+            self.total_bytes = self.total_bytes.saturating_sub(tx_size);
+            if let Some(map) = self.txs_by_sender.get_mut(&tx.sender) {
+                map.remove(&tx.nonce);
+                if map.is_empty() {
+                    self.txs_by_sender.remove(&tx.sender);
+                }
+            }
+        }
+    }
+
+    pub fn get(&self, hash: &[u8; 32]) -> Option<&Transaction> {
+        self.txs_by_hash.get(hash)
+    }
+
+    pub fn all(&self) -> Vec<&Transaction> {
+        self.txs_by_hash.values().collect()
+    }
+
+    pub fn sorted_by_priority(&self) -> Vec<&Transaction> {
+        let mut txs: Vec<&Transaction> = self.txs_by_hash.values().collect();
+        txs.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| a.timestamp.cmp(&b.timestamp))
+        });
+        txs
+    }
+
+    pub fn evict_expired(&mut self) -> usize {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expired_hashes: Vec<[u8; 32]> = self
+            .txs_by_hash
+            .iter()
+            .filter(|(_, tx)| now.saturating_sub(tx.timestamp) > self.ttl_seconds)
+            .map(|(h, _)| *h)
+            .collect();
+        let count = expired_hashes.len();
+        for h in &expired_hashes {
+            self.remove(h);
+        }
+        count
+    }
+
+    fn evict_lowest_priority(&mut self) -> Result<(), RuntimeError> {
+        if self.txs_by_hash.is_empty() {
+            return Err(RuntimeError::InvalidTransaction("Mempool full".to_string()));
+        }
+        let best: Option<[u8; 32]> = self
+            .txs_by_hash
+            .values()
+            .min_by(|a, b| {
+                a.priority
+                    .cmp(&b.priority)
+                    .then_with(|| b.timestamp.cmp(&a.timestamp))
+            })
+            .map(|tx| tx.hash);
+        if let Some(hash) = best {
+            self.remove(&hash);
+        }
+        if self.txs_by_hash.len() >= self.size_limit {
+            return Err(RuntimeError::InvalidTransaction("Mempool full".to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn clear(&mut self) {
+        self.txs_by_hash.clear();
+        self.txs_by_sender.clear();
+        self.total_bytes = 0;
+    }
+
+    pub fn len(&self) -> usize {
+        self.txs_by_hash.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.txs_by_hash.is_empty()
+    }
+
+    pub fn memory_usage(&self) -> usize {
+        self.total_bytes
+    }
+}
+
+pub struct Runtime<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> {
     storage: Arc<S>,
     ledger: Arc<Ledger<S, BaaLSContractEngine<S>>>,
     consensus: Arc<C>,
-    mempool: Arc<Mutex<Vec<Transaction>>>,
+    mempool: Arc<Mutex<Mempool>>,
     chain_state: Arc<Mutex<ChainState>>,
-    _is_running: Arc<Mutex<bool>>,
+    #[allow(dead_code)]
+    is_running: Arc<Mutex<bool>>,
     sync_layer: Arc<Y>,
     contract_engine_arc: Arc<BaaLSContractEngine<S>>,
+    mempool_size_limit: usize,
+    metrics: Arc<MetricsCollector>,
+    started_at: Arc<Mutex<Option<SystemTime>>>,
 }
 
 impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static> Runtime<S, C, Y> {
-    /// Create a new runtime instance.
-    ///
-    /// Initializes the blockchain (creating genesis if needed) and sets up all components.
-    ///
-    /// # Arguments
-    ///
-    /// * `storage` - Storage backend for persistence
-    /// * `consensus` - Consensus engine for block validation
-    /// * `contract_engine` - Smart contract execution engine
-    /// * `sync_layer` - Network sync layer
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if chain initialization fails.
     pub fn new(
         storage: S,
         consensus: C,
         contract_engine: BaaLSContractEngine<S>,
         sync_layer: Y,
     ) -> Result<Self, RuntimeError> {
+        debug!("Runtime::new called");
+        Self::with_mempool_limit(storage, consensus, contract_engine, sync_layer, 10000)
+        // Default limit: 10,000 transactions
+    }
+
+    pub fn with_mempool_limit(
+        storage: S,
+        consensus: C,
+        contract_engine: BaaLSContractEngine<S>,
+        sync_layer: Y,
+        mempool_size_limit: usize,
+    ) -> Result<Self, RuntimeError> {
+        debug!("Runtime::with_mempool_limit called");
         let storage_arc = Arc::new(storage);
         let contract_engine_arc = Arc::new(contract_engine);
         let ledger = Arc::new(Ledger::new(
@@ -91,19 +224,26 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         // Initialize chain if not already initialized
         ledger.initialize_chain()?;
 
-        let initial_chain_state = storage_arc
-            .get_chain_state()?
-            .ok_or(RuntimeError::ChainInitializationError)?;
+        let initial_chain_state = storage_arc.get_chain_state()?;
+        debug!(
+            "Initial chain state loaded: {}",
+            initial_chain_state.is_some()
+        );
+        let initial_chain_state =
+            initial_chain_state.ok_or(RuntimeError::ChainInitializationError)?;
 
         Ok(Runtime {
             storage: storage_arc,
             ledger,
             consensus: Arc::new(consensus),
-            mempool: Arc::new(Mutex::new(Vec::new())),
+            mempool: Arc::new(Mutex::new(Mempool::new(mempool_size_limit))),
             chain_state: Arc::new(Mutex::new(initial_chain_state)),
-            _is_running: Arc::new(Mutex::new(false)),
+            is_running: Arc::new(Mutex::new(false)),
             sync_layer: Arc::new(sync_layer),
             contract_engine_arc,
+            mempool_size_limit,
+            metrics: Arc::new(MetricsCollector::new()),
+            started_at: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -116,171 +256,296 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
     }
 
     pub fn start(&self) -> Result<(), RuntimeError> {
-        println!("BaaLS Runtime started");
+        let mut is_running = self.is_running.lock().unwrap();
+        if *is_running {
+            return Err(RuntimeError::AlreadyRunning);
+        }
+        *is_running = true;
+        drop(is_running);
 
-        // For now, just start the sync layer without async spawning
-        // TODO: Implement proper async runtime management
+        *self.started_at.lock().unwrap() = Some(SystemTime::now());
+        info!("BaaLS Runtime started");
         Ok(())
     }
 
     pub fn stop(&self) -> Result<(), RuntimeError> {
-        println!("BaaLS Runtime stopped");
+        let mut is_running = self.is_running.lock().unwrap();
+        if !*is_running {
+            return Err(RuntimeError::NotRunning);
+        }
+        *is_running = false;
+        drop(is_running);
+
+        *self.started_at.lock().unwrap() = None;
+        info!("BaaLS Runtime stopped");
         Ok(())
     }
 
-    /// Submit a transaction to the mempool.
-    ///
-    /// The transaction is validated (signature and nonce checks) before being
-    /// added to the mempool. Invalid transactions are rejected.
-    ///
-    /// # Arguments
-    ///
-    /// * `transaction` - The signed transaction to submit
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Transaction signature is invalid
-    /// - Nonce is incorrect
-    /// - Verification fails for any other reason
     pub fn submit_transaction(&self, transaction: Transaction) -> Result<(), RuntimeError> {
-        // Basic validation for MVP
-        if !transaction.verify_signature()? {
-            return Err(RuntimeError::InvalidTransaction(
-                "Invalid transaction signature".to_string(),
-            ));
-        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
-        // Check sender account nonce from current chain state
-        let _current_chain_state = self.chain_state.lock().map_err(|_| {
-            RuntimeError::InvalidTransaction("Failed to acquire chain state lock".to_string())
-        })?;
-        let sender_pk = transaction.sender;
-        let sender_account = self.storage.get_account(&sender_pk)?.unwrap_or({
-            // If account doesn't exist, allow it for now, Ledger will create it for transfers.
-            // For production, stricter rules might apply, e.g., requiring initial balance.
-            Account::Wallet {
-                balance: 0,
-                nonce: 0,
-            }
-        });
+        let validation_result = time_operation_fn(
+            &self.metrics,
+            || {
+                // 1. Signature verification
+                if !transaction.verify_signature()? {
+                    return Err(RuntimeError::InvalidTransaction(
+                        "Invalid transaction signature".to_string(),
+                    ));
+                }
 
-        if transaction.nonce <= sender_account.nonce() {
-            return Err(RuntimeError::InvalidTransaction(format!(
-                "Invalid nonce: expected greater than {}, got {}",
-                sender_account.nonce(),
-                transaction.nonce
-            )));
-        }
-        // For MVP, we're not handling out-of-order nonces in mempool explicitly.
-        // This will be handled by ledger during block application.
+                // 2. Timestamp validation: must be within [-60s, +300s] of current time
+                if transaction.timestamp < now.saturating_sub(60) {
+                    return Err(RuntimeError::InvalidTransaction(
+                        "Transaction expired".to_string(),
+                    ));
+                }
+                if transaction.timestamp > now + 300 {
+                    return Err(RuntimeError::InvalidTransaction(
+                        "Transaction timestamp too far in the future".to_string(),
+                    ));
+                }
+
+                // 3. Gas limit bounds checking
+                if transaction.gas_limit < 21_000 {
+                    return Err(RuntimeError::InvalidTransaction(
+                        "Gas limit too low (minimum 21,000)".to_string(),
+                    ));
+                }
+                if transaction.gas_limit > 10_000_000 {
+                    return Err(RuntimeError::InvalidTransaction(
+                        "Gas limit too high (maximum 10,000,000)".to_string(),
+                    ));
+                }
+
+                // 4. Payload format validation
+                match &transaction.payload {
+                    crate::types::TransactionPayload::Transfer { amount } => {
+                        if *amount == 0 {
+                            return Err(RuntimeError::InvalidTransaction(
+                                "Transfer amount must be > 0".to_string(),
+                            ));
+                        }
+                    }
+                    crate::types::TransactionPayload::ContractDeploy { wasm_bytes } => {
+                        if wasm_bytes.len() < 8 {
+                            return Err(RuntimeError::InvalidTransaction(
+                                "WASM bytecode too short".to_string(),
+                            ));
+                        }
+                        // Validate WASM magic bytes
+                        if wasm_bytes[0..4] != [0x00, 0x61, 0x73, 0x6d] {
+                            return Err(RuntimeError::InvalidTransaction(
+                                "Invalid WASM magic bytes".to_string(),
+                            ));
+                        }
+                    }
+                    crate::types::TransactionPayload::ContractCall { method, args: _, value: _ } => {
+                        if method.is_empty() {
+                            return Err(RuntimeError::InvalidTransaction(
+                                "Method name cannot be empty".to_string(),
+                            ));
+                        }
+                        if method.len() > 256 {
+                            return Err(RuntimeError::InvalidTransaction(
+                                "Method name too long".to_string(),
+                            ));
+                        }
+                    }
+                    crate::types::TransactionPayload::Data { data } => {
+                        if data.len() > 1024 * 1024 {
+                            // 1MB max
+                            return Err(RuntimeError::InvalidTransaction(
+                                "Data payload too large (max 1MB)".to_string(),
+                            ));
+                        }
+                    }
+                }
+
+                // 5. Nonce validation against chain state + mempool
+                let sender_pk = transaction.sender;
+                let sender_account =
+                    self.storage
+                        .get_account(&sender_pk)?
+                        .unwrap_or_else(|| Account::Wallet {
+                            balance: 0,
+                            nonce: 0,
+                        });
+
+                let mempool = self.mempool.lock().unwrap();
+                let highest_mempool_nonce = mempool
+                    .txs_by_sender
+                    .get(&sender_pk)
+                    .and_then(|map| map.keys().max().cloned())
+                    .unwrap_or(sender_account.nonce());
+                drop(mempool);
+
+                let expected_nonce = highest_mempool_nonce + 1;
+                if transaction.nonce < expected_nonce {
+                    return Err(RuntimeError::InvalidTransaction(format!(
+                        "Invalid nonce: expected at least {}, got {}",
+                        expected_nonce,
+                        transaction.nonce
+                    )));
+                }
+                Ok(())
+            },
+            MetricsCollector::record_transaction_validation,
+        );
+        validation_result?;
 
         let hash = transaction.hash;
-        self.mempool
-            .lock()
-            .map_err(|_| {
-                RuntimeError::InvalidTransaction("Failed to acquire mempool lock".to_string())
-            })?
-            .push(transaction);
-        println!("Transaction submitted: {}", crate::types::format_hex(&hash));
+
+        // Evict expired transactions before checking capacity
+        {
+            let mut mempool = self.mempool.lock().unwrap();
+            let expired = mempool.evict_expired();
+            if expired > 0 {
+                debug!("Evicted {} expired transactions from mempool", expired);
+            }
+        }
+
+        let mut mempool = self.mempool.lock().unwrap();
+        mempool.insert(transaction)?;
+        self.metrics.record_mempool_operation();
+        info!("Transaction submitted: {}", crate::types::format_hex(&hash));
         Ok(())
     }
 
-    /// Produce a new block from pending transactions.
-    ///
-    /// This method:
-    /// 1. Collects transactions from the mempool
-    /// 2. Uses the consensus engine to create a new block
-    /// 3. Validates and applies the block to the ledger
-    /// 4. Broadcasts the block to peers (if sync is enabled)
-    /// 5. Clears processed transactions from the mempool
-    ///
-    /// # Returns
-    ///
-    /// The newly created and applied block.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Mempool is empty
-    /// - Block generation fails
-    /// - Block validation fails
-    /// - Block application to ledger fails
     pub async fn produce_block(&self) -> Result<Block, RuntimeError> {
-        let mempool = self.mempool.lock().map_err(|_| {
-            RuntimeError::InvalidTransaction("Failed to acquire mempool lock".to_string())
-        })?;
+        info!("[PRODUCE_BLOCK] Starting block production");
+
+        info!("[PRODUCE_BLOCK] Acquiring mempool lock");
+        let mut mempool = self.mempool.lock().unwrap();
+        info!("[PRODUCE_BLOCK] Mempool lock acquired, checking if empty");
+
         if mempool.is_empty() {
+            info!("[PRODUCE_BLOCK] Mempool is empty, returning error");
             return Err(ConsensusError::NoPendingTransactions.into());
         }
 
-        let current_chain_state = self.chain_state.lock().map_err(|_| {
-            RuntimeError::InvalidTransaction("Failed to acquire chain state lock".to_string())
-        })?;
+        info!("[PRODUCE_BLOCK] Mempool has {} transactions", mempool.len());
+
+        info!("[PRODUCE_BLOCK] Acquiring mutable chain state lock");
+        let mut current_chain_state = self.chain_state.lock().unwrap();
+        info!("[PRODUCE_BLOCK] Mutable chain state lock acquired");
+
+        info!("[PRODUCE_BLOCK] Getting previous block from storage");
         let prev_block = self
             .storage
             .get_block(&current_chain_state.latest_block_hash)?
             .ok_or(StorageError::NotFound)?;
+        info!(
+            "[PRODUCE_BLOCK] Previous block retrieved: index={}, hash={}",
+            prev_block.index,
+            crate::types::format_hex(&prev_block.hash)
+        );
 
+        info!("[PRODUCE_BLOCK] Collecting transactions from mempool (priority-ordered)");
+        // Evict expired before collecting
+        mempool.evict_expired();
+        let mut transactions: Vec<Transaction> = mempool
+            .sorted_by_priority()
+            .iter()
+            .map(|tx| (*tx).clone())
+            .collect();
+        transactions.sort_by_key(|tx| (tx.sender, tx.nonce));
+        info!(
+            "[PRODUCE_BLOCK] Collected {} transactions",
+            transactions.len()
+        );
+
+        info!("[PRODUCE_BLOCK] Calling consensus.generate_block");
         let new_block =
             self.consensus
-                .generate_block(&mempool, &prev_block, &current_chain_state)?;
+                .generate_block(&transactions, &prev_block, &current_chain_state)?;
+        info!(
+            "[PRODUCE_BLOCK] Block generated: index={}, hash={}",
+            new_block.index,
+            crate::types::format_hex(&new_block.hash)
+        );
 
-        // Release mempool lock before acquiring chain_state lock to avoid deadlock if called from external thread
+        // Release mempool lock before processing block
+        info!("[PRODUCE_BLOCK] Releasing mempool lock");
         drop(mempool);
 
-        let mut current_chain_state_mut = self.chain_state.lock().map_err(|_| {
-            RuntimeError::InvalidTransaction("Failed to acquire chain state lock".to_string())
-        })?;
+        info!("[PRODUCE_BLOCK] Starting block processing with ledger");
+        let processing_result: Result<(), RuntimeError> = time_operation_fn(
+            &self.metrics,
+            || {
+                info!("[PRODUCE_BLOCK] Validating block with ledger");
+                // Validate and apply block to ledger
+                self.ledger
+                    .validate_block(&new_block, &current_chain_state)?;
+                info!("[PRODUCE_BLOCK] Block validation successful");
 
-        // Validate and apply block to ledger
-        self.ledger
-            .validate_block(&new_block, &current_chain_state_mut)?;
-        // Pass contract_engine to apply_block
-        self.ledger
-            .apply_block(new_block.clone(), &mut current_chain_state_mut)?;
+                info!("[PRODUCE_BLOCK] Applying block to ledger");
+                // Pass contract_engine to apply_block
+                self.ledger
+                    .apply_block(new_block.clone(), &mut current_chain_state)?;
+                info!("[PRODUCE_BLOCK] Block application successful");
+                Ok(())
+            },
+            MetricsCollector::record_block_processing,
+        );
+
+        info!("[PRODUCE_BLOCK] Block processing completed, checking result");
+        processing_result?;
+        info!("[PRODUCE_BLOCK] Block processing successful");
+
+        // Update metrics
+        info!("[PRODUCE_BLOCK] Updating metrics");
+        self.metrics
+            .update_average_block_size(std::mem::size_of_val(&new_block));
 
         println!(
             "Block produced and applied: {}",
             crate::types::format_hex(&new_block.hash)
         );
+        info!("[PRODUCE_BLOCK] Block production completed successfully");
 
         // Optionally broadcast the new block
+        info!("[PRODUCE_BLOCK] Starting async broadcast task");
         let sync_layer_clone = Arc::clone(&self.sync_layer);
         let new_block_clone = new_block.clone();
         tokio::spawn(async move {
+            info!("[BROADCAST] Starting broadcast in spawned task");
             let peers = sync_layer_clone.discover_peers().await.unwrap_or_else(|e| {
-                eprintln!("Error discovering peers: {}", e);
+                error!("[BROADCAST] Error discovering peers: {}", e);
                 Vec::new()
             });
+            info!("[BROADCAST] Discovered {} peers", peers.len());
             if let Err(e) = sync_layer_clone
                 .broadcast_block(&new_block_clone, &peers)
                 .await
             {
-                eprintln!("Error broadcasting block: {}", e);
+                error!("[BROADCAST] Error broadcasting block: {}", e);
+            } else {
+                info!("[BROADCAST] Block broadcast completed successfully");
             }
         });
+        info!("[PRODUCE_BLOCK] Broadcast task spawned");
 
-        // Clear included transactions from mempool (this would be more sophisticated in real impl)
-        // For MVP, we clear all for simplicity after block generation.
-        self.mempool
-            .lock()
-            .map_err(|_| {
-                RuntimeError::InvalidTransaction("Failed to acquire mempool lock".to_string())
-            })?
-            .clear();
+        // Remove only the transactions that were included in the block
+        info!("[PRODUCE_BLOCK] Removing included transactions from mempool");
+        let mut mempool = self.mempool.lock().unwrap();
+        for tx in &new_block.transactions {
+            mempool.remove(&tx.hash);
+        }
+        info!(
+            "[PRODUCE_BLOCK] Removed {} transactions from mempool",
+            new_block.transactions.len()
+        );
 
+        info!("[PRODUCE_BLOCK] Returning produced block");
         Ok(new_block)
     }
 
     pub fn get_chain_state(&self) -> Result<ChainState, RuntimeError> {
-        Ok(self
-            .chain_state
-            .lock()
-            .map_err(|_| {
-                RuntimeError::InvalidTransaction("Failed to acquire chain state lock".to_string())
-            })?
-            .clone())
+        Ok(self.chain_state.lock().unwrap().clone())
     }
 
     pub fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>, RuntimeError> {
@@ -335,4 +600,243 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
     pub fn storage(&self) -> &S {
         &self.storage
     }
+
+    pub fn create_account(
+        &self,
+        address: &PublicKey,
+        account: Account,
+    ) -> Result<(), RuntimeError> {
+        self.storage
+            .put_account(address, &account)
+            .map_err(RuntimeError::StorageError)
+    }
+
+    pub fn get_mempool(&self) -> Result<Vec<Transaction>, RuntimeError> {
+        Ok(self
+            .mempool
+            .lock()
+            .unwrap()
+            .all()
+            .into_iter()
+            .map(|tx| tx.clone())
+            .collect())
+    }
+
+    pub fn get_transaction_history(
+        &self,
+        address: &PublicKey,
+        limit: usize,
+    ) -> Result<Vec<Transaction>, RuntimeError> {
+        // For now, return transactions from mempool that involve this address
+        // In a full implementation, this would query the blockchain for confirmed transactions
+        let mempool = self.mempool.lock().unwrap();
+        let mut history = Vec::new();
+
+        for tx in mempool.all().iter() {
+            if tx.sender == *address
+                || (matches!(tx.recipient, crate::types::Address::Wallet(pk) if pk == *address))
+            {
+                history.push((*tx).clone());
+                if history.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        Ok(history)
+    }
+
+    pub fn get_block_by_hash(&self, hash: &[u8; 32]) -> Result<Option<Block>, RuntimeError> {
+        self.storage
+            .get_block(hash)
+            .map_err(RuntimeError::StorageError)
+    }
+
+    pub fn get_node_status(&self) -> Result<ChainState, RuntimeError> {
+        self.get_chain_state()
+    }
+
+    pub fn add_peer(
+        &self,
+        _address: &[u8; 32],
+        _public_key: PublicKey,
+    ) -> Result<(), RuntimeError> {
+        // For now, just return success - in a full implementation, this would add to peer list
+        Ok(())
+    }
+
+    pub fn get_metrics(&self) -> Result<HashMap<String, f64>, RuntimeError> {
+        Ok(self.metrics.get_summary())
+    }
+
+    pub fn get_detailed_metrics(&self) -> Result<crate::metrics::PerformanceMetrics, RuntimeError> {
+        Ok(self.metrics.get_metrics())
+    }
+
+    pub fn get_mempool_stats(&self) -> Result<MempoolStats, RuntimeError> {
+        let mempool = self.mempool.lock().unwrap();
+        let mut priority_counts = std::collections::HashMap::new();
+        let mut total_gas_limit = 0;
+        let mut total_size = 0;
+
+        for tx in mempool.all() {
+            *priority_counts.entry(tx.priority).or_insert(0) += 1;
+            total_gas_limit += tx.gas_limit;
+            total_size += std::mem::size_of_val(tx);
+        }
+
+        Ok(MempoolStats {
+            total_transactions: mempool.len(),
+            max_size: self.mempool_size_limit,
+            total_gas_limit,
+            total_size,
+            priority_distribution: priority_counts,
+        })
+    }
+
+    /// Deploy a smart contract
+    pub fn deploy_contract(
+        &self,
+        deployer: &PublicKey,
+        wasm_bytes: &[u8],
+        init_payload: Option<&[u8]>,
+        gas_limit: u64,
+    ) -> Result<ContractId, RuntimeError> {
+        info!(
+            "[RUNTIME] Deploying contract from deployer: {}",
+            hex::encode(deployer.to_bytes())
+        );
+
+        // Get deployer's current nonce for deterministic contract ID
+        let deployer_account = self.storage.get_account(deployer)?;
+        let deployer_nonce = deployer_account
+            .as_ref()
+            .map(|a| a.nonce())
+            .unwrap_or(0);
+
+        // Use the contract engine to deploy the contract
+        let contract_id = self
+            .contract_engine_arc
+            .deploy_contract(
+                deployer,
+                deployer_nonce,
+                wasm_bytes,
+                init_payload,
+                &*self.storage,
+                gas_limit,
+            )
+            .map_err(|e| {
+                RuntimeError::InvalidTransaction(format!("Contract deployment failed: {}", e))
+            })?;
+
+        info!(
+            "[RUNTIME] Contract deployed successfully with ID: {}",
+            hex::encode(contract_id.to_bytes())
+        );
+        Ok(contract_id)
+    }
+
+    /// Call a smart contract method
+    pub fn call_contract(
+        &self,
+        caller: &PublicKey,
+        contract_id: &ContractId,
+        method_name: &str,
+        args: &[u8],
+        value: Option<u64>,
+        _gas_limit: u64,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        info!(
+            "[RUNTIME] Calling contract {} method '{}' from caller: {}",
+            hex::encode(contract_id.to_bytes()),
+            method_name,
+            hex::encode(caller.to_bytes())
+        );
+
+        // Use the contract engine to call the contract
+        let result = self
+            .contract_engine_arc
+            .call_contract(caller, contract_id, method_name, args, value, &*self.storage)
+            .map_err(|e| {
+                RuntimeError::InvalidTransaction(format!("Contract call failed: {}", e))
+            })?;
+
+        info!("[RUNTIME] Contract call completed successfully");
+        Ok(result)
+    }
+
+    /// Query a smart contract (read-only)
+    pub fn query_contract(
+        &self,
+        contract_id: &ContractId,
+        method_name: &str,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, RuntimeError> {
+        info!(
+            "[RUNTIME] Querying contract {} method '{}'",
+            hex::encode(contract_id.to_bytes()),
+            method_name
+        );
+
+        // Use the contract engine to query the contract
+        let result = self
+            .contract_engine_arc
+            .query_contract(contract_id, method_name, payload, &*self.storage)
+            .map_err(|e| {
+                RuntimeError::InvalidTransaction(format!("Contract query failed: {}", e))
+            })?;
+
+        info!("[RUNTIME] Contract query completed successfully");
+        Ok(result)
+    }
+
+    /// Get pending transactions from mempool
+    pub fn get_pending_transactions(&self) -> Result<Vec<Transaction>, RuntimeError> {
+        let mempool = self.mempool.lock().unwrap();
+        Ok(mempool.all().iter().map(|tx| (*tx).clone()).collect())
+    }
+
+    /// Get comprehensive node status information
+    pub fn get_comprehensive_node_status(&self) -> Result<RuntimeNodeStatus, RuntimeError> {
+        let chain_state = self.get_chain_state()?;
+        let mempool_stats = self.get_mempool_stats()?;
+        let metrics = self.get_detailed_metrics()?;
+        let running = *self.is_running.lock().unwrap();
+        let start_time = self.started_at.lock().unwrap().clone();
+        let uptime_seconds = if running {
+            start_time
+                .and_then(|started_at| SystemTime::now().duration_since(started_at).ok())
+                .map_or(0, |duration| duration.as_secs())
+        } else {
+            0
+        };
+
+        Ok(RuntimeNodeStatus {
+            running,
+            chain_state,
+            mempool_stats,
+            metrics,
+            uptime_seconds,
+            peer_count: self.sync_layer.peer_count(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MempoolStats {
+    pub total_transactions: usize,
+    pub max_size: usize,
+    pub total_gas_limit: u64,
+    pub total_size: usize,
+    pub priority_distribution: std::collections::HashMap<u8, usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeNodeStatus {
+    pub running: bool,
+    pub chain_state: ChainState,
+    pub mempool_stats: MempoolStats,
+    pub metrics: crate::metrics::PerformanceMetrics,
+    pub uptime_seconds: u64,
+    pub peer_count: usize,
 }

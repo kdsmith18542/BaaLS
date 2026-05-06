@@ -1,16 +1,27 @@
-//! Block validation and state transition logic.
-//!
-//! The ledger module is responsible for validating blocks, executing transactions,
-//! and maintaining the chain state. It ensures that all state transitions are
-//! valid and deterministic.
-
+use log::{debug, info, warn};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use thiserror::Error;
 
 use crate::contracts::ContractEngine;
 use crate::storage::{Storage, StorageBatch, StorageError, StorageOperation};
-use crate::types::{Account, Block, ChainState, CryptoError, PublicKey, TransactionPayload};
+use crate::types::{
+    Account, Block, ChainState, CryptoError, MerkleTree, PublicKey, TransactionPayload,
+};
+
+#[derive(Debug, Error)]
+pub enum StateTransitionError {
+    #[error("Account not found: {0}")]
+    AccountNotFound(String),
+    #[error("Insufficient balance: {0}")]
+    InsufficientBalance(String),
+    #[error("Invalid nonce: expected {expected}, got {got}")]
+    InvalidNonce { expected: u64, got: u64 },
+    #[error("Invalid transaction payload")]
+    InvalidPayload,
+    #[error("Contract error: {0}")]
+    ContractError(String),
+}
 
 #[derive(Debug, Error)]
 pub enum LedgerError {
@@ -21,13 +32,7 @@ pub enum LedgerError {
     #[error("Block validation failed: {0}")]
     BlockValidation(String),
     #[error("State transition failed: {0}")]
-    StateTransition(String),
-    #[error("Account not found for address: {0}")]
-    AccountNotFound(String),
-    #[error("Insufficient balance for transaction from {0}")]
-    InsufficientBalance(String),
-    #[error("Invalid nonce for account {0}: expected {1}, got {2}")]
-    InvalidNonce(String, u64, u64),
+    StateTransition(#[from] StateTransitionError),
     #[error("Contract not found: {0}")]
     ContractNotFound(String),
     #[error("WASM validation failed: {0}")]
@@ -42,13 +47,22 @@ pub enum LedgerError {
     NotFound,
 }
 
+#[derive(Debug, Clone)]
+pub struct TransactionExecutionResult {
+    pub success: bool,
+    pub gas_used: u64,
+    pub error_message: Option<String>,
+}
+
 pub struct Ledger<S: Storage, C: ContractEngine> {
     storage: Arc<S>,
+    #[allow(dead_code)]
     contract_engine: Arc<C>,
 }
 
 impl<S: Storage, C: ContractEngine> Ledger<S, C> {
     pub fn new(storage: Arc<S>, contract_engine: Arc<C>) -> Self {
+        debug!("Ledger::new called");
         Ledger {
             storage,
             contract_engine,
@@ -56,9 +70,11 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
     }
 
     pub fn initialize_chain(&self) -> Result<(), LedgerError> {
+        debug!("Ledger::initialize_chain called");
         // Check if chain state already exists
-        if self.storage.get_chain_state()?.is_some() {
-            println!("Chain already initialized.");
+        let chain_state_exists = self.storage.get_chain_state()?.is_some();
+        debug!("Chain state exists before init: {}", chain_state_exists);
+        if chain_state_exists {
             return Ok(());
         }
 
@@ -85,17 +101,17 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         };
 
         let mut batch = StorageBatch::default();
-        batch.ops.push(StorageOperation::Put(
+        batch.ops.push(StorageOperation::PutBlock(
             bincode::serialize(&genesis_block.hash)?,
             bincode::serialize(&genesis_block)?,
         ));
-        batch.ops.push(StorageOperation::Put(
-            bincode::serialize("global:current")?,
+        batch.ops.push(StorageOperation::PutChainState(
+            "global:current".as_bytes().to_vec(),
             bincode::serialize(&initial_chain_state)?,
         ));
 
         self.storage.apply_batch(batch)?;
-        println!(
+        debug!(
             "Chain initialized with genesis block: {}",
             crate::types::format_hex(&genesis_block.hash)
         );
@@ -107,7 +123,20 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         block: &Block,
         current_chain_state: &ChainState,
     ) -> Result<(), LedgerError> {
+        info!("[LEDGER] Starting block validation");
+        info!(
+            "[LEDGER] Block: index={}, hash={}",
+            block.index,
+            crate::types::format_hex(&block.hash)
+        );
+        info!(
+            "[LEDGER] Current chain state: latest_index={}, latest_hash={}",
+            current_chain_state.latest_block_index,
+            crate::types::format_hex(&current_chain_state.latest_block_hash)
+        );
+
         // Basic Block Header Validation
+        info!("[LEDGER] Validating block index");
         if block.index != current_chain_state.latest_block_index + 1 {
             return Err(LedgerError::BlockValidation(format!(
                 "Invalid block index: expected {}, got {}",
@@ -115,6 +144,8 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                 block.index
             )));
         }
+
+        info!("[LEDGER] Validating previous hash");
         if block.prev_hash != current_chain_state.latest_block_hash {
             return Err(LedgerError::BlockValidation(format!(
                 "Invalid previous hash: expected {:x?}, got {:x?}",
@@ -122,6 +153,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             )));
         }
 
+        info!("[LEDGER] Validating block hash");
         let calculated_hash = block.calculate_hash()?;
         if calculated_hash != block.hash {
             return Err(LedgerError::BlockValidation(format!(
@@ -131,21 +163,30 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         }
 
         // Timestamp check (simplified for MVP, typically more robust logic needed)
-        if block.index > 0
-            && block.timestamp
-                <= self
-                    .storage
-                    .get_block(&block.prev_hash)?
-                    .ok_or(LedgerError::NotFound)?
-                    .timestamp
-        {
-            return Err(LedgerError::BlockValidation(
-                "Block timestamp is not greater than previous block's timestamp".to_string(),
-            ));
+        info!("[LEDGER] Validating block timestamp");
+        if block.index > 0 {
+            let prev_block = self
+                .storage
+                .get_block(&block.prev_hash)?
+                .ok_or(LedgerError::NotFound)?;
+            if block.timestamp <= prev_block.timestamp {
+                return Err(LedgerError::BlockValidation(
+                    "Block timestamp is not greater than previous block's timestamp".to_string(),
+                ));
+            }
         }
 
         // Transaction Validation (within the block) - only basic checks for MVP
-        for tx in &block.transactions {
+        info!(
+            "[LEDGER] Validating {} transactions",
+            block.transactions.len()
+        );
+        for (i, tx) in block.transactions.iter().enumerate() {
+            info!(
+                "[LEDGER] Validating transaction {}: hash={}",
+                i,
+                crate::types::format_hex(&tx.hash)
+            );
             if !tx.verify_signature()? {
                 return Err(LedgerError::BlockValidation(format!(
                     "Invalid signature for transaction: {:x?}",
@@ -155,163 +196,358 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             // Further transaction validation (nonce, balance) will happen during state transition
         }
 
+        info!("[LEDGER] Block validation completed successfully");
         Ok(())
     }
 
     pub fn apply_block(
         &self,
-        block: Block,
+        mut block: Block,
         current_chain_state: &mut ChainState,
     ) -> Result<(), LedgerError> {
+        info!("[LEDGER] Starting block application");
+        info!(
+            "[LEDGER] Block: index={}, hash={}, transactions={}",
+            block.index,
+            crate::types::format_hex(&block.hash),
+            block.transactions.len()
+        );
+
         let mut batch = StorageBatch::default();
         let mut accounts_to_update: BTreeMap<PublicKey, Account> = BTreeMap::new();
 
-        for tx in &block.transactions {
+        info!(
+            "[LEDGER] Processing {} transactions",
+            block.transactions.len()
+        );
+        // Sort transactions by (sender, nonce) to ensure sequential nonce processing
+        block.transactions.sort_by_key(|tx| (tx.sender, tx.nonce));
+        for (i, tx) in block.transactions.iter().enumerate() {
+            info!(
+                "[LEDGER] Processing transaction {}: hash={}",
+                i,
+                crate::types::format_hex(&tx.hash)
+            );
+
             let sender_pk = tx.sender;
-            let mut sender_account = self.storage.get_account(&sender_pk)?.ok_or_else(|| {
-                LedgerError::AccountNotFound(format!("Sender account not found: {:?}", sender_pk))
-            })?;
+            let mut sender_account =
+                if let Some(updated_account) = accounts_to_update.get(&sender_pk) {
+                    updated_account.clone()
+                } else {
+                    self.storage.get_account(&sender_pk)?.ok_or_else(|| {
+                        LedgerError::StateTransition(StateTransitionError::AccountNotFound(format!(
+                            "Sender account not found: {:?}",
+                            sender_pk
+                        )))
+                    })?
+                };
+            info!(
+                "[LEDGER] Sender account found: nonce={}",
+                sender_account.nonce()
+            );
 
             // Nonce Check
             if sender_account.nonce() + 1 != tx.nonce {
-                return Err(LedgerError::InvalidNonce(
-                    format!("{:?}", sender_pk),
-                    sender_account.nonce() + 1,
-                    tx.nonce,
+                return Err(LedgerError::StateTransition(
+                    StateTransitionError::InvalidNonce {
+                        expected: sender_account.nonce() + 1,
+                        got: tx.nonce,
+                    },
                 ));
             }
             sender_account.set_nonce(sender_account.nonce() + 1);
             accounts_to_update.insert(sender_pk, sender_account.clone());
+            info!(
+                "[LEDGER] Sender nonce updated to {}",
+                sender_account.nonce()
+            );
+
+            let mut gas_used = 0u64;
+            let mut tx_success = true;
 
             match &tx.payload {
                 TransactionPayload::Transfer { amount } => {
-                    let sender_account =
-                        accounts_to_update.get_mut(&tx.sender).ok_or_else(|| {
-                            LedgerError::StateTransition(
-                                "Sender account not found in update map".to_string(),
-                            )
-                        })?;
-
-                    if let Account::Wallet { balance, .. } = sender_account {
-                        if *balance < *amount {
-                            return Err(LedgerError::InsufficientBalance(format!(
-                                "{:?}",
-                                tx.sender
-                            )));
-                        }
-                        *balance -= *amount;
+                    info!(
+                        "[LEDGER] Processing transfer transaction: amount={}",
+                        amount
+                    );
+                    // Fixed gas cost for native transfer
+                    let transfer_gas_cost = 21000;
+                    gas_used += transfer_gas_cost;
+                    if gas_used > tx.gas_limit {
+                        tx_success = false;
+                        warn!("[LEDGER] Transaction exceeded gas limit");
                     } else {
-                        return Err(LedgerError::StateTransition(
-                            "Sender is not a wallet account".to_string(),
-                        ));
-                    }
-
-                    if let Some(mut recipient_account) = match tx.recipient {
-                        crate::types::Address::Wallet(pk) => self.storage.get_account(&pk)?,
-                        crate::types::Address::Contract(_) => {
-                            return Err(LedgerError::StateTransition(
-                                "Cannot transfer native token to a contract directly".to_string(),
-                            ))
-                        }
-                    } {
-                        if let Account::Wallet { balance, .. } = &mut recipient_account {
-                            *balance += amount;
-                            accounts_to_update.insert(
-                                match tx.recipient {
-                                    crate::types::Address::Wallet(pk) => pk,
-                                    _ => unreachable!(),
-                                },
-                                recipient_account,
-                            );
+                        // Get the sender account from our updates
+                        if let Some(Account::Wallet { balance, .. }) =
+                            accounts_to_update.get_mut(&tx.sender)
+                        {
+                            if *balance < *amount {
+                                return Err(LedgerError::StateTransition(
+                                    StateTransitionError::InsufficientBalance(format!(
+                                        "{:?}",
+                                        tx.sender
+                                    )),
+                                ));
+                            }
+                            *balance -= *amount;
+                            info!("[LEDGER] Sender balance reduced to {}", *balance);
                         } else {
                             return Err(LedgerError::StateTransition(
-                                "Recipient is not a wallet account".to_string(),
+                                StateTransitionError::InvalidPayload,
                             ));
                         }
-                    } else {
-                        // Create new account if recipient doesn't exist
-                        if let crate::types::Address::Wallet(pk) = tx.recipient {
-                            accounts_to_update.insert(
-                                pk,
-                                Account::Wallet {
-                                    balance: *amount,
-                                    nonce: 0,
-                                },
-                            );
-                        } else {
-                            // Should be unreachable due to previous check
+
+                        // Handle recipient
+                        match tx.recipient {
+                            crate::types::Address::Wallet(recipient_pk) => {
+                                let mut recipient_account = if let Some(updated_account) =
+                                    accounts_to_update.get(&recipient_pk)
+                                {
+                                    updated_account.clone()
+                                } else if let Some(existing_account) =
+                                    self.storage.get_account(&recipient_pk)?
+                                {
+                                    existing_account
+                                } else {
+                                    Account::Wallet {
+                                        balance: 0,
+                                        nonce: 0,
+                                    }
+                                };
+
+                                if let Account::Wallet { balance, .. } = &mut recipient_account {
+                                    *balance += amount;
+                                    info!("[LEDGER] Recipient balance increased to {}", *balance);
+                                } else {
+                                    return Err(LedgerError::StateTransition(
+                                        StateTransitionError::InvalidPayload,
+                                    ));
+                                }
+                                accounts_to_update.insert(recipient_pk, recipient_account);
+                            }
+                            crate::types::Address::Contract(_) => {
+                                return Err(LedgerError::StateTransition(
+                                    StateTransitionError::InvalidPayload,
+                                ));
+                            }
                         }
                     }
                 }
                 TransactionPayload::ContractDeploy { wasm_bytes } => {
-                    // Full WASM validation/execution in ContractEngine module.
-                    let contract_id = self.contract_engine.deploy_contract(
-                        &tx.sender,
-                        wasm_bytes,
-                        None, // No init_payload in new variant
-                        self.storage.as_ref(),
-                        tx.gas_limit,
-                    )?;
-                    // Update sender account to reflect new contract (if it's a contract account)
-                    accounts_to_update.insert(
-                        tx.sender,
-                        Account::Contract {
-                            code_hash: contract_id.id,  // Use actual contract ID hash
-                            storage_root_hash: [0; 32], // Placeholder, will be updated by Merkle tree impl
-                            nonce: sender_account.nonce(),
-                        },
-                    );
+                    gas_used += 100_000;
+                    if gas_used > tx.gas_limit {
+                        tx_success = false;
+                        warn!("[LEDGER] Contract deployment exceeded gas limit");
+                    } else {
+                        // Deploy the contract via the contract engine
+                        let deployer = tx.sender;
+                        let deployer_nonce = accounts_to_update
+                            .get(&deployer)
+                            .map(|a| a.nonce())
+                            .unwrap_or(sender_account.nonce());
+                        match self.contract_engine.deploy_contract(
+                            &deployer,
+                            deployer_nonce,
+                            wasm_bytes,
+                            None,
+                            &*self.storage,
+                            tx.gas_limit.saturating_sub(gas_used),
+                        ) {
+                            Ok(cid) => {
+                                info!(
+                                    "[LEDGER] Contract deployed with ID: {}",
+                                    hex::encode(cid.to_bytes())
+                                );
+                                // Sender remains a Wallet account; contract is stored separately
+                            }
+                            Err(e) => {
+                                tx_success = false;
+                                warn!("[LEDGER] Contract deployment failed: {}", e);
+                            }
+                        }
+                    }
                 }
-                TransactionPayload::ContractCall { method, args } => {
-                    // Extract contract_id from recipient address
+                TransactionPayload::ContractCall { method, args, value } => {
                     let contract_id = match &tx.recipient {
                         crate::types::Address::Contract(cid) => cid,
                         _ => return Err(LedgerError::InvalidTransactionPayload),
                     };
-                    let _execution_result = self.contract_engine.call_contract(
-                        &tx.sender,
-                        contract_id,
-                        method,
-                        args,
-                        self.storage.as_ref(),
-                    );
-                    // TODO: Handle execution result
+
+                    if self.storage.get_contract_code(contract_id)?.is_none() {
+                        return Err(LedgerError::ContractNotFound(format!(
+                            "Contract not found: {}",
+                            hex::encode(contract_id.to_bytes())
+                        )));
+                    }
+
+                    gas_used += 50_000;
+                    if gas_used > tx.gas_limit {
+                        tx_success = false;
+                        warn!("[LEDGER] Contract call exceeded gas limit");
+                    } else {
+                        // Handle native token value transfer to contract
+                        if let Some(transfer_amount) = value {
+                            if *transfer_amount > 0 {
+                                if let Some(Account::Wallet { balance, .. }) =
+                                    accounts_to_update.get_mut(&tx.sender)
+                                {
+                                    if *balance < *transfer_amount {
+                                        return Err(LedgerError::StateTransition(
+                                            StateTransitionError::InsufficientBalance(
+                                                format!("{:?}", tx.sender),
+                                            ),
+                                        ));
+                                    }
+                                    *balance -= *transfer_amount;
+                                }
+                            }
+                        }
+
+                        // Execute the contract via the engine
+                        match self.contract_engine.call_contract(
+                            &tx.sender,
+                            contract_id,
+                            method,
+                            args,
+                            *value,
+                            &*self.storage,
+                        ) {
+                            Ok(result) => {
+                                info!(
+                                    "[LEDGER] Contract call to {}::{} returned {} bytes",
+                                    hex::encode(contract_id.to_bytes()),
+                                    method,
+                                    result.len()
+                                );
+                                // Update contract account storage_root_hash
+                                // Compute a hash from the execution result as a basic state root
+                                use sha2::{Digest, Sha256};
+                                let mut hasher = Sha256::new();
+                                hasher.update(contract_id.to_bytes());
+                                hasher.update(&result);
+                                hasher.update(method.as_bytes());
+                                let storage_root: [u8; 32] = hasher.finalize().into();
+                                if let Ok(Some(contract_account)) =
+                                    self.storage.get_account(&tx.sender)
+                                {
+                                    if let Account::Contract { code_hash, nonce, .. } =
+                                        contract_account
+                                    {
+                                        accounts_to_update.insert(
+                                            tx.sender,
+                                            Account::Contract {
+                                                code_hash,
+                                                storage_root_hash: storage_root,
+                                                nonce,
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tx_success = false;
+                                warn!(
+                                    "[LEDGER] Contract call to {}::{} failed: {}",
+                                    hex::encode(contract_id.to_bytes()),
+                                    method,
+                                    e
+                                );
+                            }
+                        }
+                    }
                 }
                 TransactionPayload::Data { data: _ } => {
                     // For MVP, just allow storing data. No specific state changes yet.
+                    gas_used += 10_000;
+                    if gas_used > tx.gas_limit {
+                        tx_success = false;
+                        warn!("[LEDGER] Data transaction exceeded gas limit");
+                    } else {
+                        info!("[LEDGER] Data transaction processed successfully");
+                    }
                 }
+            }
+
+            // If transaction failed due to out of gas, skip state changes for this tx
+            if !tx_success {
+                continue;
             }
 
             // Remove from mempool after successful processing
             batch
                 .ops
-                .push(StorageOperation::Delete(bincode::serialize(&tx.hash)?));
+                .push(StorageOperation::DeleteMempool(tx.hash.to_vec()));
         }
 
-        // Apply account updates (Merkle root calculation would go here in a full implementation)
-        for (address, account) in accounts_to_update {
-            batch.ops.push(StorageOperation::Put(
-                bincode::serialize(&address)?,
-                bincode::serialize(&account)?,
+        // Apply account updates
+        for (address, account) in &accounts_to_update {
+            batch.ops.push(StorageOperation::PutAccount(
+                address.to_bytes().to_vec(),
+                bincode::serialize(account)?,
             ));
         }
+
+        // Build merged view of all accounts (existing + updated)
+        let mut merged_accounts: BTreeMap<PublicKey, Account> = BTreeMap::new();
+        let all_existing_accounts = self.storage.get_all_accounts()?;
+        for (pk, account) in all_existing_accounts {
+            merged_accounts.insert(pk, account);
+        }
+        for (pk, account) in &accounts_to_update {
+            merged_accounts.insert(*pk, account.clone());
+        }
+
+        // Calculate Merkle root for all accounts (merged state)
+        let mut merkle = MerkleTree::new();
+        for (pk, account) in &merged_accounts {
+            let mut data = pk.to_bytes().to_vec();
+            data.extend(bincode::serialize(account)?);
+            merkle.add_leaf(&data);
+        }
+        let accounts_root_hash = if !merkle.is_empty() {
+            merkle.root().unwrap_or([0; 32])
+        } else {
+            [0; 32]
+        };
 
         // Update chain state
         current_chain_state.latest_block_hash = block.hash;
         current_chain_state.latest_block_index = block.index;
-        // Merkle root for accounts_root_hash would be calculated and updated here
-        batch.ops.push(StorageOperation::Put(
-            bincode::serialize("global:current")?,
+        current_chain_state.accounts_root_hash = accounts_root_hash;
+        batch.ops.push(StorageOperation::PutChainState(
+            "global:current".as_bytes().to_vec(),
             bincode::serialize(current_chain_state)?,
         ));
 
-        // Index transactions by block hash as part of the batch
+        // Store the block itself
+        batch.ops.push(StorageOperation::PutBlock(
+            block.hash.to_vec(),
+            bincode::serialize(&block)?,
+        ));
+
+        // Store transactions and index them by block hash
         for (i, tx) in block.transactions.iter().enumerate() {
-            self.storage
-                .index_transaction(&tx.hash, &block.hash, i as u32)?;
+            // Store the transaction
+            batch.ops.push(StorageOperation::PutTransaction(
+                tx.hash.to_vec(),
+                bincode::serialize(tx)?,
+            ));
+            // Index the transaction by block (add to batch)
+            let index_key = format!(
+                "block_tx:{}:{}:{:0>10}",
+                hex::encode(&block.hash),
+                hex::encode(&tx.hash),
+                i
+            );
+            batch.ops.push(StorageOperation::PutTxIndex(
+                index_key.as_bytes().to_vec(),
+                tx.hash.to_vec(),
+            ));
         }
 
         self.storage.apply_batch(batch)?;
+        info!("[LEDGER] Block application completed successfully");
         Ok(())
     }
 }

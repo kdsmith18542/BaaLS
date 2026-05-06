@@ -1,24 +1,49 @@
-// src/lib.rs
-
-//! # BaaLS - Blockchain as a Local Service
+//! # BaaLS: Blockchain as a Local Service
 //!
-//! BaaLS is a lightweight, embeddable blockchain engine written in Rust.
-//! It provides local-first blockchain functionality with optional peer-to-peer synchronization.
+//! BaaLS is an embeddable, local-first blockchain ledger written in Rust. It provides immutable, auditable, and deterministic data storage for decentralized applications, with a focus on simplicity, locality, and extensibility. BaaLS aims to be the "SQLite of blockchains".
 //!
 //! ## Core Modules
-//!
-//! - [`types`]: Core data structures (Block, Transaction, etc.)
-//! - [`storage`]: Persistent storage layer using sled
-//! - [`ledger`]: Block validation and state transition logic
-//! - [`consensus`]: Consensus engine (Proof-of-Authority)
-//! - [`runtime`]: Main runtime orchestrator
-//! - [`contracts`]: WASM smart contract execution engine
-//! - [`sync`]: Optional peer-to-peer synchronization
+//! - Ledger: Block validation, state transition, chain integrity
+//! - Storage: Sled-based key-value store with Merkle root support
+//! - Consensus: Pluggable consensus (default: PoA)
+//! - Contracts: WASM smart contract runtime
+//! - Runtime: Central coordinator and public API
+//! - Sync: Optional peer-to-peer synchronization
+//! - CLI & SDK: Command-line tools and Rust SDK
 
+/// Configuration system (TOML-based)
+pub mod config;
+/// Foreign Function Interface (C bindings)
+pub mod ffi;
+/// Consensus engine trait and default PoA implementation
 pub mod consensus;
+/// WASM smart contract engine and host functions
 pub mod contracts;
+/// Secure encrypted keystore for private key management
+pub mod keystore;
+/// Ledger logic: block validation, state transition, Merkle root
 pub mod ledger;
+/// Performance metrics collection and reporting
+pub mod metrics;
+/// Central runtime coordinator and public API
 pub mod runtime;
+/// Rust SDK for programmatic interaction
+pub mod sdk;
+/// Storage abstraction and Sled-based implementation
 pub mod storage;
+/// Optional peer-to-peer sync layer
 pub mod sync;
+/// Core types and data structures (accounts, blocks, transactions, etc.)
 pub mod types;
+
+pub use config::*;
+pub use consensus::*;
+pub use contracts::*;
+pub use keystore::*;
+pub use ledger::*;
+pub use metrics::*;
+pub use runtime::*;
+pub use sdk::*;
+pub use storage::*;
+pub use sync::*;
+pub use types::*;

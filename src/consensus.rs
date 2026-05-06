@@ -1,10 +1,6 @@
-//! Consensus engine implementation.
-//!
-//! This module defines the consensus mechanism for block generation and validation.
-//! Currently implements Proof-of-Authority (PoA) consensus, but designed to be
-//! pluggable for other consensus algorithms.
-
 use ed25519_dalek::{Signer, SigningKey};
+use hex;
+use log::info;
 use thiserror::Error;
 
 use crate::types::{Block, ChainState, CryptoError, PublicKey, Transaction};
@@ -25,6 +21,8 @@ pub enum ConsensusError {
     InvalidNonce,
     #[error("No pending transactions available to generate a block")]
     NoPendingTransactions,
+    #[error("Block signing failed: {0}")]
+    BlockSigningFailed(String),
 }
 
 pub trait ConsensusEngine: Send + Sync {
@@ -40,40 +38,107 @@ pub trait ConsensusEngine: Send + Sync {
 
 pub struct PoAConsensus {
     authorized_signer_key: PublicKey,
-    _block_time_interval_ms: u64,
+    #[allow(dead_code)]
+    block_time_interval_ms: u64,
+    signing_key: Option<SigningKey>,
+    pub block_gas_limit: u64,
+    pub block_size_limit: usize,
 }
 
 impl PoAConsensus {
     pub fn new(authorized_signer_key: PublicKey, block_time_interval_ms: u64) -> Self {
         Self {
             authorized_signer_key,
-            _block_time_interval_ms: block_time_interval_ms,
+            block_time_interval_ms,
+            signing_key: None,
+            block_gas_limit: 30_000_000, // 30M gas per block
+            block_size_limit: 10 * 1024 * 1024, // 10MB per block
         }
     }
 
-    pub fn validate_block(&self, _block: &Block) -> Result<(), ConsensusError> {
-        // For PoA, we just check if the block is signed by an authorized signer
-        // In a real implementation, you'd check the signature against the authorized key
-
-        // For now, just return Ok() - implement actual signature verification later
-        Ok(())
+    pub fn with_signing_key(mut self, signing_key: SigningKey) -> Self {
+        self.signing_key = Some(signing_key);
+        self
     }
 
-    pub fn sign_block(
-        &self,
-        block: &mut Block,
-        private_key: &SigningKey,
-    ) -> Result<(), ConsensusError> {
-        // Verify the private key corresponds to the authorized signer
-        if private_key.verifying_key().to_bytes() != self.authorized_signer_key.to_bytes() {
+    pub fn validate_block(&self, block: &Block) -> Result<(), ConsensusError> {
+        let metadata = block.metadata.as_ref().ok_or_else(|| {
+            ConsensusError::ValidationFailed("Block metadata missing".to_string())
+        })?;
+
+        // Verify signer matches authorized key
+        let signer_hex = metadata.get("signer").ok_or_else(|| {
+            ConsensusError::ValidationFailed("Signer not found in block metadata".to_string())
+        })?;
+        if *signer_hex != hex::encode(self.authorized_signer_key.to_bytes()) {
             return Err(ConsensusError::UnauthorizedSigner);
         }
 
-        // Sign the block
-        let _signature = private_key.sign(&block.hash);
-        // TODO: Add signature to block metadata or create a signed block type
+        // Verify signature cryptographically
+        let signature_hex = metadata.get("signature").ok_or_else(|| {
+            ConsensusError::ValidationFailed("Signature not found in block metadata".to_string())
+        })?;
+        let signature_bytes = hex::decode(signature_hex).map_err(|_| {
+            ConsensusError::ValidationFailed("Invalid signature hex encoding".to_string())
+        })?;
+        if signature_bytes.len() != 64 {
+            return Err(ConsensusError::ValidationFailed(
+                "Invalid signature length".to_string(),
+            ));
+        }
+        let signature = ed25519_dalek::Signature::from_slice(&signature_bytes).map_err(|_| {
+            ConsensusError::ValidationFailed("Invalid signature format".to_string())
+        })?;
+
+        self.authorized_signer_key
+            .verify(&block.hash, &signature)
+            .map_err(|_| {
+                ConsensusError::InvalidSignature(CryptoError::SignatureVerificationFailed)
+            })?;
 
         Ok(())
+    }
+
+    pub fn sign_block(&self, block: &mut Block) -> Result<(), ConsensusError> {
+        if let Some(signing_key) = &self.signing_key {
+            // Verify the private key corresponds to the authorized signer
+            if signing_key.verifying_key().to_bytes() != self.authorized_signer_key.to_bytes() {
+                return Err(ConsensusError::UnauthorizedSigner);
+            }
+
+            // Calculate block hash if not already set
+            if block.hash == [0u8; 32] {
+                block.hash = block
+                    .calculate_hash()
+                    .map_err(|e| ConsensusError::BlockSigningFailed(e.to_string()))?;
+            }
+
+            // Sign the block hash
+            let signature = signing_key.sign(&block.hash);
+
+            // Add signature to block metadata
+            let mut metadata = block.metadata.clone().unwrap_or_default();
+            metadata.insert(
+                "signer".to_string(),
+                hex::encode(self.authorized_signer_key.to_bytes()),
+            );
+            metadata.insert("signature".to_string(), hex::encode(signature.to_bytes()));
+            metadata.insert(
+                "signed_at".to_string(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    .to_string(),
+            );
+
+            block.metadata = Some(metadata);
+            Ok(())
+        } else {
+            Err(ConsensusError::BlockSigningFailed(
+                "No signing key available".to_string(),
+            ))
+        }
     }
 }
 
@@ -92,13 +157,56 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
         prev_block: &Block,
         _chain_state: &ChainState,
     ) -> Result<Block, ConsensusError> {
-        if pending_transactions.is_empty() {
-            return Err(ConsensusError::NoPendingTransactions);
-        }
+        info!("[CONSENSUS] Starting block generation");
+        info!(
+            "[CONSENSUS] Previous block: index={}, hash={}",
+            prev_block.index,
+            hex::encode(prev_block.hash)
+        );
+        info!(
+            "[CONSENSUS] Pending transactions: {}",
+            pending_transactions.len()
+        );
+
         let index = prev_block.index + 1;
-        let timestamp = prev_block.timestamp + 1; // For MVP, just increment
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let prev_hash = prev_block.hash;
-        let transactions = pending_transactions.to_vec();
+
+        info!(
+            "[CONSENSUS] New block parameters: index={}, timestamp={}",
+            index, timestamp
+        );
+
+        // Select transactions with gas and size limits
+        let mut transactions = Vec::new();
+        let mut total_gas = 0u64;
+        let mut total_size = 0usize;
+
+        for tx in pending_transactions {
+            total_gas += tx.gas_limit;
+            total_size += std::mem::size_of_val(tx);
+            total_size += tx.payload_size_estimate();
+
+            if total_gas > self.block_gas_limit || total_size > self.block_size_limit {
+                if transactions.is_empty() {
+                    // At least one transaction allowed even if it exceeds limits
+                    transactions.push(tx.clone());
+                }
+                break;
+            }
+            transactions.push(tx.clone());
+        }
+
+        info!(
+            "[CONSENSUS] Selected {} transactions (gas={}, size={} bytes)",
+            transactions.len(),
+            total_gas.min(self.block_gas_limit),
+            total_size.min(self.block_size_limit)
+        );
+
         let mut block = Block {
             index,
             timestamp,
@@ -108,9 +216,33 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
             transactions,
             metadata: None,
         };
+
+        info!("[CONSENSUS] Created block structure, calculating hash");
+        // Calculate block hash
         block.hash = block
             .calculate_hash()
             .map_err(|e| ConsensusError::ValidationFailed(format!("Hash error: {:?}", e)))?;
+        info!(
+            "[CONSENSUS] Block hash calculated: {}",
+            hex::encode(block.hash)
+        );
+
+        // Sign the block — mandatory for PoA
+        if let Some(ref _signing_key) = self.signing_key {
+            info!("[CONSENSUS] Signing block with authorized key");
+            self.sign_block(&mut block)?;
+            info!("[CONSENSUS] Block signed successfully");
+        } else {
+            return Err(ConsensusError::BlockSigningFailed(
+                "No signing key available for block production".to_string(),
+            ));
+        }
+
+        info!(
+            "[CONSENSUS] Block generation completed: index={}, hash={}",
+            block.index,
+            hex::encode(block.hash)
+        );
         Ok(block)
     }
 }
