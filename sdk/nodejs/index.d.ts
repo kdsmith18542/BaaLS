@@ -34,14 +34,14 @@ declare module '@baals/sdk' {
     /** Create a wallet account with initial balance. */
     createAccount(pubkeyHex: string, balance: number): Promise<void>;
 
-    /** Deploy WASM bytecode, returns contract ID hex. */
-    deployContract(deployerHex: string, wasm: Uint8Array, gasLimit: number): Promise<string>;
+    /** Deploy WASM bytecode with optional init payload, returns contract ID hex. */
+    deployContract(deployerHex: string, wasm: Uint8Array, initPayload?: Uint8Array, gasLimit?: number): Promise<string>;
 
-    /** Call a contract method. */
-    callContract(callerHex: string, contractIdHex: string, method: string, args: Uint8Array): Promise<ContractResult>;
+    /** Call a contract method with optional native value transfer. */
+    callContract(callerHex: string, contractIdHex: string, method: string, args: Uint8Array, value?: number): Promise<ContractResult>;
 
     /** Read-only contract query. */
-    queryContract(contractIdHex: string, payload: Uint8Array): Promise<ContractResult>;
+    queryContract(contractIdHex: string, method: string, payload: Uint8Array): Promise<ContractResult>;
   }
 
   interface ChainState {

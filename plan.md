@@ -322,13 +322,13 @@ All gaps have been resolved in Phase 9.
 **Status**: ✅ Complete. All spec compliance items addressed. Dockerfile and K8s manifests created.
 
 - [x] **Inter-contract call host functions** — Added `baals_get_sender`, `baals_get_contract_id`, `baals_get_block_timestamp`, `baals_get_block_index`, `baals_get_input_data` to WASM host function table.
-- [x] **Blake3 hashing** — `baals_hash_blake3` host function added alongside SHA256 for performance-optimized hashing in contracts.
+- [x] **Blake3 hashing** — `HashAlgorithm::Blake3` enum variant and `hash_with_algorithm()` function added for Rust-level hashing. Blake3 crate is a dependency; the WASM host function `baals_hash_sha256` covers contract hashing needs via SHA256.
 - [x] **Fork resolution** — Chain validation command (`dev validate-chain`) verifies block hash continuity and detects forks. Custom sync layer supports fork resolution via block chain comparison.
-- [x] **HealthStatus** — `HealthStatus` struct with `running`, `chain_height`, `peer_count`, `uptime_seconds`, `is_synced`, `last_block_time` fields exposed via `get_health_status()`.
+- [x] **HealthStatus** — `HealthStatus` struct with `status`, `uptime_seconds`, `version`, `storage_healthy`, `memory_usage_mb`, `connected_peers`, `latest_block_index`, `latest_block_hash`, `mempool_size` exposed via `MetricsCollector::health_check()`. Comprehensive `RuntimeNodeStatus` also available at runtime level.
 - [x] **Block gas/size limits** — Gas accounting per block with configurable `max_transactions_per_block`. Transaction size validation in mempool.
 - [x] **Storage compact/backup/restore** — `compact_storage()`, `backup_storage(path)`, and `restore_storage(path)` methods on `Storage` trait and `SledStorage`.
-- [x] **Reentrancy guard** — `ReentrancyGuard` using `Cell<bool>` prevents recursive contract calls within a single execution context.
-- [x] **WASM bytecode validation** — `validate_wasm_bytecode()` checks WASM magic bytes, version, and performs wasmtime pre-compilation validation before deployment.
+- [x] **Reentrancy guard** — `ReentrancyGuard` using `HashMap<ContractId, u32>` for per-contract tracking and `AtomicU32` for global call depth prevents recursive contract calls within a single execution context.
+- [x] **WASM bytecode validation** — Inline validation in `deploy_contract` checks WASM magic bytes (\x00asm), size limits (empty + 10MB max), and performs wasmtime pre-compilation via `Module::new()`.
 - [x] **StateTransitionError distinct type** — `StateTransitionError` enum with `ValidationFailed`, `ExecutionFailed`, `InsufficientBalance`, `InvalidNonce`, `ContractError` variants for granular failure reporting.
 - [x] **`dev validate-chain` and `dev monitor` commands** — Chain validation walks block history verifying hash continuity. Monitor provides live storage stats and performance metrics.
 - [x] **Memory growth gas** — Host functions that allocate or grow linear memory (`baals_storage_read`, `baals_get_input_data`) charge gas proportional to bytes written.

@@ -13,9 +13,9 @@ extern char* baals_sdk_get_transaction(const unsigned char* hash);
 extern char* baals_sdk_get_account(const unsigned char* pubkey);
 extern unsigned int baals_sdk_submit_tx(const char* tx_json);
 extern unsigned int baals_sdk_create_account(const unsigned char* pubkey, unsigned long long balance);
-extern char* baals_sdk_deploy_contract(const unsigned char* deployer, const unsigned char* wasm, unsigned int wasm_len, unsigned long long gas_limit);
-extern char* baals_sdk_call_contract(const unsigned char* caller, const unsigned char* contract_id, const char* method, const unsigned char* args, unsigned int args_len);
-extern char* baals_sdk_query_contract(const unsigned char* contract_id, const unsigned char* payload, unsigned int payload_len);
+extern char* baals_sdk_deploy_contract(const unsigned char* deployer, const unsigned char* wasm, unsigned int wasm_len, const unsigned char* init_payload, unsigned int init_payload_len, unsigned long long gas_limit);
+extern char* baals_sdk_call_contract(const unsigned char* caller, const unsigned char* contract_id, const char* method, const unsigned char* args, unsigned int args_len, unsigned long long value);
+extern char* baals_sdk_query_contract(const unsigned char* contract_id, const char* method, const unsigned char* payload, unsigned int payload_len);
 extern void baals_sdk_free_string(char* s);
 */
 import "C"
@@ -125,15 +125,23 @@ func (b *BaalsClient) CreateAccount(pubkeyHex string, balance uint64) error {
 }
 
 // DeployContract deploys WASM bytecode and returns the contract ID as hex.
-func (b *BaalsClient) DeployContract(deployerHex string, wasm []byte, gasLimit uint64) string {
+func (b *BaalsClient) DeployContract(deployerHex string, wasm []byte, initPayload []byte, gasLimit uint64) string {
 	pk, err := hex.DecodeString(deployerHex)
 	if err != nil || len(pk) != 32 {
 		return ""
+	}
+	var initPayloadPtr *C.uchar
+	var initPayloadLen C.uint
+	if len(initPayload) > 0 {
+		initPayloadPtr = (*C.uchar)(unsafe.Pointer(&initPayload[0]))
+		initPayloadLen = C.uint(len(initPayload))
 	}
 	cStr := C.baals_sdk_deploy_contract(
 		(*C.uchar)(unsafe.Pointer(&pk[0])),
 		(*C.uchar)(unsafe.Pointer(&wasm[0])),
 		C.uint(len(wasm)),
+		initPayloadPtr,
+		initPayloadLen,
 		C.ulonglong(gasLimit),
 	)
 	if cStr == nil {
@@ -144,7 +152,7 @@ func (b *BaalsClient) DeployContract(deployerHex string, wasm []byte, gasLimit u
 }
 
 // CallContract calls a contract method and returns the result JSON.
-func (b *BaalsClient) CallContract(callerHex, contractIDHex, method string, args []byte) string {
+func (b *BaalsClient) CallContract(callerHex, contractIDHex, method string, args []byte, value uint64) string {
 	caller, _ := hex.DecodeString(callerHex)
 	cid, _ := hex.DecodeString(contractIDHex)
 	if len(caller) != 32 || len(cid) != 32 {
@@ -158,6 +166,7 @@ func (b *BaalsClient) CallContract(callerHex, contractIDHex, method string, args
 		cMethod,
 		(*C.uchar)(unsafe.Pointer(&args[0])),
 		C.uint(len(args)),
+		C.ulonglong(value),
 	)
 	if cStr == nil {
 		return ""
@@ -167,13 +176,16 @@ func (b *BaalsClient) CallContract(callerHex, contractIDHex, method string, args
 }
 
 // QueryContract performs a read-only contract call.
-func (b *BaalsClient) QueryContract(contractIDHex string, payload []byte) string {
+func (b *BaalsClient) QueryContract(contractIDHex, method string, payload []byte) string {
 	cid, _ := hex.DecodeString(contractIDHex)
 	if len(cid) != 32 {
 		return ""
 	}
+	cMethod := C.CString(method)
+	defer C.free(unsafe.Pointer(cMethod))
 	cStr := C.baals_sdk_query_contract(
 		(*C.uchar)(unsafe.Pointer(&cid[0])),
+		cMethod,
 		(*C.uchar)(unsafe.Pointer(&payload[0])),
 		C.uint(len(payload)),
 	)
