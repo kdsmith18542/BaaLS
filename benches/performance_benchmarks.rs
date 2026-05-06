@@ -8,9 +8,10 @@ fn setup_runtime() -> Runtime<SledStorage, PoAConsensus, NoopSync> {
     let data_dir = temp_dir.path().to_path_buf();
 
     let storage = SledStorage::new(&data_dir).unwrap();
-    let test_key = PublicKey::from_bytes(&[1u8; 32]).unwrap();
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+    let test_key = PublicKey::from(signing_key.verifying_key());
     let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
-    let consensus = PoAConsensus::new(test_key, 1000);
+    let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(signing_key);
     let sync_layer = NoopSync;
 
     let runtime = Runtime::with_mempool_limit(
@@ -149,10 +150,8 @@ fn benchmark_storage_operations(c: &mut Criterion) {
             prev_hash: [0u8; 32],
             hash: [1u8; 32],
             transactions: vec![],
-            accounts_root_hash: [2u8; 32],
-            storage_root_hash: [3u8; 32],
-            signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
             nonce: 0,
+            metadata: None,
         };
 
         b.iter(|| {
@@ -166,7 +165,7 @@ fn benchmark_storage_operations(c: &mut Criterion) {
         let temp_dir = TempDir::new().unwrap();
         let storage = SledStorage::new(temp_dir.path()).unwrap();
 
-        let test_key = PublicKey::from_bytes(&[1u8; 32]).unwrap();
+        let test_key = PublicKey::from(ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]).verifying_key());
         let test_account = Account::Wallet {
             balance: 1000,
             nonce: 0,
@@ -185,8 +184,8 @@ fn benchmark_storage_operations(c: &mut Criterion) {
 
         let test_tx = Transaction {
             hash: [1u8; 32],
-            sender: PublicKey::from_bytes(&[1u8; 32]).unwrap(),
-            recipient: Address::Wallet(PublicKey::from_bytes(&[1u8; 32]).unwrap()),
+            sender: PublicKey::from(ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]).verifying_key()),
+            recipient: Address::Wallet(PublicKey::from(ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]).verifying_key())),
             payload: TransactionPayload::Transfer { amount: 100 },
             nonce: 1,
             timestamp: std::time::SystemTime::now()
@@ -221,7 +220,7 @@ fn benchmark_contract_operations(c: &mut Criterion) {
         let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
 
         let wasm_bytes = create_test_wasm_module();
-        let deployer = PublicKey::from_bytes(&[1u8; 32]).unwrap();
+        let deployer = PublicKey::from(ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]).verifying_key());
 
         b.iter(|| {
             let contract_id = contract_engine
@@ -237,7 +236,7 @@ fn benchmark_contract_operations(c: &mut Criterion) {
         let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
 
         let contract_id = ContractId::from_bytes(&[1u8; 32]).unwrap();
-        let caller = PublicKey::from_bytes(&[1u8; 32]).unwrap();
+        let caller = PublicKey::from(ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]).verifying_key());
 
         b.iter(|| {
             let result = contract_engine
@@ -345,7 +344,7 @@ fn benchmark_consensus_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("consensus_operations");
 
     group.bench_function("block_validation", |b| {
-        let test_key = PublicKey::from_bytes(&[1u8; 32]).unwrap();
+        let test_key = PublicKey::from(ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]).verifying_key());
         let consensus = PoAConsensus::new(test_key, 1000);
 
         let block = Block {
@@ -357,10 +356,8 @@ fn benchmark_consensus_operations(c: &mut Criterion) {
             prev_hash: [0u8; 32],
             hash: [1u8; 32],
             transactions: vec![],
-            accounts_root_hash: [2u8; 32],
-            storage_root_hash: [3u8; 32],
-            signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
             nonce: 0,
+            metadata: None,
         };
 
         b.iter(|| {

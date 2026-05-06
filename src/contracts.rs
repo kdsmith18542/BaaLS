@@ -401,6 +401,13 @@ impl<S: Storage> BaaLSContractEngine<S> {
                             .contract_storage_remove(&host_state.contract_id, key)
                             .ok();
                     }
+                    // Persist emitted events
+                    for (topic, data) in &host_state.events {
+                        host_state
+                            .storage
+                            .contract_emit_event(&host_state.contract_id, topic, data)
+                            .ok();
+                    }
                 }
 
                 let events = host_state.events.clone();

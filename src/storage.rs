@@ -110,6 +110,17 @@ pub trait Storage: Send + Sync {
         contract_id: &ContractId,
         key: &[u8],
     ) -> Result<(), StorageError>;
+    fn contract_emit_event(
+        &self,
+        contract_id: &ContractId,
+        topic: &[u8],
+        data: &[u8],
+    ) -> Result<(), StorageError>;
+    fn get_contract_events(
+        &self,
+        contract_id: &ContractId,
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError>;
     fn get_all_contract_storage_keys(
         &self,
         contract_id: &ContractId,
@@ -682,6 +693,50 @@ impl Storage for SledStorage {
         let full_key = format!("state:{}:{}", hex::encode(contract_id.id), hex::encode(key));
         self.contract_storage_tree.remove(full_key)?;
         Ok(())
+    }
+
+    fn contract_emit_event(
+        &self,
+        contract_id: &ContractId,
+        topic: &[u8],
+        data: &[u8],
+    ) -> Result<(), StorageError> {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let key = format!(
+            "event:{}:{:0>20}:{}",
+            hex::encode(contract_id.id),
+            timestamp,
+            hex::encode(topic)
+        );
+        let value = data.to_vec();
+        self.contract_storage_tree.insert(key, value)?;
+        Ok(())
+    }
+
+    fn get_contract_events(
+        &self,
+        contract_id: &ContractId,
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let prefix = format!("event:{}:", hex::encode(contract_id.id));
+        let mut events = Vec::new();
+        for item in self.contract_storage_tree.scan_prefix(prefix.as_bytes()) {
+            let (raw_key, value) = item?;
+            let key_str = String::from_utf8_lossy(&raw_key);
+            let topic_hex = key_str
+                .rsplit(':')
+                .next()
+                .unwrap_or("");
+            let topic = hex::decode(topic_hex).unwrap_or_default();
+            events.push((topic, value.to_vec()));
+            if events.len() >= limit {
+                break;
+            }
+        }
+        Ok(events)
     }
 
     fn get_all_contract_storage_keys(
