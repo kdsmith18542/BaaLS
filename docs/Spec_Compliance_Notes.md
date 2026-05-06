@@ -73,11 +73,20 @@ Intentional design deviations from the spec documents in `docs/`, with rationale
 
 ## Remaining Known Gaps
 
+All gaps below are **documented/architectural deferrals** — they represent intentional scope decisions or infrastructure prerequisites rather than missing functionality.
+
 | Gap | Status | Notes |
 |-----|--------|-------|
-| H6: Chain reorganization | Deferred | Fork detection exists (`sync.rs`), no chain-switch logic |
-| H10: Capability-based WASI security | Deferred | All contracts have equal host function access |
-| M5: Storage key prefixes | Deferred | Raw keys used; migration risk if adding prefixes |
-| M6: get_transaction_by_id return type | Deferred | Returns Transaction only, spec wants (Block, Transaction) |
-| M7: Real storage compaction | Deferred | Sled lacks compaction API |
-| L5: NodeJS native addon | Deferred | TypeScript types only, no napi-rs/neon implementation |
+| M2: ContractEngine trait diffs | Documented | Extra params (deployer_nonce, gas_limit, value) are functional improvements. See §Contract Engine Deviations above. |
+| M3: No WasmRuntime sub-trait | Documented | WASM execution inline in BaaLSContractEngine. See §Contract Engine Deviations above. |
+| M5: Storage key prefixes | Deferred | Raw keys used; migration risk if adding `"acc:"`, `"code:"` prefixes. |
+| M6: get_transaction_by_id return type | Deferred | Returns Transaction only; returning (Block, Transaction) requires reverse tx-to-block index. |
+| M7: Real storage compaction | Deferred | Sled lacks compaction API; migration to redb/rocksdb would provide this. |
+| L5: NodeJS native addon | Deferred | TypeScript types only. Requires napi-rs or neon implementation. |
+
+### Resolved Gaps (previously in this section)
+
+| Gap | Status |
+|-----|--------|
+| H6: Chain reorganization | ✅ Implemented — `reorganize_chain()` in runtime.rs |
+| H10: Capability-based WASI security | ✅ Implemented — `ContractPermissions` checked in storage_write, call_contract, emit_event |
