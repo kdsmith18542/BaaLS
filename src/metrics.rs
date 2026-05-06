@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use sysinfo::{System, SystemExt};
+use sysinfo::System;
 use tokio::time::interval;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,10 +241,7 @@ impl MetricsCollector {
 
     pub fn record_error(&self, error_type: &str) {
         let mut metrics = self.metrics.lock().unwrap();
-        *metrics
-            .error_count
-            .entry(error_type.to_string())
-            .or_insert(0) += 1;
+        *metrics.error_count.entry(error_type.to_string()).or_insert(0) += 1;
     }
 
     pub fn record_mempool_operation(&self) {
@@ -304,19 +301,11 @@ impl MetricsCollector {
         let metrics = self.get_metrics();
         let mut summary = HashMap::new();
 
-        summary.insert(
-            "total_blocks".to_string(),
-            metrics.total_blocks_processed as f64,
-        );
-        summary.insert(
-            "total_transactions".to_string(),
-            metrics.total_transactions_processed as f64,
-        );
+        summary.insert("total_blocks".to_string(), metrics.total_blocks_processed as f64);
+        summary
+            .insert("total_transactions".to_string(), metrics.total_transactions_processed as f64);
         summary.insert("throughput_tps".to_string(), metrics.throughput_tps);
-        summary.insert(
-            "uptime_seconds".to_string(),
-            metrics.uptime.as_secs() as f64,
-        );
+        summary.insert("uptime_seconds".to_string(), metrics.uptime.as_secs() as f64);
         summary.insert("average_block_size".to_string(), metrics.average_block_size);
         summary.insert(
             "peak_memory_mb".to_string(),
@@ -327,10 +316,8 @@ impl MetricsCollector {
         if !metrics.block_processing_time.is_empty() {
             let avg_block_time: Duration = metrics.block_processing_time.iter().sum::<Duration>()
                 / metrics.block_processing_time.len() as u32;
-            summary.insert(
-                "avg_block_processing_ms".to_string(),
-                avg_block_time.as_millis() as f64,
-            );
+            summary
+                .insert("avg_block_processing_ms".to_string(), avg_block_time.as_millis() as f64);
         }
 
         if !metrics.transaction_validation_time.is_empty() {
@@ -343,14 +330,8 @@ impl MetricsCollector {
             );
         }
 
-        summary.insert(
-            "latency_p95_ms".to_string(),
-            metrics.latency_p95.as_millis() as f64,
-        );
-        summary.insert(
-            "latency_p99_ms".to_string(),
-            metrics.latency_p99.as_millis() as f64,
-        );
+        summary.insert("latency_p95_ms".to_string(), metrics.latency_p95.as_millis() as f64);
+        summary.insert("latency_p99_ms".to_string(), metrics.latency_p99.as_millis() as f64);
 
         summary
     }
@@ -497,12 +478,15 @@ pub struct PerformanceProfiler {
     profiling_enabled: bool,
 }
 
+impl Default for PerformanceProfiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerformanceProfiler {
     pub fn new() -> Self {
-        Self {
-            collector: MetricsCollector::new(),
-            profiling_enabled: true,
-        }
+        Self { collector: MetricsCollector::new(), profiling_enabled: true }
     }
 
     pub fn enable_profiling(&mut self) {

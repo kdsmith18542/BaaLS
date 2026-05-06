@@ -1,5 +1,6 @@
 [package]
 name = "baals"
+exclude = ["fuzz"]
 version = "0.1.0"
 edition = "2021"
 
@@ -7,13 +8,14 @@ edition = "2021"
 crate-type = ["lib", "cdylib"]
 
 [[bin]]
-name = "baals"
+name = "baalsd"
 path = "src/main.rs"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sled = "0.34"
+redb = "2.0"
 ed25519-dalek = { version = "2.2", features = ["serde"] }
 sha2 = "0.10"
 blake3 = "1.5"
@@ -21,9 +23,9 @@ hex = "0.4"
 bincode = "1.3"
 tokio = { version = "1.0", features = ["full"] }
 clap = { version = "4.0", features = ["derive"] }
-wasmtime = "18.0"
+wasmtime = "27.0"
 anyhow = "1.0"
-rand = "0.8"
+rand = "0.9"
 thiserror = "1.0"
 async-trait = "0.1"
 aes-gcm = "0.10"
@@ -32,7 +34,7 @@ zeroize = "1.7"
 dirs = "5.0"
 log = "0.4"
 postcard = "1.0"
-sysinfo = "0.29"
+sysinfo = "0.33"
 criterion = "0.5"
 toml = "0.8"
 env_logger = "0.10"
@@ -46,6 +48,7 @@ rcgen = "0.13"
 tempfile = "3.8"
 env_logger = "0.10"
 bincode = "1.3"
+wat = "1.0"
 
 [[bench]]
 name = "performance_benchmarks"

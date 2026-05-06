@@ -26,8 +26,9 @@ pub enum MerkleError {
     EmptyTree,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HashAlgorithm {
+    #[default]
     Sha256,
     Blake3,
 }
@@ -48,6 +49,7 @@ pub fn hash_with_algorithm(data: &[u8], algorithm: HashAlgorithm) -> [u8; 32] {
 }
 
 /// Simple Merkle Tree implementation for state verification
+#[derive(Default)]
 pub struct MerkleTree {
     leaves: Vec<[u8; 32]>,
     root: RefCell<Option<[u8; 32]>>,
@@ -56,19 +58,11 @@ pub struct MerkleTree {
 
 impl MerkleTree {
     pub fn new() -> Self {
-        Self {
-            leaves: Vec::new(),
-            root: RefCell::new(None),
-            algorithm: HashAlgorithm::Sha256,
-        }
+        Self { leaves: Vec::new(), root: RefCell::new(None), algorithm: HashAlgorithm::Sha256 }
     }
 
     pub fn with_algorithm(algorithm: HashAlgorithm) -> Self {
-        Self {
-            leaves: Vec::new(),
-            root: RefCell::new(None),
-            algorithm,
-        }
+        Self { leaves: Vec::new(), root: RefCell::new(None), algorithm }
     }
 
     pub fn add_leaf(&mut self, data: &[u8]) {
@@ -130,11 +124,8 @@ impl MerkleTree {
         let algo = self.algorithm;
 
         while current_level.len() > 1 {
-            let sibling_index = if current_index % 2 == 0 {
-                current_index + 1
-            } else {
-                current_index - 1
-            };
+            let sibling_index =
+                if current_index.is_multiple_of(2) { current_index + 1 } else { current_index - 1 };
 
             if sibling_index < current_level.len() {
                 proof.push(current_level[sibling_index]);
@@ -179,7 +170,7 @@ impl MerkleTree {
         let algo = self.algorithm;
 
         for proof_element in proof.iter() {
-            let combined: Vec<u8> = if current_index % 2 == 0 {
+            let combined: Vec<u8> = if current_index.is_multiple_of(2) {
                 let mut c = Vec::from(current_hash);
                 c.extend_from_slice(proof_element);
                 c
@@ -207,15 +198,16 @@ pub struct SparseMerkleProof {
 
 /// Key-indexed sparse Merkle tree (256-bit keys).
 /// Leaves are hashed as H(0x00 || key || H(value)), and internal nodes as H(0x01 || left || right).
+#[derive(Default)]
 pub struct SparseMerkleTree {
     leaves: std::collections::BTreeMap<[u8; 32], Vec<u8>>,
 }
 
+type BuildLevelsResult = (Vec<std::collections::BTreeMap<[u8; 32], [u8; 32]>>, Vec<[u8; 32]>);
+
 impl SparseMerkleTree {
     pub fn new() -> Self {
-        Self {
-            leaves: std::collections::BTreeMap::new(),
-        }
+        Self { leaves: std::collections::BTreeMap::new() }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -243,10 +235,8 @@ impl SparseMerkleTree {
                 Self::set_bit(&mut s, depth - 1, if bit == 0 { 1 } else { 0 });
                 Self::truncate_key(s, depth)
             };
-            let sibling_hash = levels[depth]
-                .get(&sibling_prefix)
-                .copied()
-                .unwrap_or(defaults[depth]);
+            let sibling_hash =
+                levels[depth].get(&sibling_prefix).copied().unwrap_or(defaults[depth]);
             siblings.push(sibling_hash);
             prefix = Self::truncate_key(prefix, depth - 1);
         }
@@ -277,16 +267,10 @@ impl SparseMerkleTree {
         current == expected_root
     }
 
-    fn build_levels(
-        &self,
-    ) -> (
-        Vec<std::collections::BTreeMap<[u8; 32], [u8; 32]>>,
-        Vec<[u8; 32]>,
-    ) {
+    fn build_levels(&self) -> BuildLevelsResult {
         let defaults = Self::default_hashes();
-        let mut levels: Vec<std::collections::BTreeMap<[u8; 32], [u8; 32]>> = (0..=256)
-            .map(|_| std::collections::BTreeMap::new())
-            .collect();
+        let mut levels: Vec<std::collections::BTreeMap<[u8; 32], [u8; 32]>> =
+            (0..=256).map(|_| std::collections::BTreeMap::new()).collect();
 
         for (key, value) in &self.leaves {
             levels[256].insert(*key, Self::hash_leaf(*key, value));
@@ -302,14 +286,9 @@ impl SparseMerkleTree {
             for parent_key in parent_keys {
                 let left_prefix = Self::child_prefix(parent_key, depth, 0);
                 let right_prefix = Self::child_prefix(parent_key, depth, 1);
-                let left_hash = levels[depth]
-                    .get(&left_prefix)
-                    .copied()
-                    .unwrap_or(defaults[depth]);
-                let right_hash = levels[depth]
-                    .get(&right_prefix)
-                    .copied()
-                    .unwrap_or(defaults[depth]);
+                let left_hash = levels[depth].get(&left_prefix).copied().unwrap_or(defaults[depth]);
+                let right_hash =
+                    levels[depth].get(&right_prefix).copied().unwrap_or(defaults[depth]);
                 parents.insert(parent_key, Self::hash_internal(left_hash, right_hash));
             }
             levels[depth - 1] = parents;
@@ -383,9 +362,7 @@ pub struct PublicKey(VerifyingKey);
 
 impl PublicKey {
     pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, CryptoError> {
-        VerifyingKey::from_bytes(bytes)
-            .map(PublicKey)
-            .map_err(|_| CryptoError::InvalidPublicKey)
+        VerifyingKey::from_bytes(bytes).map(PublicKey).map_err(|_| CryptoError::InvalidPublicKey)
     }
 
     pub fn to_bytes(&self) -> [u8; 32] {
@@ -432,9 +409,8 @@ impl<'de> Deserialize<'de> for PublicKey {
         if bytes.len() != 32 {
             return Err(serde::de::Error::custom("Invalid public key length"));
         }
-        let arr: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| serde::de::Error::custom("Invalid public key length"))?;
+        let arr: [u8; 32] =
+            bytes.try_into().map_err(|_| serde::de::Error::custom("Invalid public key length"))?;
         PublicKey::from_bytes(&arr).map_err(serde::de::Error::custom)
     }
 }
@@ -445,9 +421,7 @@ pub struct TransactionSignature(ed25519_dalek::Signature);
 
 impl TransactionSignature {
     pub fn from_bytes(bytes: &[u8; 64]) -> Result<Self, CryptoError> {
-        Ok(TransactionSignature(ed25519_dalek::Signature::from_bytes(
-            bytes,
-        )))
+        Ok(TransactionSignature(ed25519_dalek::Signature::from_bytes(bytes)))
     }
 
     pub fn to_bytes(&self) -> [u8; 64] {
@@ -484,20 +458,17 @@ impl<'de> Deserialize<'de> for TransactionSignature {
     {
         let bytes = Vec::<u8>::deserialize(deserializer)?;
         if bytes.len() != 64 {
-            return Err(serde::de::Error::custom(
-                "Invalid signature length: expected 64",
-            ));
+            return Err(serde::de::Error::custom("Invalid signature length: expected 64"));
         }
-        let arr: [u8; 64] = bytes
-            .try_into()
-            .map_err(|_| serde::de::Error::custom("Invalid signature length"))?;
+        let arr: [u8; 64] =
+            bytes.try_into().map_err(|_| serde::de::Error::custom("Invalid signature length"))?;
         TransactionSignature::from_bytes(&arr).map_err(serde::de::Error::custom)
     }
 }
 
 impl PartialOrd for PublicKey {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.0.to_bytes().cmp(&other.0.to_bytes()))
+        Some(self.cmp(other))
     }
 }
 
@@ -592,20 +563,10 @@ impl std::fmt::Display for Address {
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub enum TransactionPayload {
-    Transfer {
-        amount: u64,
-    },
-    ContractDeploy {
-        wasm_bytes: Vec<u8>,
-    },
-    ContractCall {
-        method: String,
-        args: Vec<u8>,
-        value: Option<u64>,
-    },
-    Data {
-        data: Vec<u8>,
-    },
+    Transfer { amount: u64 },
+    ContractDeploy { wasm_bytes: Vec<u8> },
+    ContractCall { method: String, args: Vec<u8>, value: Option<u64> },
+    Data { data: Vec<u8> },
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -634,6 +595,13 @@ impl Account {
         match self {
             Account::Wallet { nonce, .. } => *nonce,
             Account::Contract { nonce, .. } => *nonce,
+        }
+    }
+
+    pub fn balance(&self) -> u64 {
+        match self {
+            Account::Wallet { balance, .. } => *balance,
+            Account::Contract { .. } => 0,
         }
     }
 
@@ -713,14 +681,12 @@ impl Transaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::OsRng;
     use rand::RngCore;
 
     #[test]
     fn test_block_hash_calculation() {
-        let mut rng = OsRng;
         let mut sk_bytes = [0u8; 32];
-        rng.fill_bytes(&mut sk_bytes);
+        rand::rng().fill_bytes(&mut sk_bytes);
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
         let sender_pk = PublicKey::from(signing_key.verifying_key());
 
@@ -730,9 +696,7 @@ mod tests {
             nonce: 1,
             timestamp: 1234567890,
             recipient: Address::Wallet(sender_pk),
-            payload: TransactionPayload::Data {
-                data: vec![1, 2, 3],
-            },
+            payload: TransactionPayload::Data { data: vec![1, 2, 3] },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
             gas_limit: 0,
             priority: 0,
@@ -744,9 +708,7 @@ mod tests {
             nonce: 2,
             timestamp: 1234567891,
             recipient: Address::Wallet(sender_pk),
-            payload: TransactionPayload::Data {
-                data: vec![4, 5, 6],
-            },
+            payload: TransactionPayload::Data { data: vec![4, 5, 6] },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
             gas_limit: 0,
             priority: 0,
@@ -778,9 +740,8 @@ mod tests {
 
     #[test]
     fn test_transaction_signing_and_verification() {
-        let mut rng = OsRng;
         let mut sk_bytes = [0u8; 32];
-        rng.fill_bytes(&mut sk_bytes);
+        rand::rng().fill_bytes(&mut sk_bytes);
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
         let public_key = PublicKey::from(signing_key.verifying_key());
         let private_key = signing_key;
@@ -791,9 +752,7 @@ mod tests {
             nonce: 1,
             timestamp: 1234567890,
             recipient: Address::Wallet(public_key),
-            payload: TransactionPayload::Data {
-                data: vec![1, 2, 3],
-            },
+            payload: TransactionPayload::Data { data: vec![1, 2, 3] },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
             gas_limit: 0,
             priority: 0,
@@ -912,9 +871,7 @@ mod tests {
         // Tamper with a proof element
         let mut tampered_proof = proof.clone();
         tampered_proof[0] = [0xff; 32];
-        assert!(!tree
-            .verify_proof(0, b"alpha", &tampered_proof, root)
-            .unwrap());
+        assert!(!tree.verify_proof(0, b"alpha", &tampered_proof, root).unwrap());
     }
 
     #[test]
@@ -938,10 +895,7 @@ mod tests {
     fn test_merkle_tree_invalid_leaf_index() {
         let mut tree = MerkleTree::new();
         tree.add_leaf(b"only");
-        assert!(matches!(
-            tree.generate_proof(1),
-            Err(MerkleError::InvalidLeafIndex)
-        ));
+        assert!(matches!(tree.generate_proof(1), Err(MerkleError::InvalidLeafIndex)));
         assert!(matches!(
             tree.verify_proof(1, b"only", &[], [0; 32]),
             Err(MerkleError::InvalidLeafIndex)
@@ -979,11 +933,7 @@ mod tests {
 
         let root = tree.root();
         let proof_a = tree.generate_proof(key_a);
-        assert!(SparseMerkleTree::verify_proof(
-            key_a, b"alpha", &proof_a, root
-        ));
-        assert!(!SparseMerkleTree::verify_proof(
-            key_a, b"wrong", &proof_a, root
-        ));
+        assert!(SparseMerkleTree::verify_proof(key_a, b"alpha", &proof_a, root));
+        assert!(!SparseMerkleTree::verify_proof(key_a, b"wrong", &proof_a, root));
     }
 }

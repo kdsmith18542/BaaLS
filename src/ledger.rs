@@ -68,10 +68,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
     const MAX_FUTURE_BLOCK_TIMESTAMP_SECONDS: u64 = 10;
     pub fn new(storage: Arc<S>, contract_engine: Arc<C>) -> Self {
         debug!("Ledger::new called");
-        Ledger {
-            storage,
-            contract_engine,
-        }
+        Ledger { storage, contract_engine }
     }
 
     pub fn initialize_chain(&self) -> Result<(), LedgerError> {
@@ -170,10 +167,8 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         // Timestamp check (simplified for MVP, typically more robust logic needed)
         info!("[LEDGER] Validating block timestamp");
         if block.index > 0 {
-            let prev_block = self
-                .storage
-                .get_block(&block.prev_hash)?
-                .ok_or(LedgerError::NotFound)?;
+            let prev_block =
+                self.storage.get_block(&block.prev_hash)?.ok_or(LedgerError::NotFound)?;
             if block.timestamp <= prev_block.timestamp {
                 return Err(LedgerError::BlockValidation(
                     "Block timestamp is not greater than previous block's timestamp".to_string(),
@@ -191,10 +186,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         }
 
         // Transaction Validation (within the block) - only basic checks for MVP
-        info!(
-            "[LEDGER] Validating {} transactions",
-            block.transactions.len()
-        );
+        info!("[LEDGER] Validating {} transactions", block.transactions.len());
         for (i, tx) in block.transactions.iter().enumerate() {
             info!(
                 "[LEDGER] Validating transaction {}: hash={}",
@@ -225,26 +217,21 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             }
         }
 
-        Err(LedgerError::StateTransition(
-            StateTransitionError::ContractError(
-                "Failed to derive deterministic contract account key".to_string(),
-            ),
-        ))
+        Err(LedgerError::StateTransition(StateTransitionError::ContractError(
+            "Failed to derive deterministic contract account key".to_string(),
+        )))
     }
 
     fn compute_contract_code_hash(
         &self,
         contract_id: &ContractId,
     ) -> Result<[u8; 32], LedgerError> {
-        let code = self
-            .storage
-            .get_contract_code(contract_id)?
-            .ok_or_else(|| {
-                LedgerError::ContractNotFound(format!(
-                    "Contract not found: {}",
-                    hex::encode(contract_id.to_bytes())
-                ))
-            })?;
+        let code = self.storage.get_contract_code(contract_id)?.ok_or_else(|| {
+            LedgerError::ContractNotFound(format!(
+                "Contract not found: {}",
+                hex::encode(contract_id.to_bytes())
+            ))
+        })?;
         let mut hasher = Sha256::new();
         hasher.update(&code);
         Ok(hasher.finalize().into())
@@ -297,10 +284,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         let mut accounts_to_update: BTreeMap<PublicKey, Account> = BTreeMap::new();
         let mut touched_contracts: BTreeSet<[u8; 32]> = BTreeSet::new();
 
-        info!(
-            "[LEDGER] Processing {} transactions",
-            block.transactions.len()
-        );
+        info!("[LEDGER] Processing {} transactions", block.transactions.len());
         // Sort transactions by (sender, nonce) to ensure sequential nonce processing
         block.transactions.sort_by_key(|tx| (tx.sender, tx.nonce));
         for (i, tx) in block.transactions.iter().enumerate() {
@@ -321,36 +305,25 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                         ))
                     })?
                 };
-            info!(
-                "[LEDGER] Sender account found: nonce={}",
-                sender_account.nonce()
-            );
+            info!("[LEDGER] Sender account found: nonce={}", sender_account.nonce());
 
             // Nonce Check
             if sender_account.nonce() + 1 != tx.nonce {
-                return Err(LedgerError::StateTransition(
-                    StateTransitionError::InvalidNonce {
-                        expected: sender_account.nonce() + 1,
-                        got: tx.nonce,
-                    },
-                ));
+                return Err(LedgerError::StateTransition(StateTransitionError::InvalidNonce {
+                    expected: sender_account.nonce() + 1,
+                    got: tx.nonce,
+                }));
             }
             sender_account.set_nonce(sender_account.nonce() + 1);
             accounts_to_update.insert(sender_pk, sender_account.clone());
-            info!(
-                "[LEDGER] Sender nonce updated to {}",
-                sender_account.nonce()
-            );
+            info!("[LEDGER] Sender nonce updated to {}", sender_account.nonce());
 
             let mut gas_used = 0u64;
             let mut tx_success = true;
 
             match &tx.payload {
                 TransactionPayload::Transfer { amount } => {
-                    info!(
-                        "[LEDGER] Processing transfer transaction: amount={}",
-                        amount
-                    );
+                    info!("[LEDGER] Processing transfer transaction: amount={}", amount);
                     // Fixed gas cost for native transfer
                     let transfer_gas_cost = 21000;
                     gas_used += transfer_gas_cost;
@@ -390,10 +363,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                                 {
                                     existing_account
                                 } else {
-                                    Account::Wallet {
-                                        balance: 0,
-                                        nonce: 0,
-                                    }
+                                    Account::Wallet { balance: 0, nonce: 0 }
                                 };
 
                                 if let Account::Wallet { balance, .. } = &mut recipient_account {
@@ -478,11 +448,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                         }
                     }
                 }
-                TransactionPayload::ContractCall {
-                    method,
-                    args,
-                    value,
-                } => {
+                TransactionPayload::ContractCall { method, args, value } => {
                     let contract_id = match &tx.recipient {
                         crate::types::Address::Contract(cid) => cid,
                         _ => return Err(LedgerError::InvalidTransactionPayload),
@@ -563,18 +529,13 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
 
             // If transaction failed due to out of gas, skip state changes for this tx
             if !tx_success {
-                return Err(LedgerError::StateTransition(
-                    StateTransitionError::ExecutionFailed(format!(
-                        "Transaction execution failed: {}",
-                        crate::types::format_hex(&tx.hash)
-                    )),
-                ));
+                return Err(LedgerError::StateTransition(StateTransitionError::ExecutionFailed(
+                    format!("Transaction execution failed: {}", crate::types::format_hex(&tx.hash)),
+                )));
             }
 
             // Remove from mempool after successful processing
-            batch
-                .ops
-                .push(StorageOperation::DeleteMempool(tx.hash.to_vec()));
+            batch.ops.push(StorageOperation::DeleteMempool(tx.hash.to_vec()));
         }
 
         // Recompute and update storage roots for all contracts touched in this block.
@@ -586,34 +547,24 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             let current_account = if let Some(account) = accounts_to_update.get(&contract_key) {
                 account.clone()
             } else {
-                self.storage
-                    .get_account(&contract_key)?
-                    .unwrap_or(Account::Contract {
-                        code_hash: self.compute_contract_code_hash(&contract_id)?,
-                        storage_root_hash: [0; 32],
-                        nonce: 0,
-                    })
+                self.storage.get_account(&contract_key)?.unwrap_or(Account::Contract {
+                    code_hash: self.compute_contract_code_hash(&contract_id)?,
+                    storage_root_hash: [0; 32],
+                    nonce: 0,
+                })
             };
 
             match current_account {
-                Account::Contract {
-                    code_hash, nonce, ..
-                } => {
+                Account::Contract { code_hash, nonce, .. } => {
                     accounts_to_update.insert(
                         contract_key,
-                        Account::Contract {
-                            code_hash,
-                            storage_root_hash,
-                            nonce,
-                        },
+                        Account::Contract { code_hash, storage_root_hash, nonce },
                     );
                 }
                 Account::Wallet { .. } => {
-                    return Err(LedgerError::StateTransition(
-                        StateTransitionError::ContractError(
-                            "Contract account key collides with wallet account".to_string(),
-                        ),
-                    ));
+                    return Err(LedgerError::StateTransition(StateTransitionError::ContractError(
+                        "Contract account key collides with wallet account".to_string(),
+                    )));
                 }
             }
         }
@@ -642,11 +593,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             let key_hash: [u8; 32] = Sha256::digest(pk.to_bytes()).into();
             merkle.insert(key_hash, bincode::serialize(account)?);
         }
-        let accounts_root_hash = if merkle.is_empty() {
-            [0; 32]
-        } else {
-            merkle.root()
-        };
+        let accounts_root_hash = if merkle.is_empty() { [0; 32] } else { merkle.root() };
 
         // Update chain state
         current_chain_state.latest_block_hash = block.hash;
@@ -658,25 +605,19 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         ));
 
         // Store the block itself
-        batch.ops.push(StorageOperation::PutBlock(
-            block.hash.to_vec(),
-            bincode::serialize(&block)?,
-        ));
+        batch
+            .ops
+            .push(StorageOperation::PutBlock(block.hash.to_vec(), bincode::serialize(&block)?));
 
         // Store transactions and index them by block hash
         for (i, tx) in block.transactions.iter().enumerate() {
             // Store the transaction
-            batch.ops.push(StorageOperation::PutTransaction(
-                tx.hash.to_vec(),
-                bincode::serialize(tx)?,
-            ));
+            batch
+                .ops
+                .push(StorageOperation::PutTransaction(tx.hash.to_vec(), bincode::serialize(tx)?));
             // Index the transaction by block (add to batch)
-            let index_key = format!(
-                "block_tx:{}:{}:{:0>10}",
-                hex::encode(&block.hash),
-                hex::encode(&tx.hash),
-                i
-            );
+            let index_key =
+                format!("block_tx:{}:{}:{:0>10}", hex::encode(block.hash), hex::encode(tx.hash), i);
             batch.ops.push(StorageOperation::PutTxIndex(
                 index_key.as_bytes().to_vec(),
                 tx.hash.to_vec(),

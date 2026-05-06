@@ -43,6 +43,15 @@ pub struct StorageConfig {
     pub cache_size_mb: u64,
     #[serde(default = "default_compression")]
     pub compression: bool,
+    #[serde(default)]
+    pub backend: StorageBackend,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub enum StorageBackend {
+    #[default]
+    Sled,
+    Redb,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +155,7 @@ impl Default for Config {
             storage: StorageConfig {
                 cache_size_mb: default_cache_mb(),
                 compression: default_compression(),
+                backend: StorageBackend::default(),
             },
             network: NetworkConfig {
                 max_peers: default_max_peers(),
@@ -207,15 +217,10 @@ impl Config {
             return Err(ConfigError::Invalid("data_dir cannot be empty".to_string()));
         }
         if self.consensus.block_time_ms < 100 {
-            return Err(ConfigError::Invalid(
-                "block_time_ms must be >= 100".to_string(),
-            ));
+            return Err(ConfigError::Invalid("block_time_ms must be >= 100".to_string()));
         }
         if !["trace", "debug", "info", "warn", "error"].contains(&self.logging.level.as_str()) {
-            return Err(ConfigError::Invalid(format!(
-                "Invalid log level: {}",
-                self.logging.level
-            )));
+            return Err(ConfigError::Invalid(format!("Invalid log level: {}", self.logging.level)));
         }
         Ok(())
     }
@@ -224,14 +229,12 @@ impl Config {
         match key {
             "node.data_dir" => self.node.data_dir = value.to_string(),
             "node.port" => {
-                self.node.port = value
-                    .parse()
-                    .map_err(|_| ConfigError::Invalid("Invalid port".into()))?
+                self.node.port =
+                    value.parse().map_err(|_| ConfigError::Invalid("Invalid port".into()))?
             }
             "node.health_port" => {
-                self.node.health_port = value
-                    .parse()
-                    .map_err(|_| ConfigError::Invalid("Invalid health_port".into()))?
+                self.node.health_port =
+                    value.parse().map_err(|_| ConfigError::Invalid("Invalid health_port".into()))?
             }
             "node.mempool_limit" => {
                 self.node.mempool_limit = value
@@ -250,9 +253,8 @@ impl Config {
             }
             "consensus.authority_key" => self.consensus.authority_key = value.to_string(),
             "network.max_peers" => {
-                self.network.max_peers = value
-                    .parse()
-                    .map_err(|_| ConfigError::Invalid("Invalid max_peers".into()))?
+                self.network.max_peers =
+                    value.parse().map_err(|_| ConfigError::Invalid("Invalid max_peers".into()))?
             }
             "network.connection_timeout_ms" => {
                 self.network.connection_timeout_ms = value

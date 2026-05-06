@@ -1,5 +1,6 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_uint};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
@@ -11,6 +12,9 @@ static SDK_INSTANCE: OnceLock<Mutex<BaaLSSdk>> = OnceLock::new();
 
 // ─── Helpers ───
 
+/// # Safety
+///
+/// `ptr` must be null or a valid, null-terminated C string.
 unsafe fn c_str_to_path(ptr: *const c_char) -> Option<PathBuf> {
     if ptr.is_null() {
         return None;
@@ -18,13 +22,18 @@ unsafe fn c_str_to_path(ptr: *const c_char) -> Option<PathBuf> {
     CStr::from_ptr(ptr).to_str().ok().map(PathBuf::from)
 }
 
+/// # Safety
+///
+/// The global SDK instance must have been initialized via `baals_sdk_init`.
+/// Callers must ensure no concurrent init/access race.
 unsafe fn with_sdk<F, T>(f: F) -> Result<T, c_uint>
 where
     F: FnOnce(&BaaLSSdk) -> Result<T, crate::sdk::SdkError>,
 {
     if let Some(sdk) = SDK_INSTANCE.get() {
         let sdk = sdk.lock().unwrap();
-        f(&sdk).map_err(|_| 1u32)
+        let result = catch_unwind(AssertUnwindSafe(|| f(&sdk))).map_err(|_| 3u32)?;
+        result.map_err(|_| 1u32)
     } else {
         Err(2u32)
     }
@@ -41,7 +50,11 @@ fn json_or_null<T: serde::Serialize>(val: &T) -> *mut c_char {
 // ─── Init / Lifecycle ───
 
 #[no_mangle]
-pub extern "C" fn baals_sdk_init(data_dir: *const c_char) -> c_uint {
+/// # Safety
+///
+/// `data_dir` must be null or a valid, null-terminated C string path.
+/// Should be called exactly once before any other SDK function.
+pub unsafe extern "C" fn baals_sdk_init(data_dir: *const c_char) -> c_uint {
     let dir = match unsafe { c_str_to_path(data_dir) } {
         Some(d) => d,
         None => return 1,
@@ -76,9 +89,7 @@ pub extern "C" fn baals_sdk_stop() -> c_uint {
 #[no_mangle]
 pub extern "C" fn baals_sdk_chain_state_json() -> *mut c_char {
     unsafe {
-        with_sdk(|s| s.get_chain_state())
-            .map(|cs| json_or_null(&cs))
-            .unwrap_or(ptr::null_mut())
+        with_sdk(|s| s.get_chain_state()).map(|cs| json_or_null(&cs)).unwrap_or(ptr::null_mut())
     }
 }
 
@@ -94,7 +105,10 @@ pub extern "C" fn baals_sdk_get_block_by_height(height: u64) -> *mut c_char {
 }
 
 #[no_mangle]
-pub extern "C" fn baals_sdk_get_transaction(hash_ptr: *const u8) -> *mut c_char {
+/// # Safety
+///
+/// `hash_ptr` must point to a valid 32-byte array (or be null, in which case null is returned).
+pub unsafe extern "C" fn baals_sdk_get_transaction(hash_ptr: *const u8) -> *mut c_char {
     if hash_ptr.is_null() {
         return ptr::null_mut();
     }
@@ -111,7 +125,10 @@ pub extern "C" fn baals_sdk_get_transaction(hash_ptr: *const u8) -> *mut c_char 
 }
 
 #[no_mangle]
-pub extern "C" fn baals_sdk_get_account(pubkey_ptr: *const u8) -> *mut c_char {
+/// # Safety
+///
+/// `pubkey_ptr` must point to a valid 32-byte Ed25519 public key (or be null, in which case null is returned).
+pub unsafe extern "C" fn baals_sdk_get_account(pubkey_ptr: *const u8) -> *mut c_char {
     if pubkey_ptr.is_null() {
         return ptr::null_mut();
     }
@@ -134,7 +151,10 @@ pub extern "C" fn baals_sdk_get_account(pubkey_ptr: *const u8) -> *mut c_char {
 // ─── Transactions ───
 
 #[no_mangle]
-pub extern "C" fn baals_sdk_submit_tx(tx_json: *const c_char) -> c_uint {
+/// # Safety
+///
+/// `tx_json` must be a valid, null-terminated JSON string.
+pub unsafe extern "C" fn baals_sdk_submit_tx(tx_json: *const c_char) -> c_uint {
     let json = match unsafe { c_str_to_path(tx_json) } {
         Some(p) => p.to_string_lossy().to_string(),
         None => return 1,
@@ -143,15 +163,14 @@ pub extern "C" fn baals_sdk_submit_tx(tx_json: *const c_char) -> c_uint {
         Ok(t) => t,
         Err(_) => return 1,
     };
-    unsafe {
-        with_sdk(|s| s.submit_transaction(tx))
-            .map(|_| 0)
-            .unwrap_or_else(|e| e)
-    }
+    unsafe { with_sdk(|s| s.submit_transaction(tx)).map(|_| 0).unwrap_or_else(|e| e) }
 }
 
 #[no_mangle]
-pub extern "C" fn baals_sdk_create_account(pubkey_ptr: *const u8, balance: u64) -> c_uint {
+/// # Safety
+///
+/// `pubkey_ptr` must point to a valid 32-byte Ed25519 public key (or be null).
+pub unsafe extern "C" fn baals_sdk_create_account(pubkey_ptr: *const u8, balance: u64) -> c_uint {
     if pubkey_ptr.is_null() {
         return 1;
     }
@@ -163,17 +182,18 @@ pub extern "C" fn baals_sdk_create_account(pubkey_ptr: *const u8, balance: u64) 
         Err(_) => return 1,
     };
     let account = Account::Wallet { balance, nonce: 0 };
-    unsafe {
-        with_sdk(|s| s.create_account(&pk, account))
-            .map(|_| 0)
-            .unwrap_or_else(|e| e)
-    }
+    unsafe { with_sdk(|s| s.create_account(&pk, account)).map(|_| 0).unwrap_or_else(|e| e) }
 }
 
 // ─── Contracts ───
 
 #[no_mangle]
-pub extern "C" fn baals_sdk_deploy_contract(
+/// # Safety
+///
+/// All pointer arguments must be valid for reads of the specified length during the call.
+/// `deployer_ptr` must point to 32 bytes. `wasm_ptr` must point to `wasm_len` bytes.
+/// `init_payload_ptr` may be null (if `init_payload_len` is 0) or point to `init_payload_len` bytes.
+pub unsafe extern "C" fn baals_sdk_deploy_contract(
     deployer_ptr: *const u8,
     wasm_ptr: *const u8,
     wasm_len: c_uint,
@@ -207,7 +227,12 @@ pub extern "C" fn baals_sdk_deploy_contract(
 }
 
 #[no_mangle]
-pub extern "C" fn baals_sdk_call_contract(
+/// # Safety
+///
+/// All pointer arguments must be valid for reads. `caller_ptr` and `contract_id_ptr`
+/// must point to 32 bytes each. `method` must be a null-terminated string.
+/// `args_ptr` may be null if `args_len` is 0.
+pub unsafe extern "C" fn baals_sdk_call_contract(
     caller_ptr: *const u8,
     contract_id_ptr: *const u8,
     method: *const c_char,
@@ -231,9 +256,7 @@ pub extern "C" fn baals_sdk_call_contract(
     cid_arr.copy_from_slice(cid_bytes);
     let cid = ContractId::from_bytes(&cid_arr);
 
-    let method_str = unsafe { CStr::from_ptr(method) }
-        .to_string_lossy()
-        .to_string();
+    let method_str = unsafe { CStr::from_ptr(method) }.to_string_lossy().to_string();
     let args = unsafe { std::slice::from_raw_parts(args_ptr, args_len as usize) };
 
     unsafe {
@@ -244,7 +267,11 @@ pub extern "C" fn baals_sdk_call_contract(
 }
 
 #[no_mangle]
-pub extern "C" fn baals_sdk_query_contract(
+/// # Safety
+///
+/// `contract_id_ptr` must point to 32 valid bytes. `method` must be a null-terminated string.
+/// `payload_ptr` may be null if `payload_len` is 0.
+pub unsafe extern "C" fn baals_sdk_query_contract(
     contract_id_ptr: *const u8,
     method: *const c_char,
     payload_ptr: *const u8,
@@ -257,9 +284,7 @@ pub extern "C" fn baals_sdk_query_contract(
     let mut cid_arr = [0u8; 32];
     cid_arr.copy_from_slice(cid_bytes);
     let cid = ContractId::from_bytes(&cid_arr);
-    let method_str = unsafe { CStr::from_ptr(method) }
-        .to_string_lossy()
-        .to_string();
+    let method_str = unsafe { CStr::from_ptr(method) }.to_string_lossy().to_string();
     let payload = if payload_ptr.is_null() {
         &[]
     } else {
@@ -275,7 +300,11 @@ pub extern "C" fn baals_sdk_query_contract(
 // ─── Memory Management ───
 
 #[no_mangle]
-pub extern "C" fn baals_sdk_free_string(s: *mut c_char) {
+/// # Safety
+///
+/// `s` must have been allocated by a previous `baals_sdk_*` call that returned a `*mut c_char`.
+/// Double-free or use-after-free will cause undefined behavior.
+pub unsafe extern "C" fn baals_sdk_free_string(s: *mut c_char) {
     if !s.is_null() {
         unsafe {
             drop(CString::from_raw(s));

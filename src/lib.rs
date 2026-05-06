@@ -11,6 +11,7 @@
 //! - Sync: Optional peer-to-peer synchronization
 //! - CLI & SDK: Command-line tools and Rust SDK
 
+pub mod any_storage;
 /// Configuration system (TOML-based)
 pub mod config;
 /// Consensus engine trait and default PoA implementation
@@ -25,23 +26,26 @@ pub mod keystore;
 pub mod ledger;
 /// Performance metrics collection and reporting
 pub mod metrics;
+pub mod redb_storage;
 /// Central runtime coordinator and public API
 pub mod runtime;
 /// Rust SDK for programmatic interaction
 pub mod sdk;
-/// Storage abstraction and Sled-based implementation
+/// Storage abstraction, Sled-based and Redb-based implementations
 pub mod storage;
 /// Optional peer-to-peer sync layer
 pub mod sync;
 /// Core types and data structures (accounts, blocks, transactions, etc.)
 pub mod types;
 
+pub use any_storage::*;
 pub use config::*;
 pub use consensus::*;
 pub use contracts::*;
 pub use keystore::*;
 pub use ledger::*;
 pub use metrics::*;
+pub use redb_storage::*;
 pub use runtime::*;
 pub use sdk::*;
 pub use storage::*;

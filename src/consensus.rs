@@ -95,19 +95,15 @@ impl PoAConsensus {
             ConsensusError::ValidationFailed("Invalid signature hex encoding".to_string())
         })?;
         if signature_bytes.len() != 64 {
-            return Err(ConsensusError::ValidationFailed(
-                "Invalid signature length".to_string(),
-            ));
+            return Err(ConsensusError::ValidationFailed("Invalid signature length".to_string()));
         }
         let signature = ed25519_dalek::Signature::from_slice(&signature_bytes).map_err(|_| {
             ConsensusError::ValidationFailed("Invalid signature format".to_string())
         })?;
 
-        self.authorized_signer_key
-            .verify(&block.hash, &signature)
-            .map_err(|_| {
-                ConsensusError::InvalidSignature(CryptoError::SignatureVerificationFailed)
-            })?;
+        self.authorized_signer_key.verify(&block.hash, &signature).map_err(|_| {
+            ConsensusError::InvalidSignature(CryptoError::SignatureVerificationFailed)
+        })?;
 
         // Nonce check — for PoA, nonce should be 0
         if block.nonce != 0 {
@@ -136,10 +132,8 @@ impl PoAConsensus {
 
             // Add signature to block metadata
             let mut metadata = block.metadata.clone().unwrap_or_default();
-            metadata.insert(
-                "signer".to_string(),
-                hex::encode(self.authorized_signer_key.to_bytes()),
-            );
+            metadata
+                .insert("signer".to_string(), hex::encode(self.authorized_signer_key.to_bytes()));
             metadata.insert("signature".to_string(), hex::encode(signature.to_bytes()));
             metadata.insert(
                 "signed_at".to_string(),
@@ -153,9 +147,7 @@ impl PoAConsensus {
             block.metadata = Some(metadata);
             Ok(())
         } else {
-            Err(ConsensusError::BlockSigningFailed(
-                "No signing key available".to_string(),
-            ))
+            Err(ConsensusError::BlockSigningFailed("No signing key available".to_string()))
         }
     }
 }
@@ -181,22 +173,14 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
             prev_block.index,
             hex::encode(prev_block.hash)
         );
-        info!(
-            "[CONSENSUS] Pending transactions: {}",
-            pending_transactions.len()
-        );
+        info!("[CONSENSUS] Pending transactions: {}", pending_transactions.len());
 
         let index = prev_block.index + 1;
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let timestamp =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         let prev_hash = prev_block.hash;
 
-        info!(
-            "[CONSENSUS] New block parameters: index={}, timestamp={}",
-            index, timestamp
-        );
+        info!("[CONSENSUS] New block parameters: index={}, timestamp={}", index, timestamp);
 
         // Select transactions with gas and size limits
         let mut transactions = Vec::new();
@@ -240,10 +224,7 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
         block.hash = block
             .calculate_hash()
             .map_err(|e| ConsensusError::ValidationFailed(format!("Hash error: {:?}", e)))?;
-        info!(
-            "[CONSENSUS] Block hash calculated: {}",
-            hex::encode(block.hash)
-        );
+        info!("[CONSENSUS] Block hash calculated: {}", hex::encode(block.hash));
 
         // Sign the block — mandatory for PoA
         if let Some(ref _signing_key) = self.signing_key {

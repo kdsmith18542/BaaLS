@@ -7,6 +7,8 @@ use thiserror::Error;
 use crate::types::PublicKey;
 use crate::types::{Account, Block, ChainState, ContractId, CryptoError, Transaction};
 
+pub type ContractEvents = Vec<(Vec<u8>, Vec<u8>)>;
+
 #[derive(Error, Debug)]
 pub enum StorageError {
     #[error("Sled error: {0}")]
@@ -120,7 +122,7 @@ pub trait Storage: Send + Sync {
         &self,
         contract_id: &ContractId,
         limit: usize,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError>;
+    ) -> Result<ContractEvents, StorageError>;
     fn get_all_contract_storage_keys(
         &self,
         contract_id: &ContractId,
@@ -193,10 +195,12 @@ impl SledStorage {
         Self::new_with_config(path, 64)
     }
 
-    pub fn new_with_config(path: impl AsRef<Path>, cache_capacity_mb: u64) -> Result<Self, StorageError> {
-        let config = sled::Config::default()
-            .path(path)
-            .cache_capacity((cache_capacity_mb * 1024 * 1024) as u64);
+    pub fn new_with_config(
+        path: impl AsRef<Path>,
+        cache_capacity_mb: u64,
+    ) -> Result<Self, StorageError> {
+        let config =
+            sled::Config::default().path(path).cache_capacity(cache_capacity_mb * 1024 * 1024);
         let db = config.open()?;
         let storage = Self {
             blocks_tree: db.open_tree("blocks")?,
@@ -308,12 +312,8 @@ impl SledStorage {
         tx_hash: &[u8; 32],
         timestamp: u64,
     ) -> Result<(), StorageError> {
-        let key = format!(
-            "{}:{:0>20}:{}",
-            hex::encode(contract_id.id),
-            timestamp,
-            hex::encode(tx_hash)
-        );
+        let key =
+            format!("{}:{:0>20}:{}", hex::encode(contract_id.id), timestamp, hex::encode(tx_hash));
         self.contract_to_tx_tree.insert(key.as_bytes(), tx_hash)?;
         Ok(())
     }
@@ -326,8 +326,7 @@ impl SledStorage {
             .map(|v| String::from_utf8_lossy(&v).parse::<u64>().unwrap_or(0))
             .unwrap_or(0);
         let new_count = current_count + 1;
-        self.tx_count_tree
-            .insert(key.as_bytes(), new_count.to_string().as_bytes())?;
+        self.tx_count_tree.insert(key.as_bytes(), new_count.to_string().as_bytes())?;
         Ok(())
     }
 }
@@ -360,8 +359,7 @@ impl Storage for SledStorage {
         let encoded = bincode::serialize(block)?;
 
         self.blocks_tree.insert(block_hash, encoded.clone())?;
-        self.blocks_tree
-            .insert(format!("height:{:0>20}", block_height).as_bytes(), encoded)?;
+        self.blocks_tree.insert(format!("height:{:0>20}", block_height).as_bytes(), encoded)?;
         Ok(())
     }
 
@@ -384,9 +382,7 @@ impl Storage for SledStorage {
     }
 
     fn get_block_by_height(&self, height: u64) -> Result<Option<Block>, StorageError> {
-        let encoded = self
-            .blocks_tree
-            .get(format!("height:{:0>20}", height).as_bytes())?;
+        let encoded = self.blocks_tree.get(format!("height:{:0>20}", height).as_bytes())?;
         Ok(encoded.map(|e| bincode::deserialize(&e)).transpose()?)
     }
 
@@ -460,10 +456,8 @@ impl Storage for SledStorage {
         let prefix_string = format!("block_tx:{}:", hex::encode(block_hash));
         for item in self.tx_by_block_tree.scan_prefix(prefix_string.as_bytes()) {
             let (_key, tx_hash_bytes) = item?;
-            let tx_hash_array: [u8; 32] = tx_hash_bytes
-                .as_ref()
-                .try_into()
-                .map_err(|_| CryptoError::HashConversionError)?;
+            let tx_hash_array: [u8; 32] =
+                tx_hash_bytes.as_ref().try_into().map_err(|_| CryptoError::HashConversionError)?;
             if let Some(tx) = self.get_transaction(&tx_hash_array)? {
                 transactions.push(tx);
             }
@@ -484,16 +478,10 @@ impl Storage for SledStorage {
         }
         let mut transactions = Vec::new();
         let prefix_string = format!("{}:", hex::encode(address.to_bytes()));
-        for item in self
-            .address_to_tx_tree
-            .scan_prefix(prefix_string.as_bytes())
-            .rev()
-        {
+        for item in self.address_to_tx_tree.scan_prefix(prefix_string.as_bytes()).rev() {
             let (_key, tx_hash_bytes) = item?;
-            let tx_hash_array: [u8; 32] = tx_hash_bytes
-                .as_ref()
-                .try_into()
-                .map_err(|_| CryptoError::HashConversionError)?;
+            let tx_hash_array: [u8; 32] =
+                tx_hash_bytes.as_ref().try_into().map_err(|_| CryptoError::HashConversionError)?;
             if let Some(tx) = self.get_transaction(&tx_hash_array)? {
                 transactions.push(tx);
                 if transactions.len() >= limit {
@@ -513,10 +501,7 @@ impl Storage for SledStorage {
         let from_height_key = format!("height:{}", from_height);
         let _to_height_key = format!("height:{}", to_height);
 
-        let mut iter = self
-            .blocks_tree
-            .scan_prefix(from_height_key.as_bytes())
-            .rev();
+        let mut iter = self.blocks_tree.scan_prefix(from_height_key.as_bytes()).rev();
         while let Some(Ok((_key, encoded))) = iter.next() {
             let block: Block = bincode::deserialize(&encoded)?;
             if block.index > to_height {
@@ -548,10 +533,7 @@ impl Storage for SledStorage {
         let from_height_key = format!("height:{}", from_height);
         let _to_height_key = format!("height:{}", to_height);
 
-        let mut iter = self
-            .blocks_tree
-            .scan_prefix(from_height_key.as_bytes())
-            .rev();
+        let mut iter = self.blocks_tree.scan_prefix(from_height_key.as_bytes()).rev();
         while let Some(Ok((_key, encoded))) = iter.next() {
             let block: Block = bincode::deserialize(&encoded)?;
             if block.index > to_height {
@@ -564,13 +546,8 @@ impl Storage for SledStorage {
 
     fn get_account_transaction_count(&self, address: &PublicKey) -> Result<u64, StorageError> {
         let key = hex::encode(address.to_bytes());
-        let count_bytes = self
-            .tx_count_tree
-            .get(key.as_bytes())?
-            .ok_or(StorageError::NotFound)?;
-        Ok(String::from_utf8_lossy(&count_bytes)
-            .parse::<u64>()
-            .unwrap_or(0))
+        let count_bytes = self.tx_count_tree.get(key.as_bytes())?.ok_or(StorageError::NotFound)?;
+        Ok(String::from_utf8_lossy(&count_bytes).parse::<u64>().unwrap_or(0))
     }
 
     fn get_contract_transactions(
@@ -583,16 +560,10 @@ impl Storage for SledStorage {
         }
         let mut transactions = Vec::new();
         let prefix_string = format!("{}:", hex::encode(contract_id.id));
-        for item in self
-            .contract_to_tx_tree
-            .scan_prefix(prefix_string.as_bytes())
-            .rev()
-        {
+        for item in self.contract_to_tx_tree.scan_prefix(prefix_string.as_bytes()).rev() {
             let (_key, tx_hash_bytes) = item?;
-            let tx_hash_array: [u8; 32] = tx_hash_bytes
-                .as_ref()
-                .try_into()
-                .map_err(|_| CryptoError::HashConversionError)?;
+            let tx_hash_array: [u8; 32] =
+                tx_hash_bytes.as_ref().try_into().map_err(|_| CryptoError::HashConversionError)?;
             if let Some(tx) = self.get_transaction(&tx_hash_array)? {
                 transactions.push(tx);
                 if transactions.len() >= limit {
@@ -720,16 +691,13 @@ impl Storage for SledStorage {
         &self,
         contract_id: &ContractId,
         limit: usize,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+    ) -> Result<ContractEvents, StorageError> {
         let prefix = format!("event:{}:", hex::encode(contract_id.id));
         let mut events = Vec::new();
         for item in self.contract_storage_tree.scan_prefix(prefix.as_bytes()) {
             let (raw_key, value) = item?;
             let key_str = String::from_utf8_lossy(&raw_key);
-            let topic_hex = key_str
-                .rsplit(':')
-                .next()
-                .unwrap_or("");
+            let topic_hex = key_str.rsplit(':').next().unwrap_or("");
             let topic = hex::decode(topic_hex).unwrap_or_default();
             events.push((topic, value.to_vec()));
             if events.len() >= limit {
@@ -817,34 +785,16 @@ impl Storage for SledStorage {
         };
 
         export_tree(&self.blocks_tree, &backup_db.open_tree("blocks")?)?;
-        export_tree(
-            &self.transactions_tree,
-            &backup_db.open_tree("transactions")?,
-        )?;
+        export_tree(&self.transactions_tree, &backup_db.open_tree("transactions")?)?;
         export_tree(&self.mempool_tree, &backup_db.open_tree("mempool")?)?;
         export_tree(&self.accounts_tree, &backup_db.open_tree("accounts")?)?;
         export_tree(&self.chain_state_tree, &backup_db.open_tree("chain_state")?)?;
-        export_tree(
-            &self.contract_code_tree,
-            &backup_db.open_tree("contract_code")?,
-        )?;
-        export_tree(
-            &self.contract_storage_tree,
-            &backup_db.open_tree("contract_storage")?,
-        )?;
-        export_tree(
-            &self.height_to_block_tree,
-            &backup_db.open_tree("height_to_block")?,
-        )?;
+        export_tree(&self.contract_code_tree, &backup_db.open_tree("contract_code")?)?;
+        export_tree(&self.contract_storage_tree, &backup_db.open_tree("contract_storage")?)?;
+        export_tree(&self.height_to_block_tree, &backup_db.open_tree("height_to_block")?)?;
         export_tree(&self.tx_by_block_tree, &backup_db.open_tree("tx_by_block")?)?;
-        export_tree(
-            &self.address_to_tx_tree,
-            &backup_db.open_tree("address_to_tx")?,
-        )?;
-        export_tree(
-            &self.contract_to_tx_tree,
-            &backup_db.open_tree("contract_to_tx")?,
-        )?;
+        export_tree(&self.address_to_tx_tree, &backup_db.open_tree("address_to_tx")?)?;
+        export_tree(&self.contract_to_tx_tree, &backup_db.open_tree("contract_to_tx")?)?;
         export_tree(&self.tx_count_tree, &backup_db.open_tree("tx_count")?)?;
 
         backup_db.flush()?;
@@ -866,34 +816,16 @@ impl Storage for SledStorage {
         };
 
         restore_tree(&backup_db.open_tree("blocks")?, &self.blocks_tree)?;
-        restore_tree(
-            &backup_db.open_tree("transactions")?,
-            &self.transactions_tree,
-        )?;
+        restore_tree(&backup_db.open_tree("transactions")?, &self.transactions_tree)?;
         restore_tree(&backup_db.open_tree("mempool")?, &self.mempool_tree)?;
         restore_tree(&backup_db.open_tree("accounts")?, &self.accounts_tree)?;
         restore_tree(&backup_db.open_tree("chain_state")?, &self.chain_state_tree)?;
-        restore_tree(
-            &backup_db.open_tree("contract_code")?,
-            &self.contract_code_tree,
-        )?;
-        restore_tree(
-            &backup_db.open_tree("contract_storage")?,
-            &self.contract_storage_tree,
-        )?;
-        restore_tree(
-            &backup_db.open_tree("height_to_block")?,
-            &self.height_to_block_tree,
-        )?;
+        restore_tree(&backup_db.open_tree("contract_code")?, &self.contract_code_tree)?;
+        restore_tree(&backup_db.open_tree("contract_storage")?, &self.contract_storage_tree)?;
+        restore_tree(&backup_db.open_tree("height_to_block")?, &self.height_to_block_tree)?;
         restore_tree(&backup_db.open_tree("tx_by_block")?, &self.tx_by_block_tree)?;
-        restore_tree(
-            &backup_db.open_tree("address_to_tx")?,
-            &self.address_to_tx_tree,
-        )?;
-        restore_tree(
-            &backup_db.open_tree("contract_to_tx")?,
-            &self.contract_to_tx_tree,
-        )?;
+        restore_tree(&backup_db.open_tree("address_to_tx")?, &self.address_to_tx_tree)?;
+        restore_tree(&backup_db.open_tree("contract_to_tx")?, &self.contract_to_tx_tree)?;
         restore_tree(&backup_db.open_tree("tx_count")?, &self.tx_count_tree)?;
 
         self.db.flush()?;

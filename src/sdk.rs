@@ -3,8 +3,6 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
-use rand::RngCore;
 
 use crate::consensus::PoAConsensus;
 use crate::contracts::{BaaLSContractEngine, ContractEngine};
@@ -38,7 +36,8 @@ impl BaaLSSdk {
     pub fn new(data_dir: PathBuf) -> Result<Self, SdkError> {
         let storage = SledStorage::new(&data_dir)?;
         let mut secret = [0u8; 32];
-        OsRng.fill_bytes(&mut secret);
+        use rand::RngCore;
+        rand::rng().fill_bytes(&mut secret);
         let signing_key = SigningKey::from_bytes(&secret);
         let test_key = PublicKey::from(signing_key.verifying_key());
         let consensus = PoAConsensus::new(test_key, 1000);
@@ -47,10 +46,7 @@ impl BaaLSSdk {
 
         let runtime = Runtime::new(storage, consensus, contract_engine, sync_layer)?;
 
-        Ok(Self {
-            runtime: Arc::new(runtime),
-            data_dir,
-        })
+        Ok(Self { runtime: Arc::new(runtime), data_dir })
     }
 
     /// Create a new BaaLS SDK instance with custom mempool size limit
@@ -60,7 +56,8 @@ impl BaaLSSdk {
     ) -> Result<Self, SdkError> {
         let storage = SledStorage::new(&data_dir)?;
         let mut secret = [0u8; 32];
-        OsRng.fill_bytes(&mut secret);
+        use rand::RngCore;
+        rand::rng().fill_bytes(&mut secret);
         let signing_key = SigningKey::from_bytes(&secret);
         let test_key = PublicKey::from(signing_key.verifying_key());
         let consensus = PoAConsensus::new(test_key, 1000);
@@ -75,10 +72,7 @@ impl BaaLSSdk {
             mempool_size_limit,
         )?;
 
-        Ok(Self {
-            runtime: Arc::new(runtime),
-            data_dir,
-        })
+        Ok(Self { runtime: Arc::new(runtime), data_dir })
     }
 
     /// Start the BaaLS node
@@ -223,9 +217,7 @@ impl BaaLSSdk {
     /// Verify a smart contract
     pub fn verify_contract(&self, wasm_bytes: &[u8]) -> Result<(), SdkError> {
         let contract_id = ContractId::from_bytes(&[0u8; 32]); // Placeholder
-        self.runtime
-            .contract_engine()
-            .verify_contract(wasm_bytes, &contract_id)?;
+        self.runtime.contract_engine().verify_contract(wasm_bytes, &contract_id)?;
         Ok(())
     }
 
@@ -253,10 +245,7 @@ pub struct BaaLSSdkBuilder {
 
 impl BaaLSSdkBuilder {
     pub fn new() -> Self {
-        Self {
-            data_dir: None,
-            mempool_size_limit: None,
-        }
+        Self { data_dir: None, mempool_size_limit: None }
     }
 
     pub fn data_dir(mut self, data_dir: PathBuf) -> Self {

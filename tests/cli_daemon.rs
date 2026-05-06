@@ -51,18 +51,13 @@ fn run_command_json(
 }
 
 fn node_status_json(bin_path: &str, data_dir: &std::path::Path) -> Value {
-    run_command_json(
-        bin_path,
-        data_dir,
-        &["node", "status"],
-        Duration::from_secs(10),
-    )
+    run_command_json(bin_path, data_dir, &["node", "status"], Duration::from_secs(10))
 }
 
 #[test]
 #[ignore = "Flaky under Windows test harness with detached daemon process"]
 fn test_cli_node_daemon_start_and_stop() {
-    let bin_path = env!("CARGO_BIN_EXE_baals");
+    let bin_path = env!("CARGO_BIN_EXE_baalsd");
     let data_dir: PathBuf = TempDir::new().expect("create temp dir").keep();
 
     let start_json = run_command_json(
@@ -71,22 +66,15 @@ fn test_cli_node_daemon_start_and_stop() {
         &["node", "start", "--daemon"],
         Duration::from_secs(15),
     );
-    assert_eq!(
-        start_json["status"].as_str(),
-        Some("daemon_start_requested")
-    );
+    assert_eq!(start_json["status"].as_str(), Some("daemon_start_requested"));
 
     let started = wait_until(Duration::from_secs(10), Duration::from_millis(200), || {
         node_status_json(bin_path, &data_dir)["running"].as_bool() == Some(true)
     });
     assert!(started, "daemon should report running state");
 
-    let stop_json = run_command_json(
-        bin_path,
-        &data_dir,
-        &["node", "stop"],
-        Duration::from_secs(10),
-    );
+    let stop_json =
+        run_command_json(bin_path, &data_dir, &["node", "stop"], Duration::from_secs(10));
     let stop_status = stop_json["status"].as_str().unwrap_or_default();
     assert!(
         matches!(stop_status, "stop_requested" | "already_stopped"),

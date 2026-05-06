@@ -240,7 +240,7 @@ impl HostState {
     fn charge_memory_growth(&mut self, current_memory_size: usize) -> Result<(), ContractError> {
         if current_memory_size > self.last_memory_size {
             let growth_bytes = current_memory_size - self.last_memory_size;
-            let growth_pages = ((growth_bytes + 65535) / 65536).max(1) as u64;
+            let growth_pages = growth_bytes.div_ceil(65536).max(1) as u64;
             self.charge_gas(growth_pages * 100)?;
             self.last_memory_size = current_memory_size;
         }
@@ -258,6 +258,8 @@ pub struct BaaLSContractEngine<S: Storage> {
     call_depth: Arc<AtomicU32>,
     executing_contracts: Arc<Mutex<HashMap<ContractId, u32>>>,
 }
+
+type WasmResult = (Vec<u8>, u64, Vec<(Vec<u8>, Vec<u8>)>);
 
 impl<S: Storage> BaaLSContractEngine<S> {
     pub fn new(_storage: S) -> Result<Self, ContractError> {
@@ -284,28 +286,23 @@ impl<S: Storage> BaaLSContractEngine<S> {
         execution_result: &ContractExecutionResult,
     ) {
         let mut metrics = self.contract_metrics.lock().unwrap();
-        let cm = metrics
-            .entry(contract_id.clone())
-            .or_insert_with(|| ContractMetrics {
-                total_calls: 0,
-                total_gas_used: 0,
-                average_execution_time: Duration::ZERO,
-                success_rate: 1.0,
-                last_called: None,
-                memory_usage_stats: MemoryUsageStats {
-                    peak_memory: 0,
-                    average_memory: 0,
-                    memory_growth_rate: 0.0,
-                },
-            });
+        let cm = metrics.entry(contract_id.clone()).or_insert_with(|| ContractMetrics {
+            total_calls: 0,
+            total_gas_used: 0,
+            average_execution_time: Duration::ZERO,
+            success_rate: 1.0,
+            last_called: None,
+            memory_usage_stats: MemoryUsageStats {
+                peak_memory: 0,
+                average_memory: 0,
+                memory_growth_rate: 0.0,
+            },
+        });
 
         cm.total_calls += 1;
         cm.total_gas_used += execution_result.gas_used;
         cm.last_called = Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
         );
 
         let total_time = cm.average_execution_time * (cm.total_calls.saturating_sub(1)) as u32;
@@ -327,6 +324,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
 
     // ─── WASM Execution ───
 
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_wasm_contract(
         &self,
         wasm_bytes: &[u8],
@@ -339,7 +337,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
         gas_limit: u64,
         block_index: u64,
         block_timestamp: u64,
-    ) -> Result<(Vec<u8>, u64, Vec<(Vec<u8>, Vec<u8>)>), ContractError> {
+    ) -> Result<WasmResult, ContractError> {
         let module = Module::new(&self.wasm_engine, wasm_bytes)
             .map_err(|e| ContractError::InvalidWasm(e.to_string()))?;
 
@@ -368,9 +366,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
 
         let mut store = Store::new(engine, host_state);
         // Set fuel for gas metering
-        store
-            .set_fuel(gas_limit as u64)
-            .map_err(|e| ContractError::WasmRuntimeError(e.to_string()))?;
+        store.set_fuel(gas_limit).map_err(|e| ContractError::WasmRuntimeError(e.to_string()))?;
 
         let mut linker = Linker::new(engine);
         self.add_host_functions(&mut linker)?;
@@ -411,7 +407,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
         let result = func.call(&mut store, (0i32, args_len));
 
         let execution_time = start_time.elapsed();
-        let remaining_fuel = store.get_fuel().unwrap_or(0) as u64;
+        let remaining_fuel = store.get_fuel().unwrap_or(0);
         let gas_used = gas_limit.saturating_sub(remaining_fuel);
 
         match result {
@@ -440,7 +436,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         host_state
                             .storage
                             .contract_storage_write(&host_state.contract_id, key, value)
-                            .map_err(|e| ContractError::StorageError(e))?;
+                            .map_err(ContractError::StorageError)?;
                     }
                     // Commit deletions
                     for key in &host_state.deleted_keys {
@@ -568,10 +564,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                  value_ptr: i32,
                  value_len_cap: i32|
                  -> i32 {
-                    let mem = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .unwrap();
+                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
 
                     let key_len = match checked_len(key_len, 1024 * 1024) {
                         Some(n) => n,
@@ -600,10 +593,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     match value {
                         Some(v) => {
                             let len = v.len().min(value_len_cap as usize);
-                            if mem
-                                .write(&mut caller, value_ptr as usize, &v[..len])
-                                .is_err()
-                            {
+                            if mem.write(&mut caller, value_ptr as usize, &v[..len]).is_err() {
                                 return -1;
                             }
                             len as i32
@@ -625,10 +615,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                  value_ptr: i32,
                  value_len: i32|
                  -> i32 {
-                    let mem = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .unwrap();
+                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
 
                     let key_len = match checked_len(key_len, 1024 * 1024) {
                         Some(n) => n,
@@ -667,10 +654,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                 "env",
                 "baals_storage_remove",
                 |mut caller: Caller<'_, HostState>, key_ptr: i32, key_len: i32| -> i32 {
-                    let mem = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .unwrap();
+                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
 
                     let key_len = match checked_len(key_len, 1024 * 1024) {
                         Some(n) => n,
@@ -696,18 +680,11 @@ impl<S: Storage> BaaLSContractEngine<S> {
 
         // baals_get_sender(ptr) — writes 32-byte sender public key
         linker
-            .func_wrap(
-                "env",
-                "baals_get_sender",
-                |mut caller: Caller<'_, HostState>, ptr: i32| {
-                    let mem = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .unwrap();
-                    let sender_bytes = caller.data().caller.to_bytes();
-                    let _ = mem.write(&mut caller, ptr as usize, &sender_bytes);
-                },
-            )
+            .func_wrap("env", "baals_get_sender", |mut caller: Caller<'_, HostState>, ptr: i32| {
+                let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+                let sender_bytes = caller.data().caller.to_bytes();
+                let _ = mem.write(&mut caller, ptr as usize, &sender_bytes);
+            })
             .map_err(|e| ContractError::HostFunctionError(e.to_string()))?;
 
         // baals_get_contract_id(ptr) — writes 32-byte contract ID
@@ -716,10 +693,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                 "env",
                 "baals_get_contract_id",
                 |mut caller: Caller<'_, HostState>, ptr: i32| {
-                    let mem = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .unwrap();
+                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
                     let cid_bytes = caller.data().contract_id.to_bytes();
                     let _ = mem.write(&mut caller, ptr as usize, &cid_bytes);
                 },
@@ -728,20 +702,16 @@ impl<S: Storage> BaaLSContractEngine<S> {
 
         // baals_get_block_timestamp() -> u64
         linker
-            .func_wrap(
-                "env",
-                "baals_get_block_timestamp",
-                |caller: Caller<'_, HostState>| -> u64 { caller.data().block_timestamp },
-            )
+            .func_wrap("env", "baals_get_block_timestamp", |caller: Caller<'_, HostState>| -> u64 {
+                caller.data().block_timestamp
+            })
             .map_err(|e| ContractError::HostFunctionError(e.to_string()))?;
 
         // baals_get_block_index() -> u64
         linker
-            .func_wrap(
-                "env",
-                "baals_get_block_index",
-                |caller: Caller<'_, HostState>| -> u64 { caller.data().block_index },
-            )
+            .func_wrap("env", "baals_get_block_index", |caller: Caller<'_, HostState>| -> u64 {
+                caller.data().block_index
+            })
             .map_err(|e| ContractError::HostFunctionError(e.to_string()))?;
 
         // baals_get_input_data(ptr, len_cap) -> bytes_written
@@ -750,10 +720,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                 "env",
                 "baals_get_input_data",
                 |mut caller: Caller<'_, HostState>, ptr: i32, len_cap: i32| -> i32 {
-                    let mem = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .unwrap();
+                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
                     let data = caller.data().input_data.clone();
                     let len = data.len().min(len_cap as usize);
                     let _ = mem.write(&mut caller, ptr as usize, &data[..len]);
@@ -771,10 +738,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                  data_ptr: i32,
                  data_len: i32,
                  output_ptr: i32| {
-                    let mem = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .unwrap();
+                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
 
                     let data_len = match checked_len(data_len, 1024 * 1024) {
                         Some(n) => n,
@@ -808,10 +772,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                  sig_ptr: i32,
                  sig_len: i32|
                  -> i32 {
-                    let mem = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .unwrap();
+                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
 
                     let pubkey_len = match checked_len(pubkey_len, 1024 * 1024) {
                         Some(n) => n,
@@ -830,10 +791,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     let mut msg = vec![0u8; msg_len];
                     let mut sig_bytes = vec![0u8; sig_len];
 
-                    if mem
-                        .read(&caller, pubkey_ptr as usize, &mut pk_bytes)
-                        .is_err()
-                    {
+                    if mem.read(&caller, pubkey_ptr as usize, &mut pk_bytes).is_err() {
                         return 0;
                     }
                     if mem.read(&caller, msg_ptr as usize, &mut msg).is_err() {
@@ -867,7 +825,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         Err(_) => return 0,
                     };
 
-                    let verify_sig = Ed25519Signature::from(sig.clone());
+                    let verify_sig = Ed25519Signature::from(sig);
                     if pk.verify(&msg, &verify_sig).is_ok() {
                         1
                     } else {
@@ -887,10 +845,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                  topic_len: i32,
                  data_ptr: i32,
                  data_len: i32| {
-                    let mem = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .unwrap();
+                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
 
                     let topic_len = match checked_len(topic_len, 1024 * 1024) {
                         Some(n) => n,
@@ -909,9 +864,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     if !state.permissions.emit_events {
                         return;
                     }
-                    state
-                        .charge_gas(100 + topic_len as u64 + data_len as u64)
-                        .ok();
+                    state.charge_gas(100 + topic_len as u64 + data_len as u64).ok();
                     state.events.push((topic, data));
                 },
             )
@@ -934,25 +887,21 @@ impl<S: Storage> BaaLSContractEngine<S> {
 
         // baals_memory_grow — tracks memory growth and charges gas
         linker
-            .func_wrap(
-                "env",
-                "baals_memory_grow",
-                |mut caller: Caller<'_, HostState>| -> i32 {
-                    let mem = match caller.get_export("memory") {
-                        Some(e) => match e.into_memory() {
-                            Some(m) => m,
-                            None => return -1,
-                        },
+            .func_wrap("env", "baals_memory_grow", |mut caller: Caller<'_, HostState>| -> i32 {
+                let mem = match caller.get_export("memory") {
+                    Some(e) => match e.into_memory() {
+                        Some(m) => m,
                         None => return -1,
-                    };
-                    let current_size = mem.data_size(&caller);
-                    let state = caller.data_mut();
-                    if state.charge_memory_growth(current_size).is_err() {
-                        return -1;
-                    }
-                    current_size as i32
-                },
-            )
+                    },
+                    None => return -1,
+                };
+                let current_size = mem.data_size(&caller);
+                let state = caller.data_mut();
+                if state.charge_memory_growth(current_size).is_err() {
+                    return -1;
+                }
+                current_size as i32
+            })
             .map_err(|e| ContractError::HostFunctionError(e.to_string()))?;
 
         // baals_call_contract(callee_ptr, callee_len, method_ptr, method_len, args_ptr, args_len) -> i32
@@ -968,10 +917,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                  args_ptr: i32,
                  args_len: i32|
                  -> i32 {
-                    let mem = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .unwrap();
+                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
 
                     let callee_len = match checked_len(callee_len, 1024 * 1024) {
                         Some(n) => n,
@@ -1019,10 +965,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                  result_len_cap: i32,
                  call_index: i32|
                  -> i32 {
-                    let mem = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .unwrap();
+                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
                     let state = caller.data();
                     let idx = call_index as usize;
                     if idx >= state.inter_contract_results.len() {
@@ -1056,13 +999,14 @@ impl<S: Storage> BaaLSContractEngine<S> {
             let mod_name = import.module();
             if !allowed_modules.contains(&mod_name) {
                 return Err(ContractError::BytecodeValidationFailed(format!(
-                    "Disallowed import module: '{}'", mod_name
+                    "Disallowed import module: '{}'",
+                    mod_name
                 )));
             }
         }
 
         // Check memory limits from the module
-        if let Some(mem_type) = module
+        if let Some(wasmtime::ExternType::Memory(mem)) = module
             .imports()
             .find(|i| matches!(i.ty(), wasmtime::ExternType::Memory(_)))
             .map(|i| i.ty())
@@ -1073,18 +1017,18 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     .map(|e| e.ty())
             })
         {
-            if let wasmtime::ExternType::Memory(mem) = mem_type {
-                if mem.minimum() > 1024 {
+            if mem.minimum() > 1024 {
+                return Err(ContractError::BytecodeValidationFailed(format!(
+                    "Memory minimum pages ({}) exceeds limit (1024)",
+                    mem.minimum()
+                )));
+            }
+            if let Some(max) = mem.maximum() {
+                if max > 4096 {
                     return Err(ContractError::BytecodeValidationFailed(format!(
-                        "Memory minimum pages ({}) exceeds limit (1024)", mem.minimum()
+                        "Memory maximum pages ({}) exceeds limit (4096)",
+                        max
                     )));
-                }
-                if let Some(max) = mem.maximum() {
-                    if max > 4096 {
-                        return Err(ContractError::BytecodeValidationFailed(format!(
-                            "Memory maximum pages ({}) exceeds limit (4096)", max
-                        )));
-                    }
                 }
             }
         }
@@ -1092,32 +1036,69 @@ impl<S: Storage> BaaLSContractEngine<S> {
         Ok(())
     }
 
-    fn scan_for_float_opcodes(wasm_bytes: &[u8]) -> Result<(), String> {
+    pub fn scan_for_float_opcodes(wasm_bytes: &[u8]) -> Result<(), String> {
         let mut i = 8; // skip WASM magic + version
-        let mut in_code_section = false;
-        while i < wasm_bytes.len() {
-            let op = wasm_bytes[i];
-            match op {
-                0x0A => in_code_section = true, // code section
-                0x00 | 0x01 | 0x02 | 0x03 | 0x04 | 0x05 | 0x06 | 0x07
-                | 0x08 | 0x09 | 0x0B | 0x0C => in_code_section = false,
-                0x2A | 0x2B | 0x2C | 0x2D if in_code_section => {
-                    return Err(format!(
-                        "Non-deterministic float memory opcode 0x{:02X} at byte {}", op, i
-                    ));
-                }
-                0x43 | 0x44 if in_code_section => {
-                    return Err(format!("Float constant opcode 0x{:02X} at byte {}", op, i));
-                }
-                0x5D..=0x66 if in_code_section => {
-                    return Err(format!("Float comparison opcode 0x{:02X} at byte {}", op, i));
-                }
-                0x8E..=0xA2 if in_code_section => {
-                    return Err(format!("Float arithmetic opcode 0x{:02X} at byte {}", op, i));
-                }
-                _ => {}
+        loop {
+            if i >= wasm_bytes.len() {
+                break;
             }
+            let section_id = wasm_bytes[i];
             i += 1;
+            if i >= wasm_bytes.len() {
+                break;
+            }
+            // Read section length (LEB128 u32)
+            let mut section_len = 0usize;
+            let mut shift = 0;
+            loop {
+                if i >= wasm_bytes.len() {
+                    return Err("Unexpected end of WASM data".to_string());
+                }
+                let byte = wasm_bytes[i] as usize;
+                section_len |= (byte & 0x7F) << shift;
+                i += 1;
+                shift += 7;
+                if byte & 0x80 == 0 {
+                    break;
+                }
+                if shift > 35 {
+                    return Err("Section length overflow".to_string());
+                }
+            }
+            if section_id == 0x0A {
+                // Code section: scan function bodies for float opcodes
+                let section_end = (i + section_len).min(wasm_bytes.len());
+                while i < section_end {
+                    let op = wasm_bytes[i];
+                    match op {
+                        0x2A..=0x2D => {
+                            return Err(format!(
+                                "Non-deterministic float memory opcode 0x{:02X} at byte {}",
+                                op, i
+                            ))
+                        }
+                        0x43..=0x44 => {
+                            return Err(format!("Float constant opcode 0x{:02X} at byte {}", op, i))
+                        }
+                        0x5D..=0x66 => {
+                            return Err(format!(
+                                "Float comparison opcode 0x{:02X} at byte {}",
+                                op, i
+                            ))
+                        }
+                        0x8E..=0xA2 => {
+                            return Err(format!(
+                                "Float arithmetic opcode 0x{:02X} at byte {}",
+                                op, i
+                            ))
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            } else {
+                i += section_len;
+            }
         }
         Ok(())
     }
@@ -1152,9 +1133,8 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
             ));
         }
         // Ban non-deterministic float opcodes
-        Self::scan_for_float_opcodes(wasm_bytes).map_err(|e| {
-            ContractError::BytecodeValidationFailed(e)
-        })?;
+        Self::scan_for_float_opcodes(wasm_bytes)
+            .map_err(ContractError::BytecodeValidationFailed)?;
         let engine = Engine::default();
         let module = Module::new(&engine, wasm_bytes)
             .map_err(|e| ContractError::InvalidWasm(e.to_string()))?;
@@ -1165,7 +1145,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         // Generate contract ID from deployer + deployer_nonce + WASM hash + init_payload
         let mut hasher = Sha256::new();
         hasher.update(deployer.to_bytes());
-        hasher.update(&deployer_nonce.to_be_bytes());
+        hasher.update(deployer_nonce.to_be_bytes());
         hasher.update(wasm_bytes);
         if let Some(payload) = init_payload {
             hasher.update(payload);
@@ -1174,9 +1154,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         let contract_id = ContractId::from_bytes(&hash.into());
 
         // Store contract code
-        storage
-            .put_contract_code(&contract_id, wasm_bytes)
-            .map_err(|e| ContractError::StorageError(e))?;
+        storage.put_contract_code(&contract_id, wasm_bytes).map_err(ContractError::StorageError)?;
 
         // If init_payload is provided, call the contract's init/instantiate function
         if let Some(payload) = init_payload {
@@ -1211,10 +1189,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
             }
         }
 
-        info!(
-            "[CONTRACTS] Contract deployed: {}",
-            hex::encode(contract_id.to_bytes())
-        );
+        info!("[CONTRACTS] Contract deployed: {}", hex::encode(contract_id.to_bytes()));
         Ok(contract_id)
     }
 
@@ -1233,9 +1208,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
             let entry = executing.entry(contract_id.clone()).or_insert(0);
             *entry += 1;
             if *entry > 1 {
-                return Err(ContractError::ReentrancyDetected(hex::encode(
-                    contract_id.to_bytes(),
-                )));
+                return Err(ContractError::ReentrancyDetected(hex::encode(contract_id.to_bytes())));
             }
         }
         // Cleanup on scope exit
@@ -1252,13 +1225,11 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
                 "Max call depth exceeded (64)".to_string(),
             ));
         }
-        let _depth_guard = CallDepthGuard {
-            call_depth: self.call_depth.clone(),
-        };
+        let _depth_guard = CallDepthGuard { call_depth: self.call_depth.clone() };
 
         let wasm_bytes = storage
             .get_contract_code(contract_id)
-            .map_err(|e| ContractError::StorageError(e))?
+            .map_err(ContractError::StorageError)?
             .ok_or_else(|| {
                 ContractError::ContractNotFound(format!(
                     "Contract not found: {}",
@@ -1313,7 +1284,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
     ) -> Result<Vec<u8>, ContractError> {
         let wasm_bytes = storage
             .get_contract_code(contract_id)
-            .map_err(|e| ContractError::StorageError(e))?
+            .map_err(ContractError::StorageError)?
             .ok_or_else(|| {
                 ContractError::ContractNotFound(format!(
                     "Contract not found: {}",

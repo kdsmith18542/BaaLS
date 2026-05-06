@@ -65,7 +65,7 @@ impl Keystore {
     }
 
     pub fn create_key(&self, password: &str) -> Result<PublicKey, KeystoreError> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut sk_bytes = [0u8; 32];
         rng.fill_bytes(&mut sk_bytes);
         let sk = SigningKey::from_bytes(&sk_bytes);
@@ -137,7 +137,7 @@ impl Keystore {
         if path.exists() {
             return Err(KeystoreError::AlreadyExists(hex::encode(pk.to_bytes())));
         }
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut salt = [0u8; SALT_LEN];
         let mut nonce = [0u8; NONCE_LEN];
         rng.fill_bytes(&mut salt);

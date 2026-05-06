@@ -1,7 +1,6 @@
 use ed25519_dalek::SigningKey;
 use log::{debug, error, info, warn};
-use rand::rngs::OsRng;
-use rand::Rng;
+use rand::RngCore;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -68,9 +67,7 @@ impl Mempool {
             self.evict_lowest_priority()?;
         }
         if self.txs_by_hash.contains_key(&tx.hash) {
-            return Err(RuntimeError::InvalidTransaction(
-                "Duplicate transaction".to_string(),
-            ));
+            return Err(RuntimeError::InvalidTransaction("Duplicate transaction".to_string()));
         }
         // Per-sender rate limiting
         if let Some(map) = self.txs_by_sender.get(&tx.sender) {
@@ -85,10 +82,7 @@ impl Mempool {
         self.total_bytes += tx_size;
         let sender = tx.sender;
         let nonce = tx.nonce;
-        self.txs_by_sender
-            .entry(sender)
-            .or_default()
-            .insert(nonce, tx.hash);
+        self.txs_by_sender.entry(sender).or_default().insert(nonce, tx.hash);
         self.txs_by_hash.insert(tx.hash, tx);
         Ok(())
     }
@@ -116,19 +110,12 @@ impl Mempool {
 
     pub fn sorted_by_priority(&self) -> Vec<&Transaction> {
         let mut txs: Vec<&Transaction> = self.txs_by_hash.values().collect();
-        txs.sort_by(|a, b| {
-            b.priority
-                .cmp(&a.priority)
-                .then_with(|| a.timestamp.cmp(&b.timestamp))
-        });
+        txs.sort_by(|a, b| b.priority.cmp(&a.priority).then_with(|| a.timestamp.cmp(&b.timestamp)));
         txs
     }
 
     pub fn evict_expired(&mut self) -> usize {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let expired_hashes: Vec<[u8; 32]> = self
             .txs_by_hash
             .iter()
@@ -152,7 +139,7 @@ impl Mempool {
             .min_by(|a, b| {
                 a.priority
                     .cmp(&b.priority)
-                    .then_with(|| a.timestamp.cmp(&b.timestamp))  // oldest first
+                    .then_with(|| a.timestamp.cmp(&b.timestamp)) // oldest first
                     .then_with(|| a.gas_limit.cmp(&b.gas_limit)) // least gas first
             })
             .map(|tx| tx.hash);
@@ -244,19 +231,14 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         debug!("Runtime::with_mempool_limit called");
         let storage_arc = Arc::new(storage);
         let contract_engine_arc = Arc::new(contract_engine);
-        let ledger = Arc::new(Ledger::new(
-            Arc::clone(&storage_arc),
-            Arc::clone(&contract_engine_arc),
-        ));
+        let ledger =
+            Arc::new(Ledger::new(Arc::clone(&storage_arc), Arc::clone(&contract_engine_arc)));
 
         // Initialize chain if not already initialized
         ledger.initialize_chain()?;
 
         let initial_chain_state = storage_arc.get_chain_state()?;
-        debug!(
-            "Initial chain state loaded: {}",
-            initial_chain_state.is_some()
-        );
+        debug!("Initial chain state loaded: {}", initial_chain_state.is_some());
         let initial_chain_state =
             initial_chain_state.ok_or(RuntimeError::ChainInitializationError)?;
 
@@ -279,10 +261,9 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
     }
 
     pub fn generate_keypair() -> Result<SigningKey, RuntimeError> {
-        let mut csprng = OsRng;
         // Use random bytes to create a signing key
         let mut secret_key_bytes = [0u8; 32];
-        csprng.fill(&mut secret_key_bytes);
+        rand::rng().fill_bytes(&mut secret_key_bytes);
         Ok(SigningKey::from_bytes(&secret_key_bytes))
     }
 
@@ -319,9 +300,11 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         // Use std::thread to ensure we always have a tokio runtime available
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().expect("Failed to create auto-block tokio runtime");
+            let rt =
+                tokio::runtime::Runtime::new().expect("Failed to create auto-block tokio runtime");
             rt.block_on(async move {
-                let mut ticker = tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
+                let mut ticker =
+                    tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
                 loop {
                     tokio::select! {
                         _ = ticker.tick() => {}
@@ -356,9 +339,12 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                                 block.transactions.len()
                             ),
                             Err(e) => {
-                                if !matches!(e, RuntimeError::ConsensusError(
-                                    ConsensusError::NoPendingTransactions
-                                )) {
+                                if !matches!(
+                                    e,
+                                    RuntimeError::ConsensusError(
+                                        ConsensusError::NoPendingTransactions
+                                    )
+                                ) {
                                     warn!("Auto block production error: {}", e);
                                 }
                             }
@@ -393,10 +379,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
     }
 
     pub fn submit_transaction(&self, transaction: Transaction) -> Result<(), RuntimeError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 
         let validation_result = time_operation_fn(
             &self.metrics,
@@ -482,13 +465,10 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
                 // 5. Nonce validation against chain state + mempool
                 let sender_pk = transaction.sender;
-                let sender_account =
-                    self.storage
-                        .get_account(&sender_pk)?
-                        .unwrap_or_else(|| Account::Wallet {
-                            balance: 0,
-                            nonce: 0,
-                        });
+                let sender_account = self
+                    .storage
+                    .get_account(&sender_pk)?
+                    .unwrap_or(Account::Wallet { balance: 0, nonce: 0 });
 
                 let mempool = self.mempool.lock().unwrap();
                 let highest_mempool_nonce = mempool
@@ -560,11 +540,8 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         info!("[PRODUCE_BLOCK] Collecting transactions from mempool (priority-ordered)");
         mempool.evict_expired();
-        let mut transactions: Vec<Transaction> = mempool
-            .sorted_by_priority()
-            .iter()
-            .map(|tx| (*tx).clone())
-            .collect();
+        let mut transactions: Vec<Transaction> =
+            mempool.sorted_by_priority().iter().map(|tx| (*tx).clone()).collect();
         transactions.sort_by_key(|tx| (tx.sender, tx.nonce));
 
         // Filter to only include txs with continuous nonces per sender.
@@ -591,15 +568,11 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             }
         });
 
-        info!(
-            "[PRODUCE_BLOCK] Collected {} transactions",
-            transactions.len()
-        );
+        info!("[PRODUCE_BLOCK] Collected {} transactions", transactions.len());
 
         info!("[PRODUCE_BLOCK] Calling consensus.generate_block");
         let new_block =
-            self.consensus
-                .generate_block(&transactions, &prev_block, &current_chain_state)?;
+            self.consensus.generate_block(&transactions, &prev_block, &current_chain_state)?;
         info!(
             "[PRODUCE_BLOCK] Block generated: index={}, hash={}",
             new_block.index,
@@ -616,14 +589,12 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             || {
                 info!("[PRODUCE_BLOCK] Validating block with ledger");
                 // Validate and apply block to ledger
-                self.ledger
-                    .validate_block(&new_block, &current_chain_state)?;
+                self.ledger.validate_block(&new_block, &current_chain_state)?;
                 info!("[PRODUCE_BLOCK] Block validation successful");
 
                 info!("[PRODUCE_BLOCK] Applying block to ledger");
                 // Pass contract_engine to apply_block
-                self.ledger
-                    .apply_block(new_block.clone(), &mut current_chain_state)?;
+                self.ledger.apply_block(new_block.clone(), &mut current_chain_state)?;
                 info!("[PRODUCE_BLOCK] Block application successful");
                 Ok(())
             },
@@ -636,13 +607,9 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         // Update metrics
         info!("[PRODUCE_BLOCK] Updating metrics");
-        self.metrics
-            .update_average_block_size(std::mem::size_of_val(&new_block));
+        self.metrics.update_average_block_size(std::mem::size_of_val(&new_block));
 
-        println!(
-            "Block produced and applied: {}",
-            crate::types::format_hex(&new_block.hash)
-        );
+        println!("Block produced and applied: {}", crate::types::format_hex(&new_block.hash));
         info!("[PRODUCE_BLOCK] Block production completed successfully");
 
         // Optionally broadcast the new block
@@ -657,10 +624,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                     Vec::new()
                 });
                 info!("[BROADCAST] Discovered {} peers", peers.len());
-                if let Err(e) = sync_layer_clone
-                    .broadcast_block(&new_block_clone, &peers)
-                    .await
-                {
+                if let Err(e) = sync_layer_clone.broadcast_block(&new_block_clone, &peers).await {
                     error!("[BROADCAST] Error broadcasting block: {}", e);
                 } else {
                     info!("[BROADCAST] Block broadcast completed successfully");
@@ -668,10 +632,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             });
         } else {
             std::thread::spawn(move || {
-                if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
+                if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
                     rt.block_on(async move {
                         info!("[BROADCAST] Starting broadcast in fallback task");
                         let peers = sync_layer_clone.discover_peers().await.unwrap_or_else(|e| {
@@ -679,9 +640,8 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                             Vec::new()
                         });
                         info!("[BROADCAST] Discovered {} peers", peers.len());
-                        if let Err(e) = sync_layer_clone
-                            .broadcast_block(&new_block_clone, &peers)
-                            .await
+                        if let Err(e) =
+                            sync_layer_clone.broadcast_block(&new_block_clone, &peers).await
                         {
                             error!("[BROADCAST] Error broadcasting block: {}", e);
                         } else {
@@ -730,29 +690,21 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
     // Utility function to generate a new signing key
     pub fn generate_signing_key() -> Result<SigningKey, RuntimeError> {
-        let mut csprng = OsRng;
         let mut secret_key_bytes = [0u8; 32];
-        csprng.fill(&mut secret_key_bytes);
+        rand::rng().fill_bytes(&mut secret_key_bytes);
         Ok(SigningKey::from_bytes(&secret_key_bytes))
     }
 
     pub fn get_current_timestamp(&self) -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
     }
 
     pub fn get_block_by_height(&self, height: u64) -> Result<Option<Block>, RuntimeError> {
-        self.storage
-            .get_block_by_height(height)
-            .map_err(RuntimeError::StorageError)
+        self.storage.get_block_by_height(height).map_err(RuntimeError::StorageError)
     }
 
     pub fn get_account(&self, address: &PublicKey) -> Result<Option<Account>, RuntimeError> {
-        self.storage
-            .get_account(address)
-            .map_err(RuntimeError::StorageError)
+        self.storage.get_account(address).map_err(RuntimeError::StorageError)
     }
 
     pub fn contract_storage_read(
@@ -760,9 +712,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         contract_id: &ContractId,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, RuntimeError> {
-        self.storage
-            .contract_storage_read(contract_id, key)
-            .map_err(RuntimeError::StorageError)
+        self.storage.contract_storage_read(contract_id, key).map_err(RuntimeError::StorageError)
     }
 
     pub fn storage(&self) -> &S {
@@ -774,20 +724,11 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         address: &PublicKey,
         account: Account,
     ) -> Result<(), RuntimeError> {
-        self.storage
-            .put_account(address, &account)
-            .map_err(RuntimeError::StorageError)
+        self.storage.put_account(address, &account).map_err(RuntimeError::StorageError)
     }
 
     pub fn get_mempool(&self) -> Result<Vec<Transaction>, RuntimeError> {
-        Ok(self
-            .mempool
-            .lock()
-            .unwrap()
-            .all()
-            .into_iter()
-            .map(|tx| tx.clone())
-            .collect())
+        Ok(self.mempool.lock().unwrap().all().into_iter().cloned().collect())
     }
 
     pub fn get_transaction_history(
@@ -820,9 +761,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
     }
 
     pub fn get_block_by_hash(&self, hash: &[u8; 32]) -> Result<Option<Block>, RuntimeError> {
-        self.storage
-            .get_block(hash)
-            .map_err(RuntimeError::StorageError)
+        self.storage.get_block(hash).map_err(RuntimeError::StorageError)
     }
 
     /// Reorganize the chain by applying a sequence of blocks from a fork.
@@ -838,11 +777,19 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         let fork_height = fork_blocks.last().map(|b| b.index).unwrap_or(0);
 
         if fork_height <= local_height {
-            info!("[CHAIN] Fork not longer, skipping (local={}, fork={})", local_height, fork_height);
+            info!(
+                "[CHAIN] Fork not longer, skipping (local={}, fork={})",
+                local_height, fork_height
+            );
             return Ok(local_height);
         }
 
-        info!("[CHAIN] Reorganizing from {} to {} ({} blocks)", local_height + 1, fork_height, fork_blocks.len());
+        info!(
+            "[CHAIN] Reorganizing from {} to {} ({} blocks)",
+            local_height + 1,
+            fork_height,
+            fork_blocks.len()
+        );
 
         let mut expected_index = current_chain_state.latest_block_index + 1;
         let mut expected_prev_hash = current_chain_state.latest_block_hash;
@@ -850,12 +797,14 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         for block in fork_blocks {
             if block.index != expected_index {
                 return Err(RuntimeError::InvalidTransaction(format!(
-                    "Fork block index mismatch: expected {}, got {}", expected_index, block.index
+                    "Fork block index mismatch: expected {}, got {}",
+                    expected_index, block.index
                 )));
             }
             if block.prev_hash != expected_prev_hash {
                 return Err(RuntimeError::InvalidTransaction(format!(
-                    "Fork block prev_hash mismatch at index {}", block.index
+                    "Fork block prev_hash mismatch at index {}",
+                    block.index
                 )));
             }
 
@@ -971,14 +920,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         // Use the contract engine to call the contract
         let result = self
             .contract_engine_arc
-            .call_contract(
-                caller,
-                contract_id,
-                method_name,
-                args,
-                value,
-                &*self.storage,
-            )
+            .call_contract(caller, contract_id, method_name, args, value, &*self.storage)
             .map_err(|e| {
                 RuntimeError::InvalidTransaction(format!("Contract call failed: {}", e))
             })?;
@@ -1024,7 +966,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         let mempool_stats = self.get_mempool_stats()?;
         let metrics = self.get_detailed_metrics()?;
         let running = *self.is_running.lock().unwrap();
-        let start_time = self.started_at.lock().unwrap().clone();
+        let start_time = *self.started_at.lock().unwrap();
         let uptime_seconds = if running {
             start_time
                 .and_then(|started_at| SystemTime::now().duration_since(started_at).ok())

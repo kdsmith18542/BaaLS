@@ -36,7 +36,7 @@ fn wait_until(timeout: Duration, interval: Duration, mut check: impl FnMut() -> 
 
 #[test]
 fn test_cli_node_lifecycle_start_status_stop() {
-    let bin_path = env!("CARGO_BIN_EXE_baals");
+    let bin_path = env!("CARGO_BIN_EXE_baalsd");
     let temp_dir = TempDir::new().expect("create temp dir");
     let data_dir = temp_dir.path();
     let pid_path = data_dir.join("baals.pid");
@@ -54,9 +54,7 @@ fn test_cli_node_lifecycle_start_status_stop() {
     let mut child = ChildGuard { child };
 
     assert!(
-        wait_until(Duration::from_secs(10), Duration::from_millis(200), || {
-            pid_path.exists()
-        }),
+        wait_until(Duration::from_secs(10), Duration::from_millis(200), || { pid_path.exists() }),
         "pid file should exist after start"
     );
 
@@ -68,10 +66,7 @@ fn test_cli_node_lifecycle_start_status_stop() {
         .arg("--json")
         .output()
         .expect("status while running");
-    assert!(
-        status_running.status.success(),
-        "status command should succeed"
-    );
+    assert!(status_running.status.success(), "status command should succeed");
     let running_json: Value =
         serde_json::from_slice(&status_running.stdout).expect("parse running status json");
     assert_eq!(running_json["running"].as_bool(), Some(true));
@@ -108,18 +103,12 @@ fn test_cli_node_lifecycle_start_status_stop() {
         .arg("--json")
         .output()
         .expect("status after stop");
-    assert!(
-        status_stopped.status.success(),
-        "status command should succeed"
-    );
+    assert!(status_stopped.status.success(), "status command should succeed");
     let stopped_json: Value =
         serde_json::from_slice(&status_stopped.stdout).expect("parse stopped status json");
     assert_eq!(stopped_json["running"].as_bool(), Some(false));
 
-    assert!(
-        !Path::new(&pid_path).exists(),
-        "pid file should be removed after shutdown"
-    );
+    assert!(!Path::new(&pid_path).exists(), "pid file should be removed after shutdown");
     assert!(
         !Path::new(&stop_path).exists(),
         "stop signal file should be removed after shutdown"
