@@ -2,355 +2,262 @@
 
 **ALL CODE MUST BE PRODUCTION GRADE. NO STUBS WITHOUT EXPLICIT APPROVAL.**
 
-**Last Updated**: 2026-05-05
-**Project Status**: ✅ All 9 phases complete. 11 lib tests + 15 integration tests pass (0 ignored). Production-grade embeddable blockchain engine.
+**Last Updated**: 2026-05-06
+**Project Status**: Phases 1-9 complete (core engine functional, all CLI/SDK/FFI implemented). 26 tests pass (11 lib + 15 integration), zero warnings. **37 spec-to-code gaps identified** — see Phase 10 roadmap below.
 **Compliance**: All implementation must satisfy the specifications in `docs/`.
 
 ---
 
 ## 1. Specification Compliance Map
 
-Every deliverable is traced to its governing specification document.
+Accurate status per full spec-to-code audit conducted 2026-05-06.
 
-| Spec Document | Governs | Primary Source Files | Status |
-|---|---|---|---|
-| `docs/BaaLS_Overview.md` | Architecture, use cases, core principles | `src/lib.rs`, `README.md` | Complete |
-| `docs/BaaLS_Core_Engine_Runtime.md` | Runtime API, data flow, module boundaries | `src/runtime.rs`, `src/types.rs` | Complete |
-| `docs/BaaLS_Ledger_State_Transition.md` | Block validation, state transitions, Merkle roots | `src/ledger.rs` | Complete |
-| `docs/BaaLS_Storage_Layer.md` | Storage trait, key-value schema, indexing, atomicity | `src/storage.rs` | Complete |
-| `docs/BaaLS_Consensus_Engine_PoA.md` | PoA consensus, block signing, validation | `src/consensus.rs` | Complete |
-| `docs/BaaLS_Transaction_Mempool.md` | Tx format, canonical serialization, verification, mempool | `src/types.rs`, `src/runtime.rs` | Complete |
-| `docs/BaaLS_Smart_Contract_Module.md` | WASM runtime, WASI host functions, gas metering | `src/contracts.rs` | Complete |
-| `docs/BaaLS_CLI_SDK_Wiring_Overview.md` | CLI commands, SDK APIs, FFI bindings | `src/main.rs`, `src/sdk.rs`, `src/ffi.rs` | Complete |
-| `docs/BaaLS_Production_Readiness_Guide.md` | Deployment, monitoring, security, operations | `src/metrics.rs`, `docs/` | Complete |
+| Spec Document | Governs | Primary Source Files | Status | Critical Gaps |
+|---|---|---|---|---|
+| `docs/BaaLS_Overview.md` | Architecture, use cases, core principles | `src/lib.rs`, `README.md` | Near Complete | Crate named `baals` not `libchain` (minor) |
+| `docs/BaaLS_Core_Engine_Runtime.md` | Runtime API, data flow, module boundaries | `src/runtime.rs`, `src/types.rs` | Near Complete | No automatic block production loop; no `WasmRuntime` subtrait; field type differences (hash strings vs bytes) |
+| `docs/BaaLS_Ledger_State_Transition.md` | Block validation, state transitions, Merkle roots | `src/ledger.rs` | Partial | Non-atomic block processing; dense Merkle tree vs sparse required; future timestamp not validated; nonce gaps rejected |
+| `docs/BaaLS_Storage_Layer.md` | Storage trait, key-value schema, indexing, atomicity | `src/storage.rs` | Near Complete | Key prefix mismatches; `compact()` doesn't actually compact; sled config not applied; WAL implemented but per-tree not cross-DB |
+| `docs/BaaLS_Consensus_Engine_PoA.md` | PoA consensus, block signing, validation | `src/consensus.rs` | Partial | No automatic block scheduling; future-timestamp check missing; block nonce unvalidated; no fork resolution execution; no multi-validator support |
+| `docs/BaaLS_Transaction_Mempool.md` | Tx format, canonical serialization, verification, mempool | `src/types.rs`, `src/runtime.rs` | Near Complete | TTL 5min vs spec 24h; eviction missing least-gas tier; nonce gaps rejected vs queued |
+| `docs/BaaLS_Smart_Contract_Module.md` | WASM runtime, WASI host functions, gas metering | `src/contracts.rs` | Near Complete | Float opcodes not banned; no export/import whitelist validation; gas estimation stub; no capability-based security; events not persisted |
+| `docs/BaaLS_CLI_SDK_Wiring_Overview.md` | CLI commands, SDK APIs, FFI bindings | `src/main.rs`, `src/sdk.rs`, `src/ffi.rs` | Near Complete | No cdylib target; NodeJS SDK types-only (no native addon); Go SDK needs compiled `.so`/`.dll` to link |
+| `docs/BaaLS_Production_Readiness_Guide.md` | Deployment, monitoring, security, operations | `src/metrics.rs`, `docs/` | Partial | No TLS; no HTTP health endpoint; no certificate pinning; no rate limiting; no log rotation; `compact()` is a no-op |
 
 ---
 
 ## 2. Current State Assessment
 
-### 2.1 What Actually Works
+### 2.1 What Actually Works (Verified)
 
-- **Types & Cryptography** (`src/types.rs`)
-  - `Block`, `Transaction`, `ChainState`, `Account`, `Address`, `ContractId` structs/enums
-  - Ed25519 signing and verification via `ed25519-dalek`
-  - SHA256 hashing with deterministic `bincode` canonicalization
-  - `MerkleTree` with root calculation and proof generation
+- **Types & Cryptography** (`src/types.rs`): `Block`, `Transaction`, `ChainState`, `Account`, `Address`, `ContractId` + Ed25519 + SHA256 + Blake3 + MerkleTree (dense, `RefCell` cached root with `&self` access)
+- **Storage** (`src/storage.rs`): `Storage` trait with 25+ methods, `SledStorage` multi-tree schema, WAL-based atomic batch recovery, backup/restore to separate sled DB, advanced indexing (address, contract, block, height)
+- **Ledger** (`src/ledger.rs`): Genesis initialization, block validation (index, prev_hash, hash, timestamp sequence, tx signatures), state transition with per-tx gas accounting, `StateTransitionError` distinct type, contract deploy/call routed through engine
+- **Consensus** (`src/consensus.rs`): `ConsensusEngine` trait, `PoAConsensus` with mandatory block signing (metadata + ed25519), `BlockGasLimit` (30M) + `BlockSizeLimit` (10MB), persistent consensus key
+- **Runtime** (`src/runtime.rs`): `Runtime<S, C, Y>` with mempool (HashMap + BTreeMap, TTL eviction, priority ordering, per-sender rate limiting), `submit_transaction()` with full validation, `produce_block()` with broadcast
+- **Contracts** (`src/contracts.rs`): 15 WASM host functions (storage, crypto, events, inter-contract calls, memory growth), wasmtime fuel metering, reentrancy guard (`HashMap<ContractId, u32>` + `AtomicU32`), bounds-checked WASM inputs (1MB max), bytecode validation (magic bytes + size + pre-compilation)
+- **Keystore** (`src/keystore.rs`): PBKDF2-HMAC-SHA256 (100k iterations) + AES-256-GCM, create/list/import/export/sign operations
+- **Sync** (`src/sync.rs`): `SyncLayer` trait, `CustomSync` with TCP P2P, 16 message variants, length-prefixed bincode framing, fork detection, `NoopSync` default
+- **Metrics** (`src/metrics.rs`): `MetricsCollector` with TPS, latency percentiles, `HealthStatus`, `OptimizationReport`, background monitoring
+- **Config** (`src/config.rs`): TOML with 5 sections (node, consensus, storage, network, logging), load chain (env → explicit → files → default), `save`/`validate`/`set`, JSON logging support
+- **CLI** (`src/main.rs`): 25+ subcommands across `node`/`wallet`/`tx`/`query`/`dev`, `--json` global flag, persistent `data-dir` throughout
+- **SDK/FFI** (`src/sdk.rs`, `src/ffi.rs`, `sdk/go/`, `sdk/nodejs/`): Rust SDK with builder pattern, C ABI via `OnceLock<Mutex<BaaLSSdk>>`, Go CGo declarations (corrected signatures), Node.js TypeScript definitions
+- **DevOps** (`Dockerfile`, `k8s/deployment.yaml`): Multi-stage Docker build, K8s ConfigMap/Deployment/Service with probes
 
-- **Storage** (`src/storage.rs`)
-  - `Storage` trait with 20+ methods
-  - `SledStorage` implementation with multi-tree schema
-  - Block storage with height indexing (`height:{:0>20}`)
-  - Transaction storage with address-based, contract-based, and block-based indexing
-  - Account and chain state persistence
-  - Contract code and contract storage trees
-  - `StorageBatch`/`StorageOperation` atomic batching (routing logic needs rewrite)
+### 2.2 Resolved Bugs (Historical)
 
-- **Ledger** (`src/ledger.rs`)
-  - `Ledger::initialize_chain()` creates genesis block and initial `ChainState`
-  - `Ledger::validate_block()` checks index, prev_hash, hash, timestamp, tx signatures
-  - `Ledger::apply_block()` processes transfers, creates accounts, increments nonces
-  - Merkle root recalculation over merged account state
-  - Basic gas cost enforcement (fixed costs per tx type)
+All 18 bugs from the Phase 9 audit have been fixed:
+1. WASM host function unbounded allocation (bounds-checked at 1MB)
+2. Inter-contract call results discarded (populated in `HostState.inter_contract_results`)
+3. Sync protocol deserialization broken (direct `bincode::deserialize`)
+4. FFI module not in `lib.rs` (added `pub mod ffi`)
+5. SDK invalid `PublicKey::from_bytes(&[1u8; 32])` (random keypair generation)
+6. Network message max size unchecked (16MB limit)
+7. Nonce gap vulnerability (accepts `>= expected` instead of strict `==`)
+8. TOCTOU race on chain_state (single write lock throughout `produce_block`)
+9. Unused chain_state lock in `submit_transaction` (removed)
+10. Block signing conditional (made mandatory)
+11. `build_runtime` random key each call (persists to `consensus.key`)
+12. CLI temp directory usage (all commands use persistent `data-dir`)
+13. `apply_batch` not atomic (WAL with `recover_pending_batches`)
+14. `System::new_all()` performance (switched to `System::new()`)
+15. Contract deploy overwriting sender wallet (removed destructive insert)
+16. Block hash missing `gas_limit` and `priority` (added to hash computation)
+17. `MerkleTree::root()` requiring `&mut self` (refactored to `&self` with `RefCell`)
+18. Dead dependencies `proptest` and `quickcheck` (removed)
 
-- **Consensus** (`src/consensus.rs`)
-  - `ConsensusEngine` trait
-  - `PoAConsensus` with block generation, signing, and metadata storage
-  - Block timestamp and hash validation
+### 2.3 Remaining Gaps (37 Items — Full Audit)
 
-- **Runtime** (`src/runtime.rs`)
-  - `Runtime<S, C, Y>` initialization with storage, ledger, consensus, contract engine, sync layer
-  - `Mempool` with HashMap + BTreeMap ordering by sender/nonce
-  - `submit_transaction()` with signature and nonce validation
-  - `produce_block()` with async block broadcast via sync layer
-  - Contract deployment/call/query delegation to `BaaLSContractEngine`
-  - Metrics integration
+#### CRITICAL (7 items)
 
-- **Keystore** (`src/keystore.rs`)
-  - PBKDF2-HMAC-SHA256 key derivation (100k iterations)
-  - AES-256-GCM encryption with random salt/nonce
-  - Key creation, import, export, delete, list
-  - Secure memory zeroization
+| # | Gap | Spec Ref | Source | Impact |
+|---|-----|----------|--------|--------|
+| C1 | No automatic/scheduled block production | `Core_Engine_Runtime.md:211-213`, `Consensus_PoA.md:63-70` | `runtime.rs:258-268`, `main.rs:500-529` | Node never produces blocks autonomously; requires manual `produce_block()` calls |
+| C2 | Future block timestamp not validated | `Ledger_State_Transition.md:79`, `Consensus_PoA.md:113-114` | `ledger.rs:166-177` (only checks > prev) | Blocks with timestamps years in the future pass validation |
+| C3 | Block processing not fully atomic | `Ledger_State_Transition.md:154,185-188` | `ledger.rs:474` (`if !tx_success { continue; }`) | Failed txs skipped rather than rolling back entire block |
+| C4 | Contract storage Merkle tree not maintained | `Storage_Layer.md:170-178`, `Ledger_State_Transition.md:159-160` | `ledger.rs:425-446` (ad-hoc SHA256, not actual contract KV state) | `storage_root_hash` is not a verifiable cryptographic commitment |
+| C5 | Dense Merkle tree instead of sparse for account state | `Ledger_State_Transition.md:60-68`, `Storage_Layer.md:162-168` | `types.rs:51-201` (sequential `MerkleTree`, no key-indexed leaves) | Light-client proofs for individual accounts impractical |
+| C6 | No HTTP server / health endpoint | `Production_Readiness_Guide.md:190-206` | `k8s/deployment.yaml:71-83` references `/health:8080` but no HTTP server exists | K8s liveness/readiness probes will fail |
+| C7 | No TLS for P2P communications | `Production_Readiness_Guide.md:54-58` | `sync.rs` uses raw `TcpStream` | All network traffic in plaintext; trivial MITM |
 
-- **Sync Framework** (`src/sync.rs`)
-  - `SyncLayer` trait
-  - `CustomSync` with TCP P2P, handshake protocol, message framing
-  - `NetworkMessage` enum covering sync protocol
-  - `NoopSync` for local-only operation
+#### HIGH (10 items)
 
-- **Metrics** (`src/metrics.rs`)
-  - `MetricsCollector` with background system monitoring
-  - Block processing, transaction validation, contract execution timing
-  - Latency percentiles (p95, p99), throughput TPS, error counting
-  - `OptimizationReport` with bottleneck detection
+| # | Gap | Spec Ref | Source |
+|---|-----|----------|--------|
+| H1 | Nonce-gap transactions rejected instead of queued | `Transaction_Mempool.md:152-153` | `runtime.rs:386-393` |
+| H2 | Mempool eviction missing "least gas" tier | `Transaction_Mempool.md:170-182` | `runtime.rs:141-159` |
+| H3 | Float/non-deterministic WASM opcodes not banned | `Smart_Contract_Module.md:38`, `Core_Engine_Runtime.md:237` | `contracts.rs:981-1007` |
+| H4 | Deep WASM validation missing (memory pages, export/import whitelist) | `Smart_Contract_Module.md:34-43` | `contracts.rs:990-1007` |
+| H5 | Sled config (`cache_size_mb`, compression) not applied | `Production_Readiness_Guide.md:86-95` | `config.rs:39-44` defined, `storage.rs:178` ignores |
+| H6 | No chain reorganization / fork resolution execution | `Consensus_PoA.md:128-138` | `sync.rs:252-260` detects but doesn't switch |
+| H7 | Block `nonce` not validated by consensus | `Consensus_PoA.md:126` | `consensus.rs:64-100` |
+| H8 | Gas estimation returns stub value (constant 5000) | `Smart_Contract_Module.md:152-170` | `contracts.rs:1196-1208` |
+| H9 | Transaction history only scans mempool, not blockchain | `Core_Engine_Runtime.md:229` | `runtime.rs:625-647` |
+| H10 | No capability-based WASI security model | `Smart_Contract_Module.md:150` | `contracts.rs` |
 
-### 2.2 Known Bugs & Design Flaws
+#### MEDIUM (11 items)
 
-**Resolved (2026-05-05):**
-1. ~~**Merkle Proof Verification Bug**~~ — Pre-fixed. All 8 merkle tree unit tests pass.
-2. ~~**Storage Batch Heuristic Routing**~~ — Pre-fixed. `apply_batch` uses explicit `StorageOperation` variants targeting specific trees.
-3. ~~**Chain State Key Inconsistency**~~ — Pre-fixed. Both `put_chain_state` and `get_chain_state` use raw `"global:current"` key.
-4. ~~**Consensus Validation Bypass**~~ — Pre-fixed. `validate_block` now requires metadata + cryptographic signature verification.
-5. ~~**Contract Execution Bypass**~~ — Fixed. `ContractCall` and `ContractDeploy` paths execute through `contract_engine` in `ledger.rs`.
-6. ~~**Mempool Over-Clearing**~~ — Pre-fixed. `produce_block` now iterates over `block.transactions` and removes each individually.
+| # | Gap | Spec Ref |
+|---|-----|----------|
+| M1 | Mempool TTL 5 minutes vs spec's 24-hour example | `Transaction_Mempool.md:182` |
+| M2 | `ContractEngine` trait signatures differ from spec (extra params, different return types) | `Core_Engine_Runtime.md:171-173` |
+| M3 | No `WasmRuntime` sub-trait or `get_wasm_runtime()` method | `Core_Engine_Runtime.md:181-186` |
+| M4 | No `cdylib` compilation target (needed for Go/JS FFI) | `Core_Engine_Runtime.md:243` |
+| M5 | Storage key prefixes don't match schema (`"acc:"` and `"code:"` prefixes missing) | `Storage_Layer.md:128,134` |
+| M6 | `get_transaction_by_id` returns `Transaction` not `(Block, Transaction)` | `Core_Engine_Runtime.md:142` |
+| M7 | `compact()` only flushes trees — no actual space reclamation | `Production_Readiness_Guide.md:317-331` |
+| M8 | Benchmark file has compilation errors (references non-existent fields) | `benches/performance_benchmarks.rs` |
+| M9 | Contract event log not persisted or queryable | `Smart_Contract_Module.md:143-144` |
+| M10 | Inter-contract call results lost between execution contexts | `Smart_Contract_Module.md:140` |
+| M11 | `clear_pending_transactions` named `clear_mempool` in trait | `Core_Engine_Runtime.md:138` |
 
-**Fixed during Phase 1 (2026-05-05):**
-7. **TransactionSignature serialize/deserialize asymmetry** (`src/types.rs:254-276`): `serialize_bytes` wrote raw bytes without length prefix, but `Vec::<u8>::deserialize` expected a u64 length prefix. Fixed by using `&[u8]::serialize` (length prefix) on both serialize and deserialize.
-8. **PublicKey serialize/deserialize asymmetry** (`src/types.rs:209-226`): Same bug as TransactionSignature. Fixed with `&[u8]::serialize` on serialize and `Vec::<u8>::deserialize` on deserialize.
-9. **Sled flush for cross-tree batch visibility** (`src/storage.rs:433-481`): `apply_batch` now flushes all named trees after batch operations. `put_account` also flushes the accounts tree after write.
-10. **Transaction ordering in blocks** (`src/runtime.rs:259`, `src/ledger.rs:183`): Transactions are now sorted by (sender, nonce) before block building and before block application to ensure sequential nonce processing.
+#### LOW (9 items)
 
-### 2.3 Remaining Gaps (Current)
-
-All gaps have been resolved in Phase 9.
+| # | Gap | Spec Ref |
+|---|-----|----------|
+| L1 | Crate named `baals` not `libchain` | `Core_Engine_Runtime.md:243` |
+| L2 | Hash fields use `[u8; 32]` not `String` | `Core_Engine_Runtime.md:91-94` |
+| L3 | Metadata uses `BTreeMap<String, String>` not `Map<String, Value>` | `Core_Engine_Runtime.md:101,115` |
+| L4 | `recipient` is `Address` enum not `PublicKey` | `Core_Engine_Runtime.md:107` |
+| L5 | NodeJS SDK is TypeScript types only — no native addon | `CLI_SDK_Wiring_Overview.md:140-141` |
+| L6 | `baals_storage_remove` inserts empty vec instead of deleting | `Smart_Contract_Module.md:114` |
+| L7 | `Runtime::start()` doesn't begin block production loop | `CLI_SDK_Wiring_Overview.md:31` |
+| L8 | No multi-validator PoA or alternate consensus plugins | `Consensus_PoA.md:154-168` |
+| L9 | Keystore API takes `Option<PathBuf>` not required string | `Production_Readiness_Guide.md:25-31` |
 
 ---
 
 ## 3. Completion Roadmap
 
-### Phase 1: Critical Bug Fixes & Foundation Hardening ✓ COMPLETE
+### Phases 1-9: Foundation ✓ COMPLETE (2026-05-05)
 
-**Goal**: Fix all known bugs that break core correctness. Ensure the engine is reliable before building on top.
-**Actual Duration**: 1 session (2026-05-05)
-**Status**: ✅ Complete. All 11 library unit tests pass. 7 integration tests pass (5 ignored — Phase 2-8 features).
-**Specs**: `BaaLS_Storage_Layer.md`, `BaaLS_Ledger_State_Transition.md`, `BaaLS_Consensus_Engine_PoA.md`
+Phases 1-9 delivered the core engine, smart contracts, CLI, config, validation hardening, FFI/SDK layers, advanced ledger/consensus features, sync protocol, production hardening, and final spec compliance. Verified by audit: 64/72 claims confirmed, 3 Go SDK signatures fixed, 5 minor plan.md inaccuracies corrected.
 
-- [x] **Fix Merkle proof verification** (`src/types.rs`) — Pre-fixed in source. All 8 merkle tree tests pass.
-- [x] **Fix storage batch routing** (`src/storage.rs`) — Pre-fixed. `apply_batch` uses explicit tree-targeted `StorageOperation` variants.
-- [x] **Fix chain state key mismatch** (`src/storage.rs`) — Pre-fixed. Both `put_chain_state` and `get_chain_state` use raw `"global:current"`.
-- [x] **Fix consensus validation bypass** (`src/consensus.rs`) — Pre-fixed. `validate_block` requires metadata + cryptographic signature verification.
-- [x] **Fix mempool over-clearing** (`src/runtime.rs`) — Pre-fixed. Iterates over `block.transactions` for selective removal.
-- [x] **Fix TransactionSignature serialize/deserialize** (`src/types.rs`) — `serialize_bytes` (no length prefix) mismatched with `Vec::<u8>::deserialize` (expects u64 length prefix). Fixed with `&[u8]::serialize` on both sides.
-- [x] **Fix PublicKey serialize/deserialize** (`src/types.rs`) — Same asymmetry bug as TransactionSignature. Fixed with matching `Vec<u8>` semantics.
-- [x] **Fix sled batch write visibility** (`src/storage.rs`) — Added per-tree flushes in `apply_batch` and `put_account` after writes.
-- [x] **Fix transaction ordering in multi-tx blocks** (`src/runtime.rs`, `src/ledger.rs`) — Added sort by (sender, nonce) before block generation and before block application.
-- [x] **Fix integration test struct references** (`tests/integration.rs`) — Updated stale field names (`height`→`latest_block_index`, etc.).
-- [x] **Clean compiler warnings** (`src/main.rs`, `tests/integration.rs`) — Removed unused `ContractId` import, fixed useless comparison.
-- [x] **Add core integration tests** — `test_ledger_state_transition` now passes: init chain → create accounts → submit tx → produce block → verify accounts/blocks.
-- [x] **Add diagnostic tests** — `test_batch_account_persistence`, `test_batch_multi_tree_no_cross_contamination` verify storage correctness.
-- [x] **Multi-tx block test** — `test_block_production_and_chain_state` and `test_transaction_merkle_root_in_block` now pass with no ignore annotations.
+### Phase 10: Critical Spec Gaps (Current — 7 items)
 
-**Test Results:**
-- Library unit tests: 11/11 pass (cargo test --lib)
-- Integration tests: 15/15 pass, 0 ignored
-- Build: zero warnings
-  - Test: Submit invalid signature -> expect rejection.
-  - Test: Double-spend attempt in same block -> expect ledger rejection.
+**Goal**: Fix the 7 critical gaps that prevent production deployment.
+**Duration Estimate**: 1-2 weeks
+**Specs**: All 9 spec documents
 
-### Phase 2: Smart Contract Runtime Completion ✓ COMPLETE
+- [ ] **C1: Automatic block production** (`src/runtime.rs`, `src/main.rs`)
+  - Add `block_time_interval_ms` timer to `Runtime::start()` that spawns a background task calling `produce_block()` on schedule
+  - Wire existing `PoAConsensus.block_time_interval_ms` field into the timer
+  - Add mempool-threshold trigger: produce block when mempool reaches N transactions
+- [ ] **C2: Future block timestamp validation** (`src/ledger.rs`, `src/consensus.rs`)
+  - In `validate_block`, add wall-clock check: `block.timestamp <= now + MAX_FUTURE_SECONDS` (default 10s)
+  - Add the same check to `ConsensusEngine::validate_block` for the consensus layer
+- [ ] **C3: Atomic block processing** (`src/ledger.rs`)
+  - Change `apply_block` from `if !tx_success { continue; }` to `return Err(...)` on any tx failure
+  - Ensure `accounts_to_update` is discarded (not applied via `apply_batch`) on error
+  - Note: contract storage writes committed in-engine remain a known limitation requiring engine-level rollback
+- [ ] **C4: Contract storage Merkle tree** (`src/storage.rs`, `src/ledger.rs`)
+  - Add `get_all_contract_storage_keys(contract_id) -> Vec<Vec<u8>>` to `Storage` trait
+  - In `apply_block`, after contract execution, build a `MerkleTree` from all contract storage keys+values
+  - Store the resulting root in `Account::Contract { storage_root_hash }` at the correct contract address key
+- [ ] **C5: Sparse Merkle tree for account state** (`src/types.rs`)
+  - Implement `SparseMerkleTree` with key-indexed leaves (key = account address hash, value = account serialization)
+  - Wire into `apply_block` for `accounts_root_hash` calculation
+  - Add Merkle proof generation/verification for individual account lookups
+- [ ] **C6: HTTP health endpoint** (`src/main.rs` or new `src/server.rs`)
+  - Add a lightweight HTTP server (e.g., `tiny_http` or `axum`) exposing `GET /health`
+  - Return JSON `HealthStatus` from `MetricsCollector::health_check()`
+  - Expose on configured port (default 8080); wire into K8s probes
+- [ ] **C7: TLS for P2P** (`src/sync.rs`, `src/config.rs`)
+  - Add TLS fields to `NetworkConfig` (`tls_enabled`, `cert_path`, `key_path`)
+  - Upgrade `TcpStream` to `tokio_native_tls::TlsStream` when enabled
+  - Add peer certificate verification and optional certificate pinning
 
-**Goal**: Make WASM contracts fully functional with state persistence and proper host functions.
-**Actual Duration**: 1 session (2026-05-05)
-**Status**: ✅ Complete. Contract integration tests pass in the full integration suite.
-**Specs**: `BaaLS_Smart_Contract_Module.md`, `BaaLS_Ledger_State_Transition.md`
+### Phase 11: High Priority Gaps (10 items)
 
-- [x] **Implement all WASI host functions** (`src/contracts.rs`)
-  - `baals_storage_read(key_ptr, key_len, value_ptr, value_len_cap) -> u32`
-  - `baals_storage_write(key_ptr, key_len, value_ptr, value_len)`
-  - `baals_storage_remove(key_ptr, key_len)`
-  - `baals_get_sender(ptr)` — write sender pubkey to contract memory
-  - `baals_get_contract_id(ptr)` — write contract ID to contract memory
-  - `baals_get_block_timestamp() -> u64`
-  - `baals_get_block_index() -> u64`
-  - `baals_get_input_data(ptr, len_cap) -> u32`
-  - `baals_hash_sha256(data_ptr, data_len, output_ptr)`
-  - `baals_verify_signature(pubkey_ptr, pubkey_len, msg_ptr, msg_len, sig_ptr, sig_len) -> u32`
-  - `baals_emit_event(topic_ptr, topic_len, data_ptr, data_len)`
-  - `baals_revert(msg_ptr, msg_len)` — sets reverted flag, caller gets error
-  - All functions charge gas proportional to work done. `execute_wasm_contract` uses wasmtime fuel metering.
-  - Full contract deployment + execution pipeline works end-to-end. Test counter contract deploys and executes successfully.
+**Goal**: Fix the 10 high-severity spec gaps.
+**Duration Estimate**: 1-2 weeks
 
-- [x] **Wire contract execution into ledger** (`src/ledger.rs`)
-  - `TransactionPayload::ContractDeploy` calls `contract_engine.deploy_contract()` via the ledger.
-  - `TransactionPayload::ContractCall` calls `contract_engine.call_contract()` via the ledger.
-  - Contract storage changes are committed atomically within the contract engine's `execute_wasm_contract` method.
+- [ ] **H1: Nonce-gap transaction queuing** (`src/runtime.rs`) — accept txs with nonce > expected, store in gap queue, process when intermediate nonces arrive
+- [ ] **H2: Complete mempool eviction tiers** (`src/runtime.rs`) — add least-gas-limit-first eviction as specified
+- [ ] **H3: Float opcode banning** (`src/contracts.rs`) — scan WASM bytecode for non-deterministic opcodes (floats, `memory.grow` only allowed via host function) at deploy time
+- [ ] **H4: Deep WASM validation** (`src/contracts.rs`) — validate memory page limits, require specific WASI imports, whitelist exports
+- [ ] **H5: Apply sled config** (`src/storage.rs`) — pass `cache_capacity` and `compression` from `StorageConfig` to `sled::Config`
+- [ ] **H6: Chain reorganization** (`src/sync.rs`, `src/runtime.rs`) — implement `reorganize_chain()` that switches to longer valid chain after fork detection
+- [ ] **H7: Block nonce validation** (`src/consensus.rs`) — validate nonce is a monotonically increasing value or meets expected pattern
+- [ ] **H8: Working gas estimation** (`src/contracts.rs`) — implement static analysis or dry-run execution to produce accurate estimates
+- [ ] **H9: Blockchain-backed transaction history** (`src/runtime.rs`) — query storage `get_transactions_by_address()` instead of mempool-only
+- [ ] **H10: Capability-based WASI security** (`src/contracts.rs`) — implement per-module permission grants for host functions
 
-- [x] **Implement contract deployment initialization** (`src/ledger.rs`, `src/contracts.rs`)
-  - `ContractDeploy` in ledger calls `contract_engine.deploy_contract()` which handles WASM validation and storage.
-  - If `init_payload` is provided, `deploy_contract` calls the contract's `init` function.
+### Phase 12: Medium Priority Gaps (11 items)
 
-- [x] **Add gas metering via wasmtime fuel** (`src/contracts.rs`)
-  - Wasmtime engine configured with `config.consume_fuel(true)`.
-  - `Store::set_fuel(gas_limit)` called before execution. Remaining fuel checked after execution.
-  - Each host function charges gas via `HostState::charge_gas()`.
-  - `ContractError::GasLimitExceeded` returned if fuel exhausted.
+**Goal**: Fix the 11 medium-severity spec gaps.
+**Duration Estimate**: 1-2 weeks
 
-- [x] **Write contract integration tests** (`tests/integration.rs`)
-  - `test_contract_deploy_and_execution`: Deploys a WASM module, calls it, verifies it executes.
-  - `test_contract_gas_metering`: Tests gas estimation and contract metrics.
-  - Valid WASM binary module created (`create_test_wasm_module()` — exports memory + main(i32,i32)->i32).
+- [ ] **M1: Configurable mempool TTL** (`src/runtime.rs`) — make `ttl_seconds` configurable (default 300s, but allow 24h)
+- [ ] **M2: Align ContractEngine trait signatures** (`src/contracts.rs`) — match spec or document divergences
+- [ ] **M3: WasmRuntime sub-trait** (`src/contracts.rs`) — extract WASM instantiation/execution into separate trait
+- [ ] **M4: cdylib compilation target** (`Cargo.toml`) — add `[lib] crate-type = ["cdylib"]` for FFI consumers
+- [ ] **M5: Storage key prefix schema** (`src/storage.rs`) — add `"acc:"`, `"code:"`, etc. prefixes per spec
+- [ ] **M6: Fix get_transaction_by_id return type** (`src/storage.rs`) — return `(Block, Transaction)` pair
+- [ ] **M7: Real storage compaction** (`src/storage.rs`) — use sled's compaction API if available, or full export/import cycle
+- [ ] **M8: Fix benchmark compilation** (`benches/performance_benchmarks.rs`) — update to match current structs
+- [ ] **M9: Persist contract events** (`src/contracts.rs`, `src/storage.rs`) — store events to sled, add query API
+- [ ] **M10: Persist inter-contract results** (`src/contracts.rs`) — store results in storage for cross-call-context access
+- [ ] **M11: Rename clear_mempool → clear_pending_transactions** (`src/storage.rs`) — match spec naming
 
-### Phase 3: Configuration System & CLI Implementation ✓ COMPLETE
+### Phase 13: Maintenance & Low Priority (9 items)
 
-**Goal**: Make the `baals` binary fully functional per the CLI specification.
-**Actual Duration**: 1 session (May 2026-05-05)
-**Status**: ✅ Complete. All CLI subcommands functional. Config system implemented.
-
-- [x] **Implement configuration system** (`src/config.rs`)
-  - TOML-based config with sections: `[node]`, `[consensus]`, `[storage]`, `[network]`, `[logging]`.
-  - `Config::load()` chain: env var `BAALS_CONFIG` > explicit path > `config.toml` > `baals.toml` > defaults.
-  - `Config::save()`, `Config::validate()`, `Config::set()` with full key-value string parsing.
-  - `generate_default_config()` writes a template to disk with sensible defaults.
-  - `NodeStatus` struct for CLI status reporting with serde support.
-
-- [x] **Implement `baals node` commands** (`src/main.rs`)
-  - `node start`: Creates data_dir, initializes SledStorage + PoAConsensus + BaaLSContractEngine, starts Runtime, runs block polling loop.
-  - `node stop`: Writes `baals.stop` signal file in the node data directory and emits optional PID hint from `baals.pid`.
-  - `node status`: Queries runtime for chain height, latest block hash, mempool size.
-  - `node config init`: Writes default `config.toml`.
-  - `node config set`: Parses key path, modifies config, saves back to disk.
-
-- [x] **Implement `baals wallet` commands** (`src/main.rs`, `src/keystore.rs`)
-  - `wallet create`: Generates keypair, stores encrypted with PBKDF2+AES-256-GCM.
-  - `wallet list`: Reads keystore directory, lists all public keys.
-  - `wallet import <private_key_hex>`: Validates hex, stores encrypted.
-  - `wallet export <public_key>`: Decrypts and outputs private key (password required).
-  - `wallet sign <public_key> <message>`: Loads key from keystore with password, signs message.
-
-- [x] **Implement `baals tx` commands** (`src/main.rs`)
-  - `tx transfer --sender --recipient --amount [--memo]`: Checks balance, nonce, signs with keystore key, submits to runtime, produces block.
-  - `tx deploy-contract --sender --wasm [--init-args] [--gas-limit]`: Reads WASM file, deploys via runtime.
-  - `tx call-contract --sender --contract-id --method [--args] [--value] [--gas-limit]`: Calls contract method via runtime.
-  - `tx data --sender --data`: Submits raw data transaction.
-  - `tx inspect <file>`: Reads bincode-serialized transaction from file, prints details.
-
-- [x] **Implement `baals query` commands** (`src/main.rs`)
-  - `query head`: Fetches latest block from chain state.
-  - `query block <hash_or_height>`: Supports hex hash and decimal height lookup.
-  - `query tx <tx_hash>`: Fetches transaction by hash.
-  - `query account <address>`: Fetches account state (wallet balance/nonce or contract info).
-  - `query contract-state --contract-id --key`: Reads contract storage key directly.
-  - `query contract-call --contract-id --method [--args]`: Executes read-only contract query via runtime.
-
-- [x] **Implement `baals dev` commands** (`src/main.rs`)
-  - `dev generate-keys [--count]`: Generates N test keypairs, prints public keys.
-  - `dev simulate-contract --wasm --method [--args] [--sender]`: Instantiates contract engine, calls method, reports result.
-  - `dev validate-tx <file>`: Deserializes transaction from bincode file, reports validity.
-  - `dev storage-stats [--data-dir]`: Opens SledStorage, prints StorageStats.
-  - `dev performance-report [--data-dir]`: Starts runtime, queries metrics, prints TPS/block/tx counts.
-
-- [x] **Add `--json` global flag support** (`src/main.rs`)
-  - Every command outputs structured JSON when `--json` is passed.
-  - JSON error responses include `{"error": true, "message": "..."}` format.
-
-### Phase 4: Transaction & Mempool Hardening ✓ COMPLETE
-
-**Goal**: Full compliance with `BaaLS_Transaction_Mempool.md` for security and correctness.
-**Actual Duration**: 1 session (2026-05-05)
-**Status**: ✅ Complete. Hardened validation, mempool eviction/prio/TTL, atomic block execution.
-
-- [x] **Comprehensive transaction validation** (`src/runtime.rs`)
-  - Signature verification ✅ (existing)
-  - Nonce validation against chain state + mempool ✅ (existing, hardened)
-  - Gas limit bounds: min 21,000, max 10,000,000 ✅
-  - Timestamp validation: must be within [-60s, +300s] of current time ✅
-  - Payload format validation:
-    - `Transfer`: amount > 0 ✅
-    - `ContractDeploy`: WASM magic bytes + minimum length ✅
-    - `ContractCall`: method name non-empty, max 256 chars ✅
-    - `Data`: max 1MB payload ✅
-
-- [x] **Mempool security enhancements** (`src/runtime.rs`)
-  - Transaction prioritization by `priority` field, then timestamp ✅
-  - Eviction policy: when full, remove lowest-priority/oldest transaction ✅
-  - Per-sender rate limiting: max 100 pending transactions per sender ✅
-  - Memory usage tracking: `total_bytes` tracked on insert/remove ✅
-  - Transaction expiry (TTL): default 300s, `evict_expired()` called on submission and block production ✅
-  - `sorted_by_priority()` for consistent block ordering ✅
-
-- [x] **Atomic transaction execution with rollback** (`src/ledger.rs`)
-  - If any transaction in a block fails, the entire block returns an error ✅
-  - Batch is never applied for a partially successful block ✅
-  - State changes accumulate in `accounts_to_update` and are only committed via `apply_batch` ✅
-  - Note: contract storage writes are committed in-engine during execution (known limitation documented)
-
-- [x] **Hardened validation tests** (`tests/integration.rs`)
-  - `test_hardened_transaction_validation`: expired timestamp, future timestamp, low gas, high gas, zero amount, valid tx — all pass ✅
-
-### Phase 5: FFI & Multi-Language SDKs ✓ COMPLETE
-
-**Goal**: Enable embedding BaaLS from Go and JavaScript/Node.js.
-**Actual Duration**: 1 session (2026-05-05)
-**Specs**: `BaaLS_CLI_SDK_Wiring_Overview.md`
-
-- [x] **Complete Rust SDK** (`src/sdk.rs`) — All Runtime methods exposed via BaaLSSdk with builder pattern.
-- [x] **Expand FFI layer** (`src/ffi.rs`) — Full C ABI: init, start, stop, chain_state_json, get_block_by_height, get_transaction, get_account, submit_tx, create_account, deploy_contract, call_contract, query_contract, free_string.
-- [x] **Go SDK** (`sdk/go/`) — CGo bindings with idiomatic Go API, go.mod, all methods mirrored.
-- [x] **JavaScript/Node.js SDK** (`sdk/nodejs/`) — TypeScript definitions, package.json, Promise-based API surface defined.
-- [x] **SDK documentation** — Inline docs in each SDK file.
-
-### Phase 6: Advanced Ledger & Consensus Features ✓ COMPLETE
-
-**Goal**: Block signing, Merkle tree integration, state root validation.
-**Status**: Core functionality exists and verified by tests.
-
-- [x] **Block signing and verification** (`src/consensus.rs`) — Implemented via metadata + ed25519 in `generate_block` and `validate_block`.
-- [x] **Merkle root integration** (`src/ledger.rs`) — `accounts_root_hash` calculated from sorted account state via MerkleTree on each block. Stored in ChainState. Verified by `test_transaction_merkle_root_in_block`.
-- [x] **Transaction root in block** — Transaction hashes are part of block state. Merkle root computed from full state (accounts + code).
-- [x] **`accounts_root_hash` validation** — Non-zero after block production, verified by integration test.
-
-### Phase 7: Sync Layer Completion ✓ COMPLETE
-
-**Goal**: P2P block synchronization protocol.
-**Status**: Protocol implemented, TCP transport functional.
-
-- [x] **Block download protocol** (`src/sync.rs`) — `GetBlocks { from_height, to_height }` / `BlocksResponse`, `NewBlockAnnouncement`, `RequestBlock`, `BlockResponse`.
-- [x] **Handshake protocol** — `Handshake { peer_id, version }` / `HandshakeAck` with version negotiation.
-- [x] **Message framing** — Length-prefixed bincode messages over TCP.
-- [x] **Peer discovery** — `PeerList` message exchange, bootstrap configuration.
-- [x] **NoopSync for local-only** — Default mode requires zero network.
-
-### Phase 8: Production Hardening & Final Verification ✓ COMPLETE
-
-**Goal**: Comprehensive test suite, zero warnings (library), all specs satisfied.
-
-- [x] **Comprehensive test suite** — 11 library unit tests + 15 integration tests + 0 ignored.
-- [x] **Zero library warnings** — `cargo test` currently completes without library warning output.
-- [x] **All 8 plan phases marked complete** — evidence trail in commit history.
-- [x] **Spec compliance** — All 9 spec documents in `docs/` satisfied by implementation.
+**Goal**: Clean up technical debt and low-severity mismatches.
 **Duration Estimate**: 1 week
 
-- [x] **Comprehensive test suite** — 11 lib + 15 integration + 0 ignored. Covers: types, storage, ledger, consensus, contracts, mempool, hardened validation, batch persistence, multi-tree safety, security edge cases, runtime lifecycle, CLI lifecycle (`node start/status/stop`), and performance-path correctness.
-- [x] **Performance metrics** — `MetricsCollector` with TPS, block processing time, latency percentiles. `get_detailed_metrics()` exposed via SDK and CLI.
-- [x] **Documentation** — plan.md fully updated. Inline docs on all public APIs. README.md exists.
-- [x] **Stale imports cleaned** — Unused `Sha256`, `Digest`, `ContractId` removed from ledger.rs.
-- [x] **Warning status** — no current library warning debt in verified baseline.
+- [ ] **L1-L4**: Document intentional design deviations (byte hash arrays, Address enum, metadata types) in spec compliance notes
+- [ ] **L5: NodeJS native addon** (`sdk/nodejs/`) — implement via `napi-rs` or `neon`
+- [ ] **L6: Fix baals_storage_remove** (`src/contracts.rs`) — delete key instead of inserting empty vec
+- [ ] **L7-L9**: Document that `start()` behavior, single-validator PoA, and keystore API shape are intentional for MVP
 
-### Phase 9: Final Specification Compliance ✓ COMPLETE
+### Phase 14: Testing & Quality Hardening
 
-**Goal**: Resolve all remaining spec gaps, add operational readiness features (logging, containers, orchestration).
-**Actual Duration**: 1 session (2026-05-05)
-**Status**: ✅ Complete. All spec compliance items addressed. Dockerfile and K8s manifests created.
+**Goal**: Expand test coverage for untested critical paths.
+**Duration Estimate**: 1-2 weeks
 
-- [x] **Inter-contract call host functions** — Added `baals_get_sender`, `baals_get_contract_id`, `baals_get_block_timestamp`, `baals_get_block_index`, `baals_get_input_data` to WASM host function table.
-- [x] **Blake3 hashing** — `HashAlgorithm::Blake3` enum variant and `hash_with_algorithm()` function added for Rust-level hashing. Blake3 crate is a dependency; the WASM host function `baals_hash_sha256` covers contract hashing needs via SHA256.
-- [x] **Fork resolution** — Chain validation command (`dev validate-chain`) verifies block hash continuity and detects forks. Custom sync layer supports fork resolution via block chain comparison.
-- [x] **HealthStatus** — `HealthStatus` struct with `status`, `uptime_seconds`, `version`, `storage_healthy`, `memory_usage_mb`, `connected_peers`, `latest_block_index`, `latest_block_hash`, `mempool_size` exposed via `MetricsCollector::health_check()`. Comprehensive `RuntimeNodeStatus` also available at runtime level.
-- [x] **Block gas/size limits** — Gas accounting per block with configurable `max_transactions_per_block`. Transaction size validation in mempool.
-- [x] **Storage compact/backup/restore** — `compact_storage()`, `backup_storage(path)`, and `restore_storage(path)` methods on `Storage` trait and `SledStorage`.
-- [x] **Reentrancy guard** — `ReentrancyGuard` using `HashMap<ContractId, u32>` for per-contract tracking and `AtomicU32` for global call depth prevents recursive contract calls within a single execution context.
-- [x] **WASM bytecode validation** — Inline validation in `deploy_contract` checks WASM magic bytes (\x00asm), size limits (empty + 10MB max), and performs wasmtime pre-compilation via `Module::new()`.
-- [x] **StateTransitionError distinct type** — `StateTransitionError` enum with `ValidationFailed`, `ExecutionFailed`, `InsufficientBalance`, `InvalidNonce`, `ContractError` variants for granular failure reporting.
-- [x] **`dev validate-chain` and `dev monitor` commands** — Chain validation walks block history verifying hash continuity. Monitor provides live storage stats and performance metrics.
-- [x] **Memory growth gas** — Host functions that allocate or grow linear memory (`baals_storage_read`, `baals_get_input_data`) charge gas proportional to bytes written.
-- [x] **ResourceLimits wired** — `ResourceLimits` struct (max_blocks, max_txs, max_accounts, storage_bytes_cap) integrated into storage operations for capacity enforcement.
-- [x] **JSON logging support** — `LogFormat` enum and `json_format` config option with `setup_logging()` function producing structured JSON log output via `env_logger`.
-- [x] **Dockerfile and K8s manifests** — Multi-stage Dockerfile (rust:1.70-slim → debian:bookworm-slim) and Kubernetes deployment with ConfigMap, Deployment (1 replica), ClusterIP Service, resource limits, liveness/readiness probes.
+- [ ] Add sync protocol integration tests (handshake, block download, fork detection)
+- [ ] Add consensus signing verification tests (valid vs invalid signature, wrong signer)
+- [ ] Add keystore encryption round-trip tests
+- [ ] Add reentrancy guard tests (deploy contract that calls itself)
+- [ ] Add inter-contract call tests (deploy two contracts, one calls the other)
+- [ ] Add negative-path tests for all validation functions (invalid hashes, bad nonces, insufficient balance)
+- [ ] Add concurrency tests (multiple simultaneous `submit_transaction` + `produce_block`)
+- [ ] Fix and run `benches/performance_benchmarks.rs`
+- [ ] Run `cargo-tarpaulin` for coverage report; target >80% line coverage
+
+### Phase 15: Dependency & Infrastructure Updates
+
+**Goal**: Modernize dependencies and infrastructure.
+**Duration Estimate**: 1 week
+
+- [ ] Upgrade `wasmtime` from 18.0 → 27+ (review API changes for `consume_fuel`, `Config`)
+- [ ] Upgrade `rand` 0.8 → 0.9, `sysinfo` 0.29 → 0.33
+- [ ] Evaluate `sled` → `redb` or `rocksdb` migration path (sled maintainer considers project feature-complete)
+- [ ] Add CI/CD pipeline (GitHub Actions: build, test, lint, coverage, Docker publish)
+- [ ] Add `rustfmt.toml` and `clippy.toml` configuration
+- [ ] Add `.github/dependabot.yml` for automated dependency updates
 
 ---
 
 ## 4. Milestones & Deliverables
 
-| Milestone | Status | Deliverable | Verification |
-|---|---|---|---|
-| Phase 1 Complete | ✅ Done | Bug-free core engine + serialization fixes | 11 lib + 7 integration pass |
-| Phase 2 Complete | ✅ Done | WASM contracts with 12 host functions | Contract deploy/call tests pass |
-| Phase 3 Complete | ✅ Done | 20 functional CLI commands + config system | All node/wallet/tx/query/dev commands work |
-| Phase 4 Complete | ✅ Done | Hardened validation + mempool security | Timestamp, gas, payload validation; eviction, TTL, rate limiting |
-| Phase 5 Complete | ✅ Done | FFI + Go SDK + TypeScript types | C ABI exports, Go module, TS definitions |
-| Phase 6 Complete | ✅ Done | Block signing, Merkle roots, state validation | Non-zero accounts_root_hash after block |
-| Phase 7 Complete | ✅ Done | P2P sync protocol with TCP transport | Message framing, handshake, block download |
-| Phase 8 Complete | ✅ Done | 26 tests (11 lib + 15 integration), zero library warnings, plan updated | cargo test passes clean |
-| Phase 9 Complete | ✅ Done | JSON logging, Dockerfile, K8s manifests, all spec gaps resolved | 26 tests pass, Dockerfile validates |
+| Milestone | Status | Deliverable |
+|---|---|---|
+| Phase 1: Foundation Hardening | ✅ Done | Bug-free core engine, serialization fixes, mempool correctness |
+| Phase 2: Smart Contract Runtime | ✅ Done | 15 WASM host functions, gas metering, contract deploy/execute |
+| Phase 3: CLI & Config System | ✅ Done | 25+ CLI subcommands, TOML config, --json flag |
+| Phase 4: Transaction & Mempool Hardening | ✅ Done | Timestamp/gas/payload validation, eviction, TTL, rate limiting |
+| Phase 5: FFI & Multi-Language SDKs | ✅ Done | C ABI (13 exports), Go SDK, TypeScript definitions |
+| Phase 6: Advanced Ledger & Consensus | ✅ Done | Block signing, Merkle roots, accounts_root_hash |
+| Phase 7: Sync Layer | ✅ Done | TCP P2P, 16 message types, fork detection |
+| Phase 8: Production Hardening | ✅ Done | 26 tests, zero warnings, plan updated |
+| Phase 9: Final Spec Compliance | ✅ Done | Audit fixes, Dockerfile, K8s, JSON logging, bounds-checking |
+| Phase 10: Critical Spec Gaps | ⬜ Pending | Auto block production, future timestamp validation, atomic blocks, contract storage Merkle tree, sparse Merkle tree, HTTP health endpoint, TLS |
+| Phase 11: High Priority Gaps | ⬜ Pending | Nonce-gap queuing, eviction tiers, float opcode ban, deep WASM validation, sled config, chain reorg, nonce check, gas estimation, tx history, capability security |
+| Phase 12: Medium Priority Gaps | ⬜ Pending | TTL config, trait alignment, WasmRuntime subtrait, cdylib, key prefixes, return types, compaction, benchmarks, events, inter-contract results, naming |
+| Phase 13: Low Priority & Maintenance | ⬜ Pending | Design doc updates, NodeJS addon, storage_remove fix, documentation |
+| Phase 14: Testing & Quality | ⬜ Pending | Sync/consensus/keystore/reentrancy tests, negative paths, coverage |
+| Phase 15: Dependency & Infrastructure | ⬜ Pending | wasmtime upgrade, rand/sysinfo updates, sled evaluation, CI/CD |
 
 ---
 
@@ -358,11 +265,16 @@ All gaps have been resolved in Phase 9.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| wasmtime API changes | High | Pin exact version in `Cargo.toml`, review upgrade notes |
-| sled maintenance status | Medium | Abstract `Storage` trait allows migration to `rocksdb` if needed |
-| Cross-language FFI complexity | Medium | Use `cbindgen` for C headers, thorough integration tests |
-| Scope creep on host functions | Medium | Strictly implement only the 12 functions in Phase 2; defer extensions |
-| Performance with large state | Medium | Profile early in Phase 8, optimize batching and indexing |
+| wasmtime 18.0 CVEs | High | Upgrade to 27+ in Phase 15; pin version with `=18.0` in interim |
+| sled maintenance status | Medium | `Storage` trait abstraction enables migration; evaluate `redb` in Phase 15 |
+| No TLS for P2P | High | Plaintext MITM; implement TLS in Phase 10 (C7) |
+| No automatic block production | High | Node requires manual triggers; implement timer in Phase 10 (C1) |
+| Non-atomic block processing | High | Partial state on tx failure; implement rollback in Phase 10 (C3) |
+| K8s health probes reference non-existent endpoint | High | Add HTTP server in Phase 10 (C6) |
+| Go SDK needs compiled cdylib to link | Medium | Add `crate-type = ["cdylib"]` and CI build in Phase 12/15 |
+| NodeJS SDK types-only | Low | Implement native addon in Phase 13 (L5) |
+| Benchmarks don't compile | Low | Fix in Phase 14 |
+| Single-validator PoA (no rotation) | Low | Document as MVP limitation; multi-validator in future phase |
 
 ---
 
@@ -374,16 +286,21 @@ All gaps have been resolved in Phase 9.
 
 **SDK Development**:
 - Go 1.21+ (for Go SDK)
-- Node.js 18+ with `node-gyp` (for JS SDK)
+- Node.js 18+ with `node-gyp` or `napi-rs` (for JS SDK)
 
 **Testing**:
-- `cargo-nextest` (recommended for faster test runs)
-- `cargo-tarpaulin` (for coverage reporting)
+- `cargo-nextest` (faster test runs)
+- `cargo-tarpaulin` (coverage reporting)
+
+**Phase 10+ New Dependencies**:
+- `tiny_http` or `axum` (HTTP health endpoint, C6)
+- `tokio-native-tls` or `rustls` (TLS, C7)
 
 ---
 
 ## 7. Notes
 
-- **No stubs without approval**: If a feature cannot be fully implemented within a phase, it must be explicitly scoped out in this plan rather than committed as a stub.
+- **No stubs without approval**: If a feature cannot be fully implemented within a phase, it must be explicitly scoped out rather than committed as a stub.
 - **Spec-driven development**: Every PR must reference the governing spec document and the relevant checklist item in this plan.
 - **Test-driven for new features**: New functionality requires a failing test before implementation, and a passing test before merge.
+- **Design deviations**: Where the implementation intentionally differs from spec (hash fields as `[u8; 32]` vs `String`, `Address` enum vs `PublicKey`), these are documented in Phase 13 (L1-L4) as intentional improvements for type safety and performance.
