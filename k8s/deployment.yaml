@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: baals
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: baals-config
+  namespace: baals
+data:
+  config.toml: |
+    [node]
+    data_dir = "/data"
+    port = 8080
+    mempool_limit = 10000
+
+    [consensus]
+    block_time_ms = 5000
+    max_transactions_per_block = 1000
+    authority_key = ""
+
+    [storage]
+    cache_size_mb = 256
+    compression = true
+
+    [network]
+    max_peers = 50
+    connection_timeout_ms = 30000
+
+    [logging]
+    level = "info"
+    file = "baals.log"
+    json_format = false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: baals
+  namespace: baals
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: baals
+  template:
+    metadata:
+      labels:
+        app: baals
+    spec:
+      containers:
+      - name: baals
+        image: baals:latest
+        imagePullPolicy: IfNotPresent
+        args: ["node", "start", "--data-dir", "/data", "--config", "/etc/baals/config.toml"]
+        ports:
+        - containerPort: 8080
+          name: http
+        volumeMounts:
+        - name: config
+          mountPath: /etc/baals
+        - name: data
+          mountPath: /data
+        resources:
+          limits:
+            cpu: "1"
+            memory: "512Mi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 20
+      volumes:
+      - name: config
+        configMap:
+          name: baals-config
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: baals
+  namespace: baals
+spec:
+  type: ClusterIP
+  selector:
+    app: baals
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: http

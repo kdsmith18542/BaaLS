@@ -1,7 +1,6 @@
 # Rust
 /target/
 **/*.rs.bk
-Cargo.lock
 
 # IDEs and editors
 .idea/
@@ -9,6 +8,9 @@ Cargo.lock
 *.iml
 .DS_Store
 .env
+
+# AI tool config
+.claude/
 
 # Build artifacts
 /build/
@@ -20,10 +22,11 @@ ehthumbs.db
 Thumbs.db
 
 # Project specific
-plan.md
 /data/
 *.log
 
 # Temporary files
 *.tmp
-*.temp 
+*.temp
+main_rs_errors.txt
+plan_remaining.md 
