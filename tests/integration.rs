@@ -1,4 +1,5 @@
 use baals::*;
+use ed25519_dalek::Signer;
 use log::info;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -1501,4 +1502,170 @@ fn create_test_wasm_module() -> Vec<u8> {
         0x69, 0x6e, 0x00, 0x00, // exports: memory, main
         0x0a, 0x06, 0x01, 0x04, 0x00, 0x20, 0x01, 0x0b, // code section
     ]
+}
+
+#[test]
+fn test_keystore_round_trip() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let keystore_path = temp_dir.path().join("keys");
+    let keystore = Keystore::new(Some(keystore_path)).unwrap();
+
+    // Create key
+    let pk = keystore.create_key("password123").unwrap();
+    assert!(!pk.to_bytes().iter().all(|b| *b == 0), "Public key should be non-zero");
+
+    // List keys
+    let keys = keystore.list_keys().unwrap();
+    assert!(keys.contains(&pk), "Created key should appear in list");
+
+    // Sign with loaded key
+    let signing_key = keystore.load_key(&pk, "password123").unwrap();
+    let message = b"test message";
+    let signature = signing_key.sign(message);
+    pk.verify(message, &signature).unwrap();
+
+    // Wrong password should fail
+    assert!(keystore.load_key(&pk, "wrong_password").is_err());
+
+    info!("[TEST] Keystore round-trip passed");
+}
+
+#[test]
+fn test_consensus_signing_verification() {
+    init_logging();
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+    let test_key = PublicKey::from(signing_key.verifying_key());
+    let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(signing_key);
+
+    let temp_dir = TempDir::new().unwrap();
+    let storage = SledStorage::new(temp_dir.path()).unwrap();
+    let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
+    let sync_layer = NoopSync;
+    let runtime = Runtime::new(storage, consensus, contract_engine, sync_layer).unwrap();
+
+    // Submit a transaction
+    let sender_sk = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let sender_pk = PublicKey::from(sender_sk.verifying_key());
+    runtime.create_account(&sender_pk, Account::Wallet { balance: 1000, nonce: 0 }).unwrap();
+
+    let mut tx = Transaction {
+        hash: [0u8; 32],
+        sender: sender_pk,
+        recipient: Address::Wallet(sender_pk),
+        payload: TransactionPayload::Transfer { amount: 1 },
+        nonce: 1,
+        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+        gas_limit: 100_000,
+        priority: 0,
+        metadata: None,
+    };
+    tx.hash = tx.calculate_hash().unwrap();
+    tx.sign(&sender_sk).unwrap();
+    runtime.submit_transaction(tx).unwrap();
+
+    // Produce block — consensus signs it
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    let block = tokio_rt.block_on(runtime.produce_block()).unwrap();
+    assert!(block.metadata.is_some(), "Block should have signing metadata");
+    let metadata = block.metadata.as_ref().unwrap();
+    assert!(metadata.contains_key("signer"), "Metadata should contain signer");
+    assert!(metadata.contains_key("signature"), "Metadata should contain signature");
+
+    info!("[TEST] Consensus signing verification passed");
+}
+
+#[test]
+fn test_invalid_nonce_rejected() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let storage = SledStorage::new(temp_dir.path()).unwrap();
+    let signing_key = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let test_key = PublicKey::from(signing_key.verifying_key());
+    let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
+    let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(signing_key);
+    let sync_layer = NoopSync;
+    let runtime = Runtime::new(storage, consensus, contract_engine, sync_layer).unwrap();
+
+    let sender_sk = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let sender_pk = PublicKey::from(sender_sk.verifying_key());
+    runtime.create_account(&sender_pk, Account::Wallet { balance: 1000, nonce: 0 }).unwrap();
+
+    // Submit tx with nonce 5 (account nonce is 0, expected 1)
+    let mut tx = Transaction {
+        hash: [0u8; 32],
+        sender: sender_pk,
+        recipient: Address::Wallet(sender_pk),
+        payload: TransactionPayload::Transfer { amount: 1 },
+        nonce: 5, // gap nonce
+        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+        gas_limit: 100_000,
+        priority: 0,
+        metadata: None,
+    };
+    tx.hash = tx.calculate_hash().unwrap();
+    tx.sign(&sender_sk).unwrap();
+    runtime.submit_transaction(tx).unwrap(); // should be accepted (nonce >= expected)
+
+    // Submit tx with nonce 0 (stale nonce, already used)
+    let mut tx2 = Transaction {
+        hash: [0u8; 32],
+        sender: sender_pk,
+        recipient: Address::Wallet(sender_pk),
+        payload: TransactionPayload::Transfer { amount: 1 },
+        nonce: 0, // stale nonce
+        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+        gas_limit: 100_000,
+        priority: 0,
+        metadata: None,
+    };
+    tx2.hash = tx2.calculate_hash().unwrap();
+    tx2.sign(&sender_sk).unwrap();
+    assert!(runtime.submit_transaction(tx2).is_err(), "Stale nonce should be rejected");
+
+    info!("[TEST] Invalid nonce rejection passed");
+}
+
+#[test]
+fn test_insufficient_balance_rejected() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let storage = SledStorage::new(temp_dir.path()).unwrap();
+    let signing_key = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let test_key = PublicKey::from(signing_key.verifying_key());
+    let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
+    let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(signing_key);
+    let sync_layer = NoopSync;
+    let runtime = Runtime::new(storage, consensus, contract_engine, sync_layer).unwrap();
+
+    let sender_sk = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let sender_pk = PublicKey::from(sender_sk.verifying_key());
+    runtime.create_account(&sender_pk, Account::Wallet { balance: 5, nonce: 0 }).unwrap();
+
+    // Submit transfer for more than balance
+    let mut tx = Transaction {
+        hash: [0u8; 32],
+        sender: sender_pk,
+        recipient: Address::Wallet(sender_pk),
+        payload: TransactionPayload::Transfer { amount: 100 }, // exceeds balance of 5
+        nonce: 1,
+        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+        gas_limit: 100_000,
+        priority: 0,
+        metadata: None,
+    };
+    tx.hash = tx.calculate_hash().unwrap();
+    tx.sign(&sender_sk).unwrap();
+    runtime.submit_transaction(tx).unwrap();
+
+    // Producing block should fail due to insufficient balance
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    let result = tokio_rt.block_on(runtime.produce_block());
+    assert!(result.is_err(), "Block should fail due to insufficient balance");
+
+    info!("[TEST] Insufficient balance rejection passed");
 }
