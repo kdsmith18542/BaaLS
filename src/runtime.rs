@@ -825,6 +825,51 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             .map_err(RuntimeError::StorageError)
     }
 
+    /// Reorganize the chain by applying a sequence of blocks from a fork.
+    /// Validates each block for continuity and correctness before applying.
+    /// Returns the new chain height after reorganization.
+    pub fn reorganize_chain(&self, fork_blocks: &[Block]) -> Result<u64, RuntimeError> {
+        if fork_blocks.is_empty() {
+            return Ok(self.get_chain_state()?.latest_block_index);
+        }
+
+        let mut current_chain_state = self.chain_state.lock().unwrap();
+        let local_height = current_chain_state.latest_block_index;
+        let fork_height = fork_blocks.last().map(|b| b.index).unwrap_or(0);
+
+        if fork_height <= local_height {
+            info!("[CHAIN] Fork not longer, skipping (local={}, fork={})", local_height, fork_height);
+            return Ok(local_height);
+        }
+
+        info!("[CHAIN] Reorganizing from {} to {} ({} blocks)", local_height + 1, fork_height, fork_blocks.len());
+
+        let mut expected_index = current_chain_state.latest_block_index + 1;
+        let mut expected_prev_hash = current_chain_state.latest_block_hash;
+
+        for block in fork_blocks {
+            if block.index != expected_index {
+                return Err(RuntimeError::InvalidTransaction(format!(
+                    "Fork block index mismatch: expected {}, got {}", expected_index, block.index
+                )));
+            }
+            if block.prev_hash != expected_prev_hash {
+                return Err(RuntimeError::InvalidTransaction(format!(
+                    "Fork block prev_hash mismatch at index {}", block.index
+                )));
+            }
+
+            self.ledger.validate_block(block, &current_chain_state)?;
+            self.ledger.apply_block(block.clone(), &mut current_chain_state)?;
+
+            expected_index = block.index + 1;
+            expected_prev_hash = block.hash;
+        }
+
+        info!("[CHAIN] Reorganized to height {}", current_chain_state.latest_block_index);
+        Ok(current_chain_state.latest_block_index)
+    }
+
     pub fn get_node_status(&self) -> Result<ChainState, RuntimeError> {
         self.get_chain_state()
     }
