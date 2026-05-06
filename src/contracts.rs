@@ -159,6 +159,52 @@ impl Default for ResourceLimits {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractPermissions {
+    pub storage_read: bool,
+    pub storage_write: bool,
+    pub storage_remove: bool,
+    pub call_contracts: bool,
+    pub emit_events: bool,
+    pub get_block_info: bool,
+    pub crypto_ops: bool,
+    pub revert: bool,
+}
+
+impl Default for ContractPermissions {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+impl ContractPermissions {
+    pub fn all() -> Self {
+        Self {
+            storage_read: true,
+            storage_write: true,
+            storage_remove: true,
+            call_contracts: true,
+            emit_events: true,
+            get_block_info: true,
+            crypto_ops: true,
+            revert: true,
+        }
+    }
+
+    pub fn restricted() -> Self {
+        Self {
+            storage_read: true,
+            storage_write: false,
+            storage_remove: false,
+            call_contracts: false,
+            emit_events: false,
+            get_block_info: true,
+            crypto_ops: false,
+            revert: true,
+        }
+    }
+}
+
 // ─── HostState: passed through wasmtime Caller ───
 
 struct HostState {
@@ -178,6 +224,7 @@ struct HostState {
     inter_contract_calls: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
     inter_contract_results: Vec<Vec<u8>>,
     deleted_keys: Vec<Vec<u8>>,
+    permissions: ContractPermissions,
 }
 
 impl HostState {
@@ -316,6 +363,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
             inter_contract_calls: Vec::new(),
             inter_contract_results: Vec::new(),
             deleted_keys: Vec::new(),
+            permissions: ContractPermissions::all(),
         };
 
         let mut store = Store::new(engine, host_state);
@@ -604,6 +652,9 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     if state.read_only {
                         return -1;
                     }
+                    if !state.permissions.storage_write {
+                        return -1;
+                    }
                     state.contract_storage.insert(key, value);
                     0
                 },
@@ -855,6 +906,9 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     let _ = mem.read(&caller, data_ptr as usize, &mut data);
 
                     let state = caller.data_mut();
+                    if !state.permissions.emit_events {
+                        return;
+                    }
                     state
                         .charge_gas(100 + topic_len as u64 + data_len as u64)
                         .ok();
@@ -944,6 +998,9 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     let state = caller.data_mut();
                     state.charge_gas(1000).ok();
                     if state.read_only {
+                        return -1;
+                    }
+                    if !state.permissions.call_contracts {
                         return -1;
                     }
                     state.inter_contract_calls.push((callee, method, args));
