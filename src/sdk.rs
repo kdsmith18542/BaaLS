@@ -172,10 +172,7 @@ impl BaaLSSdk {
         gas_limit: u64,
     ) -> Result<ContractId, SdkError> {
         let deployer_account = self.runtime.storage().get_account(deployer)?;
-        let deployer_nonce = deployer_account
-            .as_ref()
-            .map(|a| a.nonce())
-            .unwrap_or(0);
+        let deployer_nonce = deployer_account.as_ref().map(|a| a.nonce()).unwrap_or(0);
         let contract_id = self.runtime.contract_engine().deploy_contract(
             deployer,
             deployer_nonce,

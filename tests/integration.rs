@@ -1,5 +1,6 @@
 use baals::*;
 use log::info;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -20,7 +21,8 @@ fn test_ledger_state_transition() {
     info!("[TEST] Created temp directory: {:?}", data_dir);
 
     let storage = SledStorage::new(&data_dir).unwrap();
-    let consensus_signing_key = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let consensus_signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
     let test_key = PublicKey::from(consensus_signing_key.verifying_key());
     let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
     let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(consensus_signing_key);
@@ -139,7 +141,8 @@ fn test_transaction_validation_and_mempool() {
     let data_dir = temp_dir.path().to_path_buf();
 
     let storage = SledStorage::new(&data_dir).unwrap();
-    let consensus_signing_key = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let consensus_signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
     let test_key = PublicKey::from(consensus_signing_key.verifying_key());
     let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
     let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(consensus_signing_key);
@@ -228,7 +231,8 @@ fn test_hardened_transaction_validation() {
     init_logging();
     let temp_dir = TempDir::new().unwrap();
     let storage = SledStorage::new(temp_dir.path()).unwrap();
-    let consensus_signing_key = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let consensus_signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
     let test_key = PublicKey::from(consensus_signing_key.verifying_key());
     let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
     let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(consensus_signing_key);
@@ -320,12 +324,138 @@ fn test_hardened_transaction_validation() {
 }
 
 #[test]
+fn test_ledger_rejects_future_block_timestamp() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(SledStorage::new(temp_dir.path()).unwrap());
+    let consensus_signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let signer = PublicKey::from(consensus_signing_key.verifying_key());
+    let contract_engine = Arc::new(BaaLSContractEngine::new((*storage).clone()).unwrap());
+    let consensus = PoAConsensus::new(signer, 1000).with_signing_key(consensus_signing_key);
+    let ledger = Ledger::new(Arc::clone(&storage), Arc::clone(&contract_engine));
+    ledger.initialize_chain().unwrap();
+
+    let chain_state = storage.get_chain_state().unwrap().unwrap();
+    let prev_block = storage
+        .get_block(&chain_state.latest_block_hash)
+        .unwrap()
+        .unwrap();
+    let mut block = consensus
+        .generate_block(&[], &prev_block, &chain_state)
+        .unwrap();
+    block.timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 120;
+    block.hash = block.calculate_hash().unwrap();
+    consensus.sign_block(&mut block).unwrap();
+
+    let err = ledger
+        .validate_block(&block, &chain_state)
+        .expect_err("future block should be rejected");
+    assert!(
+        err.to_string().contains("future"),
+        "expected future timestamp error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_block_application_is_atomic_on_transaction_failure() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let storage = SledStorage::new(temp_dir.path()).unwrap();
+    let consensus_signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let consensus_pk = PublicKey::from(consensus_signing_key.verifying_key());
+    let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
+    let consensus = PoAConsensus::new(consensus_pk, 1000).with_signing_key(consensus_signing_key);
+    let runtime =
+        Runtime::with_mempool_limit(storage, consensus, contract_engine, NoopSync, 1000).unwrap();
+    runtime.start().unwrap();
+
+    let sender_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let sender = PublicKey::from(sender_key.verifying_key());
+    let recipient_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let recipient = PublicKey::from(recipient_key.verifying_key());
+    runtime
+        .create_account(
+            &sender,
+            Account::Wallet {
+                balance: 100,
+                nonce: 0,
+            },
+        )
+        .unwrap();
+    runtime
+        .create_account(
+            &recipient,
+            Account::Wallet {
+                balance: 0,
+                nonce: 0,
+            },
+        )
+        .unwrap();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let make_tx = |nonce: u64, amount: u64| {
+        let mut tx = Transaction {
+            hash: [0u8; 32],
+            sender,
+            recipient: Address::Wallet(recipient),
+            payload: TransactionPayload::Transfer { amount },
+            nonce,
+            timestamp: now,
+            signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+            gas_limit: 100_000,
+            priority: 0,
+            metadata: None,
+        };
+        tx.hash = tx.calculate_hash().unwrap();
+        tx.sign(&sender_key).unwrap();
+        tx
+    };
+
+    runtime.submit_transaction(make_tx(1, 80)).unwrap();
+    runtime.submit_transaction(make_tx(2, 80)).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(runtime.produce_block());
+    assert!(
+        result.is_err(),
+        "block with failing transaction should be rejected atomically"
+    );
+
+    let sender_after = runtime.get_account(&sender).unwrap().unwrap();
+    if let Account::Wallet { balance, nonce } = sender_after {
+        assert_eq!(balance, 100, "sender balance should roll back");
+        assert_eq!(nonce, 0, "sender nonce should roll back");
+    } else {
+        panic!("sender account should remain wallet");
+    }
+
+    let chain = runtime.get_chain_state().unwrap();
+    assert_eq!(
+        chain.latest_block_index, 0,
+        "chain head should not advance on failed block"
+    );
+}
+
+#[test]
 fn test_runtime_status_tracks_lifecycle_and_uptime() {
     init_logging();
 
     let temp_dir = TempDir::new().unwrap();
     let storage = SledStorage::new(temp_dir.path()).unwrap();
-    let consensus_signing_key = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let consensus_signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
     let test_key = PublicKey::from(consensus_signing_key.verifying_key());
     let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
     let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(consensus_signing_key);
@@ -356,10 +486,129 @@ fn test_runtime_status_tracks_lifecycle_and_uptime() {
 }
 
 #[test]
+fn test_runtime_health_status_exposes_chain_and_mempool() {
+    init_logging();
+
+    let temp_dir = TempDir::new().unwrap();
+    let storage = SledStorage::new(temp_dir.path()).unwrap();
+    let consensus_signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let test_key = PublicKey::from(consensus_signing_key.verifying_key());
+    let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
+    let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(consensus_signing_key);
+    let runtime =
+        Runtime::with_mempool_limit(storage, consensus, contract_engine, NoopSync, 1000).unwrap();
+    runtime.start().unwrap();
+
+    let signer = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let wallet = PublicKey::from(signer.verifying_key());
+    runtime
+        .create_account(
+            &wallet,
+            Account::Wallet {
+                balance: 1000,
+                nonce: 0,
+            },
+        )
+        .unwrap();
+
+    let mut tx = Transaction {
+        hash: [0u8; 32],
+        sender: wallet,
+        recipient: Address::Wallet(wallet),
+        payload: TransactionPayload::Transfer { amount: 1 },
+        nonce: 1,
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+        gas_limit: 100_000,
+        priority: 0,
+        metadata: None,
+    };
+    tx.hash = tx.calculate_hash().unwrap();
+    tx.sign(&signer).unwrap();
+    runtime.submit_transaction(tx).unwrap();
+
+    let health = runtime.get_health_status().unwrap();
+    assert!(!health.status.is_empty());
+    assert_eq!(health.latest_block_index, 0);
+    assert_eq!(health.mempool_size, 1);
+    assert_eq!(health.connected_peers, 0);
+}
+
+#[test]
+fn test_runtime_auto_block_production_from_mempool_threshold() {
+    init_logging();
+
+    let temp_dir = TempDir::new().unwrap();
+    let storage = SledStorage::new(temp_dir.path()).unwrap();
+    let consensus_signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let test_key = PublicKey::from(consensus_signing_key.verifying_key());
+    let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
+    let consensus = PoAConsensus::new(test_key, 100).with_signing_key(consensus_signing_key);
+    let sync_layer = NoopSync;
+    let mut runtime =
+        Runtime::with_mempool_limit(storage, consensus, contract_engine, sync_layer, 2).unwrap();
+    runtime.auto_block_interval_ms = 100; // 100ms auto-block for fast test
+    runtime.auto_block_mempool_threshold = 1;
+    runtime.start().unwrap();
+
+    let signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let public_key = PublicKey::from(signing_key.verifying_key());
+    runtime
+        .create_account(
+            &public_key,
+            Account::Wallet {
+                balance: 1000,
+                nonce: 0,
+            },
+        )
+        .unwrap();
+
+    let mut tx = Transaction {
+        hash: [0u8; 32],
+        sender: public_key,
+        recipient: Address::Wallet(public_key),
+        payload: TransactionPayload::Transfer { amount: 1 },
+        nonce: 1,
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+        gas_limit: 100_000,
+        priority: 0,
+        metadata: None,
+    };
+    tx.hash = tx.calculate_hash().unwrap();
+    tx.sign(&signing_key).unwrap();
+    runtime.submit_transaction(tx).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut produced = false;
+    while Instant::now() < deadline {
+        let chain = runtime.get_chain_state().unwrap();
+        if chain.latest_block_index >= 1 {
+            produced = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(produced, "automatic block production should advance chain");
+
+    runtime.stop().unwrap();
+}
+
+#[test]
 fn test_transaction_merkle_root_in_block() {
     let temp_dir = TempDir::new().unwrap();
     let storage = SledStorage::new(temp_dir.path()).unwrap();
-    let consensus_signing_key = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let consensus_signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
     let test_key = PublicKey::from(consensus_signing_key.verifying_key());
     let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
     let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(consensus_signing_key);
@@ -438,7 +687,8 @@ fn test_block_production_and_chain_state() {
     let data_dir = temp_dir.path().to_path_buf();
 
     let storage = SledStorage::new(&data_dir).unwrap();
-    let consensus_signing_key = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let consensus_signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
     let test_key = PublicKey::from(consensus_signing_key.verifying_key());
     let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
     let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(consensus_signing_key);
@@ -507,7 +757,8 @@ fn test_contract_deploy_and_execution() {
     let data_dir = temp_dir.path().to_path_buf();
 
     let storage = SledStorage::new(&data_dir).unwrap();
-    let consensus_signing_key = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let consensus_signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
     let test_key = PublicKey::from(consensus_signing_key.verifying_key());
     let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
     let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(consensus_signing_key);
@@ -552,6 +803,137 @@ fn test_contract_deploy_and_execution() {
     info!("[TEST] Contract call returned {} bytes", result.len());
 
     info!("[TEST] test_contract_deploy_and_execution completed successfully");
+}
+
+#[test]
+fn test_contract_storage_root_tracks_contract_kv_state() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let data_dir = temp_dir.path().to_path_buf();
+
+    let storage = SledStorage::new(&data_dir).unwrap();
+    let consensus_signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let test_key = PublicKey::from(consensus_signing_key.verifying_key());
+    let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
+    let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(consensus_signing_key);
+    let runtime =
+        Runtime::with_mempool_limit(storage, consensus, contract_engine, NoopSync, 1000).unwrap();
+    runtime.start().unwrap();
+
+    let deployer_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let deployer = PublicKey::from(deployer_key.verifying_key());
+    runtime
+        .create_account(
+            &deployer,
+            Account::Wallet {
+                balance: 10_000,
+                nonce: 0,
+            },
+        )
+        .unwrap();
+
+    let wasm_bytes = create_test_wasm_module();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let mut deploy_tx = Transaction {
+        hash: [0u8; 32],
+        sender: deployer,
+        recipient: Address::Wallet(deployer),
+        payload: TransactionPayload::ContractDeploy {
+            wasm_bytes: wasm_bytes.clone(),
+        },
+        nonce: 1,
+        timestamp: now,
+        signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+        gas_limit: 500_000,
+        priority: 0,
+        metadata: None,
+    };
+    deploy_tx.hash = deploy_tx.calculate_hash().unwrap();
+    deploy_tx.sign(&deployer_key).unwrap();
+    runtime.submit_transaction(deploy_tx).unwrap();
+
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    tokio_rt.block_on(runtime.produce_block()).unwrap();
+
+    // Same deterministic contract-id derivation used by deploy_contract.
+    let mut cid_hasher = Sha256::new();
+    cid_hasher.update(deployer.to_bytes());
+    cid_hasher.update(1u64.to_be_bytes());
+    cid_hasher.update(&wasm_bytes);
+    let cid_hash: [u8; 32] = cid_hasher.finalize().into();
+    let contract_id = ContractId::from_bytes(&cid_hash);
+
+    // Seed storage directly to validate root computation from real key/value state.
+    runtime
+        .storage()
+        .contract_storage_write(&contract_id, b"alpha", b"value-1")
+        .unwrap();
+    runtime
+        .storage()
+        .contract_storage_write(&contract_id, b"beta", b"value-2")
+        .unwrap();
+
+    let mut call_tx = Transaction {
+        hash: [0u8; 32],
+        sender: deployer,
+        recipient: Address::Contract(contract_id.clone()),
+        payload: TransactionPayload::ContractCall {
+            method: "test_method".to_string(),
+            args: vec![],
+            value: None,
+        },
+        nonce: 2,
+        timestamp: now + 1,
+        signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+        gas_limit: 500_000,
+        priority: 0,
+        metadata: None,
+    };
+    call_tx.hash = call_tx.calculate_hash().unwrap();
+    call_tx.sign(&deployer_key).unwrap();
+    runtime.submit_transaction(call_tx).unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    tokio_rt.block_on(runtime.produce_block()).unwrap();
+
+    // Recompute expected storage root using the same leaf encoding as ledger.
+    let mut expected_merkle = MerkleTree::new();
+    let kvs = vec![
+        (b"alpha".as_ref().to_vec(), b"value-1".as_ref().to_vec()),
+        (b"beta".as_ref().to_vec(), b"value-2".as_ref().to_vec()),
+    ];
+    for (k, v) in kvs {
+        let mut leaf = Vec::with_capacity(16 + k.len() + v.len());
+        leaf.extend_from_slice(&(k.len() as u64).to_le_bytes());
+        leaf.extend_from_slice(&k);
+        leaf.extend_from_slice(&(v.len() as u64).to_le_bytes());
+        leaf.extend_from_slice(&v);
+        expected_merkle.add_leaf(&leaf);
+    }
+    let expected_root = expected_merkle.root().unwrap();
+
+    // Find the contract account and verify its storage root matches contract KV state.
+    let all_accounts = runtime.storage().get_all_accounts().unwrap();
+    let contract_account = all_accounts
+        .into_iter()
+        .find_map(|(_pk, account)| match account {
+            Account::Contract {
+                code_hash: _,
+                storage_root_hash,
+                nonce: _,
+            } => Some(storage_root_hash),
+            Account::Wallet { .. } => None,
+        })
+        .expect("contract account should exist after deploy");
+    assert_eq!(
+        contract_account, expected_root,
+        "contract storage root should be Merkle root of contract key/value state"
+    );
 }
 
 #[test]
@@ -617,7 +999,8 @@ fn test_performance_benchmarks() {
     let data_dir = temp_dir.path().to_path_buf();
 
     let storage = SledStorage::new(&data_dir).unwrap();
-    let consensus_signing_key = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let consensus_signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
     let test_key = PublicKey::from(consensus_signing_key.verifying_key());
     let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
     let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(consensus_signing_key);
@@ -719,7 +1102,8 @@ fn test_stress_test() {
     let data_dir = temp_dir.path().to_path_buf();
 
     let storage = SledStorage::new(&data_dir).unwrap();
-    let consensus_signing_key = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let consensus_signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
     let test_key = PublicKey::from(consensus_signing_key.verifying_key());
     let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
     let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(consensus_signing_key);
@@ -768,7 +1152,7 @@ fn test_stress_test() {
                         .unwrap()
                         .as_secs(),
                     signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
-                gas_limit: 21000,
+                    gas_limit: 21000,
                     priority: 0,
                     metadata: None,
                 };
@@ -804,7 +1188,8 @@ fn test_security_validation() {
     let data_dir = temp_dir.path().to_path_buf();
 
     let storage = SledStorage::new(&data_dir).unwrap();
-    let consensus_signing_key = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let consensus_signing_key =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
     let test_key = PublicKey::from(consensus_signing_key.verifying_key());
     let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
     let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(consensus_signing_key);

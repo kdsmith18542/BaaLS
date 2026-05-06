@@ -13,12 +13,12 @@
 
 /// Configuration system (TOML-based)
 pub mod config;
-/// Foreign Function Interface (C bindings)
-pub mod ffi;
 /// Consensus engine trait and default PoA implementation
 pub mod consensus;
 /// WASM smart contract engine and host functions
 pub mod contracts;
+/// Foreign Function Interface (C bindings)
+pub mod ffi;
 /// Secure encrypted keystore for private key management
 pub mod keystore;
 /// Ledger logic: block validation, state transition, Merkle root

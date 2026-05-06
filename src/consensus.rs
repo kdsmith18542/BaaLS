@@ -34,6 +34,10 @@ pub trait ConsensusEngine: Send + Sync {
         prev_block: &Block,
         chain_state: &ChainState,
     ) -> Result<Block, ConsensusError>;
+
+    fn block_time_interval_ms(&self) -> u64 {
+        5000
+    }
 }
 
 pub struct PoAConsensus {
@@ -46,12 +50,13 @@ pub struct PoAConsensus {
 }
 
 impl PoAConsensus {
+    const MAX_FUTURE_BLOCK_TIMESTAMP_SECONDS: u64 = 10;
     pub fn new(authorized_signer_key: PublicKey, block_time_interval_ms: u64) -> Self {
         Self {
             authorized_signer_key,
             block_time_interval_ms,
             signing_key: None,
-            block_gas_limit: 30_000_000, // 30M gas per block
+            block_gas_limit: 30_000_000,        // 30M gas per block
             block_size_limit: 10 * 1024 * 1024, // 10MB per block
         }
     }
@@ -62,6 +67,14 @@ impl PoAConsensus {
     }
 
     pub fn validate_block(&self, block: &Block) -> Result<(), ConsensusError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| ConsensusError::InvalidTimestamp)?
+            .as_secs();
+        if block.timestamp > now + Self::MAX_FUTURE_BLOCK_TIMESTAMP_SECONDS {
+            return Err(ConsensusError::InvalidTimestamp);
+        }
+
         let metadata = block.metadata.as_ref().ok_or_else(|| {
             ConsensusError::ValidationFailed("Block metadata missing".to_string())
         })?;
@@ -244,5 +257,9 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
             hex::encode(block.hash)
         );
         Ok(block)
+    }
+
+    fn block_time_interval_ms(&self) -> u64 {
+        self.block_time_interval_ms
     }
 }

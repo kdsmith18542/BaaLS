@@ -1,5 +1,5 @@
 use ed25519_dalek::SigningKey;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use rand::rngs::OsRng;
 use rand::Rng;
 use std::collections::{BTreeMap, HashMap};
@@ -185,13 +185,36 @@ pub struct Runtime<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> {
     consensus: Arc<C>,
     mempool: Arc<Mutex<Mempool>>,
     chain_state: Arc<Mutex<ChainState>>,
-    #[allow(dead_code)]
     is_running: Arc<Mutex<bool>>,
     sync_layer: Arc<Y>,
     contract_engine_arc: Arc<BaaLSContractEngine<S>>,
     mempool_size_limit: usize,
+    pub auto_block_interval_ms: u64,
+    pub auto_block_mempool_threshold: usize,
     metrics: Arc<MetricsCollector>,
     started_at: Arc<Mutex<Option<SystemTime>>>,
+    block_production_shutdown: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
+}
+
+impl<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> Clone for Runtime<S, C, Y> {
+    fn clone(&self) -> Self {
+        Self {
+            storage: Arc::clone(&self.storage),
+            ledger: Arc::clone(&self.ledger),
+            consensus: Arc::clone(&self.consensus),
+            mempool: Arc::clone(&self.mempool),
+            chain_state: Arc::clone(&self.chain_state),
+            is_running: Arc::clone(&self.is_running),
+            sync_layer: Arc::clone(&self.sync_layer),
+            contract_engine_arc: Arc::clone(&self.contract_engine_arc),
+            mempool_size_limit: self.mempool_size_limit,
+            auto_block_interval_ms: self.auto_block_interval_ms,
+            auto_block_mempool_threshold: self.auto_block_mempool_threshold,
+            metrics: Arc::clone(&self.metrics),
+            started_at: Arc::clone(&self.started_at),
+            block_production_shutdown: Arc::clone(&self.block_production_shutdown),
+        }
+    }
 }
 
 impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static> Runtime<S, C, Y> {
@@ -235,6 +258,8 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         Ok(Runtime {
             storage: storage_arc,
             ledger,
+            auto_block_interval_ms: 0, // disabled by default; set before start() to enable
+            auto_block_mempool_threshold: 100,
             consensus: Arc::new(consensus),
             mempool: Arc::new(Mutex::new(Mempool::new(mempool_size_limit))),
             chain_state: Arc::new(Mutex::new(initial_chain_state)),
@@ -244,6 +269,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             mempool_size_limit,
             metrics: Arc::new(MetricsCollector::new()),
             started_at: Arc::new(Mutex::new(None)),
+            block_production_shutdown: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -264,8 +290,79 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         drop(is_running);
 
         *self.started_at.lock().unwrap() = Some(SystemTime::now());
-        info!("BaaLS Runtime started");
+
+        // Spawn automatic block production if configured
+        if self.auto_block_interval_ms > 0 && self.auto_block_mempool_threshold > 0 {
+            self.spawn_block_production();
+            info!(
+                "BaaLS Runtime started (auto-block: {}ms, mempool threshold: {})",
+                self.auto_block_interval_ms, self.auto_block_mempool_threshold
+            );
+        } else {
+            info!("BaaLS Runtime started (auto-block disabled)");
+        }
         Ok(())
+    }
+
+    fn spawn_block_production(&self) {
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        *self.block_production_shutdown.lock().unwrap() = Some(shutdown_tx);
+
+        let self_clone = self.clone();
+        let interval_ms = self_clone.auto_block_interval_ms;
+        let threshold = self_clone.auto_block_mempool_threshold;
+
+        // Use std::thread to ensure we always have a tokio runtime available
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create auto-block tokio runtime");
+            rt.block_on(async move {
+                let mut ticker = tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
+                loop {
+                    tokio::select! {
+                        _ = ticker.tick() => {}
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+
+                    {
+                        let running = self_clone.is_running.lock().unwrap();
+                        if !*running {
+                            break;
+                        }
+                    }
+
+                    let should_produce = {
+                        let mempool = self_clone.mempool.lock().unwrap();
+                        !mempool.is_empty() && mempool.len() >= threshold
+                    } || {
+                        let mempool = self_clone.mempool.lock().unwrap();
+                        !mempool.is_empty()
+                    };
+
+                    if should_produce {
+                        match self_clone.produce_block().await {
+                            Ok(block) => debug!(
+                                "Auto-produced block #{} ({} txns)",
+                                block.index,
+                                block.transactions.len()
+                            ),
+                            Err(e) => {
+                                if !matches!(e, RuntimeError::ConsensusError(
+                                    ConsensusError::NoPendingTransactions
+                                )) {
+                                    warn!("Auto block production error: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+                debug!("Block production loop terminated");
+            });
+        });
     }
 
     pub fn stop(&self) -> Result<(), RuntimeError> {
@@ -276,9 +373,18 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         *is_running = false;
         drop(is_running);
 
+        // Signal block production to stop
+        if let Some(shutdown_tx) = self.block_production_shutdown.lock().unwrap().take() {
+            let _ = shutdown_tx.send(true);
+        }
+
         *self.started_at.lock().unwrap() = None;
         info!("BaaLS Runtime stopped");
         Ok(())
+    }
+
+    pub fn is_running(&self) -> bool {
+        *self.is_running.lock().unwrap()
     }
 
     pub fn submit_transaction(&self, transaction: Transaction) -> Result<(), RuntimeError> {
@@ -343,7 +449,11 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                             ));
                         }
                     }
-                    crate::types::TransactionPayload::ContractCall { method, args: _, value: _ } => {
+                    crate::types::TransactionPayload::ContractCall {
+                        method,
+                        args: _,
+                        value: _,
+                    } => {
                         if method.is_empty() {
                             return Err(RuntimeError::InvalidTransaction(
                                 "Method name cannot be empty".to_string(),
@@ -387,8 +497,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                 if transaction.nonce < expected_nonce {
                     return Err(RuntimeError::InvalidTransaction(format!(
                         "Invalid nonce: expected at least {}, got {}",
-                        expected_nonce,
-                        transaction.nonce
+                        expected_nonce, transaction.nonce
                     )));
                 }
                 Ok(())
@@ -415,7 +524,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         Ok(())
     }
 
-    pub async fn produce_block(&self) -> Result<Block, RuntimeError> {
+    fn produce_block_sync(&self) -> Result<Block, RuntimeError> {
         info!("[PRODUCE_BLOCK] Starting block production");
 
         info!("[PRODUCE_BLOCK] Acquiring mempool lock");
@@ -511,22 +620,48 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         info!("[PRODUCE_BLOCK] Starting async broadcast task");
         let sync_layer_clone = Arc::clone(&self.sync_layer);
         let new_block_clone = new_block.clone();
-        tokio::spawn(async move {
-            info!("[BROADCAST] Starting broadcast in spawned task");
-            let peers = sync_layer_clone.discover_peers().await.unwrap_or_else(|e| {
-                error!("[BROADCAST] Error discovering peers: {}", e);
-                Vec::new()
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                info!("[BROADCAST] Starting broadcast in spawned task");
+                let peers = sync_layer_clone.discover_peers().await.unwrap_or_else(|e| {
+                    error!("[BROADCAST] Error discovering peers: {}", e);
+                    Vec::new()
+                });
+                info!("[BROADCAST] Discovered {} peers", peers.len());
+                if let Err(e) = sync_layer_clone
+                    .broadcast_block(&new_block_clone, &peers)
+                    .await
+                {
+                    error!("[BROADCAST] Error broadcasting block: {}", e);
+                } else {
+                    info!("[BROADCAST] Block broadcast completed successfully");
+                }
             });
-            info!("[BROADCAST] Discovered {} peers", peers.len());
-            if let Err(e) = sync_layer_clone
-                .broadcast_block(&new_block_clone, &peers)
-                .await
-            {
-                error!("[BROADCAST] Error broadcasting block: {}", e);
-            } else {
-                info!("[BROADCAST] Block broadcast completed successfully");
-            }
-        });
+        } else {
+            std::thread::spawn(move || {
+                if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    rt.block_on(async move {
+                        info!("[BROADCAST] Starting broadcast in fallback task");
+                        let peers = sync_layer_clone.discover_peers().await.unwrap_or_else(|e| {
+                            error!("[BROADCAST] Error discovering peers: {}", e);
+                            Vec::new()
+                        });
+                        info!("[BROADCAST] Discovered {} peers", peers.len());
+                        if let Err(e) = sync_layer_clone
+                            .broadcast_block(&new_block_clone, &peers)
+                            .await
+                        {
+                            error!("[BROADCAST] Error broadcasting block: {}", e);
+                        } else {
+                            info!("[BROADCAST] Block broadcast completed successfully");
+                        }
+                    });
+                }
+            });
+        }
         info!("[PRODUCE_BLOCK] Broadcast task spawned");
 
         // Remove only the transactions that were included in the block
@@ -542,6 +677,10 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         info!("[PRODUCE_BLOCK] Returning produced block");
         Ok(new_block)
+    }
+
+    pub async fn produce_block(&self) -> Result<Block, RuntimeError> {
+        self.produce_block_sync()
     }
 
     pub fn get_chain_state(&self) -> Result<ChainState, RuntimeError> {
@@ -709,10 +848,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         // Get deployer's current nonce for deterministic contract ID
         let deployer_account = self.storage.get_account(deployer)?;
-        let deployer_nonce = deployer_account
-            .as_ref()
-            .map(|a| a.nonce())
-            .unwrap_or(0);
+        let deployer_nonce = deployer_account.as_ref().map(|a| a.nonce()).unwrap_or(0);
 
         // Use the contract engine to deploy the contract
         let contract_id = self
@@ -756,7 +892,14 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         // Use the contract engine to call the contract
         let result = self
             .contract_engine_arc
-            .call_contract(caller, contract_id, method_name, args, value, &*self.storage)
+            .call_contract(
+                caller,
+                contract_id,
+                method_name,
+                args,
+                value,
+                &*self.storage,
+            )
             .map_err(|e| {
                 RuntimeError::InvalidTransaction(format!("Contract call failed: {}", e))
             })?;
@@ -819,6 +962,16 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             uptime_seconds,
             peer_count: self.sync_layer.peer_count(),
         })
+    }
+
+    pub fn get_health_status(&self) -> Result<crate::metrics::HealthStatus, RuntimeError> {
+        let mut health = self.metrics.health_check();
+        let chain_state = self.get_chain_state()?;
+        health.latest_block_index = chain_state.latest_block_index;
+        health.latest_block_hash = hex::encode(chain_state.latest_block_hash);
+        health.mempool_size = self.get_pending_transactions()?.len();
+        health.connected_peers = self.sync_layer.peer_count();
+        Ok(health)
     }
 }
 

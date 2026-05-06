@@ -7,6 +7,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use sysinfo::{Pid, PidExt, System, SystemExt};
+use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use baals::{
     config::{generate_default_config, setup_logging, Config, NodeStatus},
@@ -368,9 +369,78 @@ fn build_runtime(data_dir: &PathBuf) -> Result<BaaLSRuntime, Box<dyn std::error:
 
     let contract_engine = BaaLSContractEngine::new(storage.clone())?;
     let sync_layer = NoopSync;
-    let runtime = Runtime::new(storage, consensus, contract_engine, sync_layer)?;
+    let mut runtime = Runtime::new(storage, consensus, contract_engine, sync_layer)?;
+    runtime.auto_block_interval_ms = 5000; // 5-second block interval
+    runtime.auto_block_mempool_threshold = 10; // produce when 10+ txns queued
     runtime.start()?;
     Ok(runtime)
+}
+
+fn spawn_health_server(
+    runtime: BaaLSRuntime,
+    bind_addr: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let server = Server::http(&bind_addr).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            format!("failed to bind health endpoint on {}: {}", bind_addr, e),
+        )
+    })?;
+
+    std::thread::spawn(move || {
+        info!("Health endpoint listening on http://{}/health", bind_addr);
+        while runtime.is_running() {
+            match server.recv_timeout(std::time::Duration::from_millis(250)) {
+                Ok(Some(request)) => {
+                    let is_health = request.method() == &Method::Get && request.url() == "/health";
+                    if is_health {
+                        match runtime.get_health_status() {
+                            Ok(health) => {
+                                let body = serde_json::to_string(&health)
+                                    .unwrap_or_else(|_| "{\"status\":\"unhealthy\"}".to_string());
+                                let mut response =
+                                    Response::from_string(body).with_status_code(StatusCode(200));
+                                if let Ok(header) = Header::from_bytes(
+                                    b"Content-Type".as_slice(),
+                                    b"application/json".as_slice(),
+                                ) {
+                                    response = response.with_header(header);
+                                }
+                                let _ = request.respond(response);
+                            }
+                            Err(e) => {
+                                let body = serde_json::json!({
+                                    "status": "unhealthy",
+                                    "error": e.to_string()
+                                })
+                                .to_string();
+                                let mut response =
+                                    Response::from_string(body).with_status_code(StatusCode(500));
+                                if let Ok(header) = Header::from_bytes(
+                                    b"Content-Type".as_slice(),
+                                    b"application/json".as_slice(),
+                                ) {
+                                    response = response.with_header(header);
+                                }
+                                let _ = request.respond(response);
+                            }
+                        }
+                    } else {
+                        let _ = request.respond(
+                            Response::from_string("Not Found").with_status_code(StatusCode(404)),
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error!("Health endpoint receive error: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(())
 }
 
 fn prompt_password(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -475,7 +545,7 @@ fn handle_node(action: NodeCommands, json: bool) -> Result<String, Box<dyn std::
             }
 
             info!("Starting BaaLS node on port {} data={:?}", port, data_dir);
-            let _cfg = Config::load(config.as_deref()).unwrap_or_default();
+            let cfg = Config::load(config.as_deref()).unwrap_or_default();
             std::fs::create_dir_all(&data_dir)?;
             let pid_path = node_pid_path(&data_dir);
             let stop_path = node_stop_path(&data_dir);
@@ -498,6 +568,8 @@ fn handle_node(action: NodeCommands, json: bool) -> Result<String, Box<dyn std::
             write_pid_info(&pid_path, std::process::id(), started_at)?;
 
             let runtime = build_runtime(&data_dir)?;
+            let health_bind = format!("0.0.0.0:{}", cfg.node.health_port);
+            spawn_health_server(runtime.clone(), health_bind)?;
             info!("Node started. Press Ctrl+C to stop.");
             let mut heartbeat = 0u64;
             loop {
@@ -846,12 +918,11 @@ fn handle_tx(action: TxCommands, json: bool) -> Result<String, Box<dyn std::erro
             let password = prompt_password("Wallet password: ")?;
             let _signing_key = keystore.load_key(&sender_pk, &password)?;
 
-            let init_payload = init_args
-                .map(|path| std::fs::read(path))
-                .transpose()?;
+            let init_payload = init_args.map(|path| std::fs::read(path)).transpose()?;
             let init_payload_ref = init_payload.as_deref();
 
-            let cid = runtime.deploy_contract(&sender_pk, &wasm_bytes, init_payload_ref, gas_limit)?;
+            let cid =
+                runtime.deploy_contract(&sender_pk, &wasm_bytes, init_payload_ref, gas_limit)?;
             Ok(text_or_json(
                 json,
                 &format!("Contract deployed: {}", hex::encode(cid.to_bytes())),
@@ -879,7 +950,8 @@ fn handle_tx(action: TxCommands, json: bool) -> Result<String, Box<dyn std::erro
 
             let arg_bytes = args.map(|a| a.into_bytes()).unwrap_or_default();
             let call_value = if value > 0 { Some(value) } else { None };
-            let result = runtime.call_contract(&sender_pk, &cid, &method, &arg_bytes, call_value, gas_limit)?;
+            let result = runtime
+                .call_contract(&sender_pk, &cid, &method, &arg_bytes, call_value, gas_limit)?;
 
             Ok(text_or_json(
                 json,
@@ -1038,10 +1110,7 @@ fn handle_query(action: QueryCommands, json: bool) -> Result<String, Box<dyn std
                 None => Err("Transaction not found".into()),
             }
         }
-        QueryCommands::Account {
-            address,
-            data_dir,
-        } => {
+        QueryCommands::Account { address, data_dir } => {
             let runtime = build_runtime(&data_dir)?;
             let pk = parse_pubkey(&address)?;
             match runtime.get_account(&pk)? {
@@ -1157,7 +1226,8 @@ fn handle_dev(action: DevCommands, json: bool) -> Result<String, Box<dyn std::er
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             let cid = ContractId::from_bytes(&[0u8; 32]); // dummy for simulation
             let arg_bytes = args.map(|a| a.into_bytes()).unwrap_or_default();
-            let result = engine.call_contract(&dummy_pk, &cid, &method, &arg_bytes, None, &storage)?;
+            let result =
+                engine.call_contract(&dummy_pk, &cid, &method, &arg_bytes, None, &storage)?;
             Ok(text_or_json(
                 json,
                 &format!(
@@ -1256,7 +1326,10 @@ fn handle_dev(action: DevCommands, json: bool) -> Result<String, Box<dyn std::er
             if inconsistencies.is_empty() {
                 Ok(text_or_json(
                     json,
-                    &format!("Chain valid: {} blocks verified, no inconsistencies found", height + 1),
+                    &format!(
+                        "Chain valid: {} blocks verified, no inconsistencies found",
+                        height + 1
+                    ),
                     serde_json::json!({"valid": true, "blocks_checked": height + 1, "inconsistencies": []}),
                 ))
             } else {
@@ -1289,7 +1362,10 @@ fn handle_dev(action: DevCommands, json: bool) -> Result<String, Box<dyn std::er
                 format!("  Accounts:        {}", stats.total_accounts),
                 format!("  Contracts:       {}", stats.total_contracts),
                 format!("  Mempool:         {}", stats.mempool_size),
-                format!("  DB size (MB):    {}", stats.storage_size_bytes / 1024 / 1024),
+                format!(
+                    "  DB size (MB):    {}",
+                    stats.storage_size_bytes / 1024 / 1024
+                ),
                 format!("  Chain height:    {}", height),
                 format!("  Latest hash:     {}", latest_hash),
             ];

@@ -21,6 +21,8 @@ pub struct NodeConfig {
     pub data_dir: String,
     #[serde(default = "default_node_port")]
     pub port: u16,
+    #[serde(default = "default_health_port")]
+    pub health_port: u16,
     #[serde(default = "default_mempool_limit")]
     pub mempool_limit: usize,
 }
@@ -82,6 +84,9 @@ fn default_data_dir() -> String {
 fn default_node_port() -> u16 {
     8080
 }
+fn default_health_port() -> u16 {
+    8080
+}
 fn default_mempool_limit() -> usize {
     10000
 }
@@ -122,6 +127,7 @@ impl Default for Config {
             node: NodeConfig {
                 data_dir: default_data_dir(),
                 port: default_node_port(),
+                health_port: default_health_port(),
                 mempool_limit: default_mempool_limit(),
             },
             consensus: ConsensusConfig {
@@ -210,6 +216,11 @@ impl Config {
                     .parse()
                     .map_err(|_| ConfigError::Invalid("Invalid port".into()))?
             }
+            "node.health_port" => {
+                self.node.health_port = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid health_port".into()))?
+            }
             "node.mempool_limit" => {
                 self.node.mempool_limit = value
                     .parse()
@@ -254,9 +265,8 @@ impl Config {
 ///
 /// If a logger is already initialized, this call is a no-op.
 pub fn setup_logging(config: &Config, default_level: &str) -> Result<(), ConfigError> {
-    let mut builder = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(default_level),
-    );
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level));
 
     if config.logging.json_format {
         builder.format(|buf, record| {

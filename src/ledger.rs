@@ -1,12 +1,14 @@
 use log::{debug, info, warn};
-use std::collections::BTreeMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use thiserror::Error;
 
 use crate::contracts::ContractEngine;
 use crate::storage::{Storage, StorageBatch, StorageError, StorageOperation};
 use crate::types::{
-    Account, Block, ChainState, CryptoError, MerkleTree, PublicKey, TransactionPayload,
+    Account, Block, ChainState, ContractId, CryptoError, MerkleTree, PublicKey, SparseMerkleTree,
+    TransactionPayload,
 };
 
 #[derive(Debug, Error)]
@@ -21,6 +23,8 @@ pub enum StateTransitionError {
     InvalidPayload,
     #[error("Contract error: {0}")]
     ContractError(String),
+    #[error("Execution failed: {0}")]
+    ExecutionFailed(String),
 }
 
 #[derive(Debug, Error)]
@@ -61,6 +65,7 @@ pub struct Ledger<S: Storage, C: ContractEngine> {
 }
 
 impl<S: Storage, C: ContractEngine> Ledger<S, C> {
+    const MAX_FUTURE_BLOCK_TIMESTAMP_SECONDS: u64 = 10;
     pub fn new(storage: Arc<S>, contract_engine: Arc<C>) -> Self {
         debug!("Ledger::new called");
         Ledger {
@@ -175,6 +180,15 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                 ));
             }
         }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| LedgerError::BlockValidation(format!("System time error: {}", e)))?
+            .as_secs();
+        if block.timestamp > now + Self::MAX_FUTURE_BLOCK_TIMESTAMP_SECONDS {
+            return Err(LedgerError::BlockValidation(
+                "Block timestamp too far in the future".to_string(),
+            ));
+        }
 
         // Transaction Validation (within the block) - only basic checks for MVP
         info!(
@@ -200,6 +214,72 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         Ok(())
     }
 
+    fn contract_id_to_account_key(contract_id: &ContractId) -> Result<PublicKey, LedgerError> {
+        for salt in 0u32..4096 {
+            let mut hasher = Sha256::new();
+            hasher.update(contract_id.to_bytes());
+            hasher.update(salt.to_le_bytes());
+            let candidate: [u8; 32] = hasher.finalize().into();
+            if let Ok(pk) = PublicKey::from_bytes(&candidate) {
+                return Ok(pk);
+            }
+        }
+
+        Err(LedgerError::StateTransition(
+            StateTransitionError::ContractError(
+                "Failed to derive deterministic contract account key".to_string(),
+            ),
+        ))
+    }
+
+    fn compute_contract_code_hash(
+        &self,
+        contract_id: &ContractId,
+    ) -> Result<[u8; 32], LedgerError> {
+        let code = self
+            .storage
+            .get_contract_code(contract_id)?
+            .ok_or_else(|| {
+                LedgerError::ContractNotFound(format!(
+                    "Contract not found: {}",
+                    hex::encode(contract_id.to_bytes())
+                ))
+            })?;
+        let mut hasher = Sha256::new();
+        hasher.update(&code);
+        Ok(hasher.finalize().into())
+    }
+
+    fn compute_contract_storage_root(
+        &self,
+        contract_id: &ContractId,
+    ) -> Result<[u8; 32], LedgerError> {
+        let mut keys = self.storage.get_all_contract_storage_keys(contract_id)?;
+        if keys.is_empty() {
+            return Ok([0; 32]);
+        }
+        keys.sort();
+        keys.dedup();
+
+        let mut merkle = MerkleTree::new();
+        for key in keys {
+            if let Some(value) = self.storage.contract_storage_read(contract_id, &key)? {
+                let mut leaf = Vec::with_capacity(16 + key.len() + value.len());
+                leaf.extend_from_slice(&(key.len() as u64).to_le_bytes());
+                leaf.extend_from_slice(&key);
+                leaf.extend_from_slice(&(value.len() as u64).to_le_bytes());
+                leaf.extend_from_slice(&value);
+                merkle.add_leaf(&leaf);
+            }
+        }
+
+        if merkle.is_empty() {
+            Ok([0; 32])
+        } else {
+            Ok(merkle.root().unwrap_or([0; 32]))
+        }
+    }
+
     pub fn apply_block(
         &self,
         mut block: Block,
@@ -215,6 +295,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
 
         let mut batch = StorageBatch::default();
         let mut accounts_to_update: BTreeMap<PublicKey, Account> = BTreeMap::new();
+        let mut touched_contracts: BTreeSet<[u8; 32]> = BTreeSet::new();
 
         info!(
             "[LEDGER] Processing {} transactions",
@@ -235,10 +316,9 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                     updated_account.clone()
                 } else {
                     self.storage.get_account(&sender_pk)?.ok_or_else(|| {
-                        LedgerError::StateTransition(StateTransitionError::AccountNotFound(format!(
-                            "Sender account not found: {:?}",
-                            sender_pk
-                        )))
+                        LedgerError::StateTransition(StateTransitionError::AccountNotFound(
+                            format!("Sender account not found: {:?}", sender_pk),
+                        ))
                     })?
                 };
             info!(
@@ -359,7 +439,37 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                                     "[LEDGER] Contract deployed with ID: {}",
                                     hex::encode(cid.to_bytes())
                                 );
-                                // Sender remains a Wallet account; contract is stored separately
+                                let contract_key = Self::contract_id_to_account_key(&cid)?;
+                                let code_hash = self.compute_contract_code_hash(&cid)?;
+                                let storage_root_hash = self.compute_contract_storage_root(&cid)?;
+                                let contract_nonce = match accounts_to_update.get(&contract_key) {
+                                    Some(Account::Contract { nonce, .. }) => *nonce,
+                                    Some(Account::Wallet { .. }) => {
+                                        return Err(LedgerError::StateTransition(
+                                            StateTransitionError::ContractError(
+                                                "Contract account key collides with wallet account"
+                                                    .to_string(),
+                                            ),
+                                        ));
+                                    }
+                                    None => self
+                                        .storage
+                                        .get_account(&contract_key)?
+                                        .and_then(|account| match account {
+                                            Account::Contract { nonce, .. } => Some(nonce),
+                                            Account::Wallet { .. } => None,
+                                        })
+                                        .unwrap_or(0),
+                                };
+                                accounts_to_update.insert(
+                                    contract_key,
+                                    Account::Contract {
+                                        code_hash,
+                                        storage_root_hash,
+                                        nonce: contract_nonce,
+                                    },
+                                );
+                                touched_contracts.insert(cid.to_bytes());
                             }
                             Err(e) => {
                                 tx_success = false;
@@ -368,7 +478,11 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                         }
                     }
                 }
-                TransactionPayload::ContractCall { method, args, value } => {
+                TransactionPayload::ContractCall {
+                    method,
+                    args,
+                    value,
+                } => {
                     let contract_id = match &tx.recipient {
                         crate::types::Address::Contract(cid) => cid,
                         _ => return Err(LedgerError::InvalidTransactionPayload),
@@ -394,9 +508,10 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                                 {
                                     if *balance < *transfer_amount {
                                         return Err(LedgerError::StateTransition(
-                                            StateTransitionError::InsufficientBalance(
-                                                format!("{:?}", tx.sender),
-                                            ),
+                                            StateTransitionError::InsufficientBalance(format!(
+                                                "{:?}",
+                                                tx.sender
+                                            )),
                                         ));
                                     }
                                     *balance -= *transfer_amount;
@@ -420,30 +535,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                                     method,
                                     result.len()
                                 );
-                                // Update contract account storage_root_hash
-                                // Compute a hash from the execution result as a basic state root
-                                use sha2::{Digest, Sha256};
-                                let mut hasher = Sha256::new();
-                                hasher.update(contract_id.to_bytes());
-                                hasher.update(&result);
-                                hasher.update(method.as_bytes());
-                                let storage_root: [u8; 32] = hasher.finalize().into();
-                                if let Ok(Some(contract_account)) =
-                                    self.storage.get_account(&tx.sender)
-                                {
-                                    if let Account::Contract { code_hash, nonce, .. } =
-                                        contract_account
-                                    {
-                                        accounts_to_update.insert(
-                                            tx.sender,
-                                            Account::Contract {
-                                                code_hash,
-                                                storage_root_hash: storage_root,
-                                                nonce,
-                                            },
-                                        );
-                                    }
-                                }
+                                touched_contracts.insert(contract_id.to_bytes());
                             }
                             Err(e) => {
                                 tx_success = false;
@@ -471,13 +563,59 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
 
             // If transaction failed due to out of gas, skip state changes for this tx
             if !tx_success {
-                continue;
+                return Err(LedgerError::StateTransition(
+                    StateTransitionError::ExecutionFailed(format!(
+                        "Transaction execution failed: {}",
+                        crate::types::format_hex(&tx.hash)
+                    )),
+                ));
             }
 
             // Remove from mempool after successful processing
             batch
                 .ops
                 .push(StorageOperation::DeleteMempool(tx.hash.to_vec()));
+        }
+
+        // Recompute and update storage roots for all contracts touched in this block.
+        for contract_id_bytes in touched_contracts {
+            let contract_id = ContractId::from_bytes(&contract_id_bytes);
+            let contract_key = Self::contract_id_to_account_key(&contract_id)?;
+            let storage_root_hash = self.compute_contract_storage_root(&contract_id)?;
+
+            let current_account = if let Some(account) = accounts_to_update.get(&contract_key) {
+                account.clone()
+            } else {
+                self.storage
+                    .get_account(&contract_key)?
+                    .unwrap_or(Account::Contract {
+                        code_hash: self.compute_contract_code_hash(&contract_id)?,
+                        storage_root_hash: [0; 32],
+                        nonce: 0,
+                    })
+            };
+
+            match current_account {
+                Account::Contract {
+                    code_hash, nonce, ..
+                } => {
+                    accounts_to_update.insert(
+                        contract_key,
+                        Account::Contract {
+                            code_hash,
+                            storage_root_hash,
+                            nonce,
+                        },
+                    );
+                }
+                Account::Wallet { .. } => {
+                    return Err(LedgerError::StateTransition(
+                        StateTransitionError::ContractError(
+                            "Contract account key collides with wallet account".to_string(),
+                        ),
+                    ));
+                }
+            }
         }
 
         // Apply account updates
@@ -498,17 +636,16 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             merged_accounts.insert(*pk, account.clone());
         }
 
-        // Calculate Merkle root for all accounts (merged state)
-        let mut merkle = MerkleTree::new();
+        // Calculate sparse Merkle root keyed by account-address hash.
+        let mut merkle = SparseMerkleTree::new();
         for (pk, account) in &merged_accounts {
-            let mut data = pk.to_bytes().to_vec();
-            data.extend(bincode::serialize(account)?);
-            merkle.add_leaf(&data);
+            let key_hash: [u8; 32] = Sha256::digest(pk.to_bytes()).into();
+            merkle.insert(key_hash, bincode::serialize(account)?);
         }
-        let accounts_root_hash = if !merkle.is_empty() {
-            merkle.root().unwrap_or([0; 32])
-        } else {
+        let accounts_root_hash = if merkle.is_empty() {
             [0; 32]
+        } else {
+            merkle.root()
         };
 
         // Update chain state

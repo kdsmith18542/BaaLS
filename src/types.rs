@@ -200,6 +200,183 @@ impl MerkleTree {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SparseMerkleProof {
+    pub siblings: Vec<[u8; 32]>,
+}
+
+/// Key-indexed sparse Merkle tree (256-bit keys).
+/// Leaves are hashed as H(0x00 || key || H(value)), and internal nodes as H(0x01 || left || right).
+pub struct SparseMerkleTree {
+    leaves: std::collections::BTreeMap<[u8; 32], Vec<u8>>,
+}
+
+impl SparseMerkleTree {
+    pub fn new() -> Self {
+        Self {
+            leaves: std::collections::BTreeMap::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.leaves.is_empty()
+    }
+
+    pub fn insert(&mut self, key: [u8; 32], value: Vec<u8>) {
+        self.leaves.insert(key, value);
+    }
+
+    pub fn root(&self) -> [u8; 32] {
+        let (levels, defaults) = self.build_levels();
+        levels[0].get(&[0u8; 32]).copied().unwrap_or(defaults[0])
+    }
+
+    pub fn generate_proof(&self, key: [u8; 32]) -> SparseMerkleProof {
+        let (levels, defaults) = self.build_levels();
+        let mut siblings = Vec::with_capacity(256);
+        let mut prefix = key;
+
+        for depth in (1..=256).rev() {
+            let bit = Self::get_bit(&key, depth - 1);
+            let sibling_prefix = {
+                let mut s = Self::truncate_key(prefix, depth);
+                Self::set_bit(&mut s, depth - 1, if bit == 0 { 1 } else { 0 });
+                Self::truncate_key(s, depth)
+            };
+            let sibling_hash = levels[depth]
+                .get(&sibling_prefix)
+                .copied()
+                .unwrap_or(defaults[depth]);
+            siblings.push(sibling_hash);
+            prefix = Self::truncate_key(prefix, depth - 1);
+        }
+
+        SparseMerkleProof { siblings }
+    }
+
+    pub fn verify_proof(
+        key: [u8; 32],
+        value: &[u8],
+        proof: &SparseMerkleProof,
+        expected_root: [u8; 32],
+    ) -> bool {
+        if proof.siblings.len() != 256 {
+            return false;
+        }
+
+        let mut current = Self::hash_leaf(key, value);
+        for (idx, sibling) in proof.siblings.iter().enumerate() {
+            let depth = 256 - idx;
+            let bit = Self::get_bit(&key, depth - 1);
+            current = if bit == 0 {
+                Self::hash_internal(current, *sibling)
+            } else {
+                Self::hash_internal(*sibling, current)
+            };
+        }
+        current == expected_root
+    }
+
+    fn build_levels(
+        &self,
+    ) -> (
+        Vec<std::collections::BTreeMap<[u8; 32], [u8; 32]>>,
+        Vec<[u8; 32]>,
+    ) {
+        let defaults = Self::default_hashes();
+        let mut levels: Vec<std::collections::BTreeMap<[u8; 32], [u8; 32]>> = (0..=256)
+            .map(|_| std::collections::BTreeMap::new())
+            .collect();
+
+        for (key, value) in &self.leaves {
+            levels[256].insert(*key, Self::hash_leaf(*key, value));
+        }
+
+        for depth in (1..=256).rev() {
+            let mut parent_keys = std::collections::BTreeSet::new();
+            for child_key in levels[depth].keys() {
+                parent_keys.insert(Self::truncate_key(*child_key, depth - 1));
+            }
+
+            let mut parents = std::collections::BTreeMap::new();
+            for parent_key in parent_keys {
+                let left_prefix = Self::child_prefix(parent_key, depth, 0);
+                let right_prefix = Self::child_prefix(parent_key, depth, 1);
+                let left_hash = levels[depth]
+                    .get(&left_prefix)
+                    .copied()
+                    .unwrap_or(defaults[depth]);
+                let right_hash = levels[depth]
+                    .get(&right_prefix)
+                    .copied()
+                    .unwrap_or(defaults[depth]);
+                parents.insert(parent_key, Self::hash_internal(left_hash, right_hash));
+            }
+            levels[depth - 1] = parents;
+        }
+
+        (levels, defaults)
+    }
+
+    fn default_hashes() -> Vec<[u8; 32]> {
+        let mut defaults = vec![[0u8; 32]; 257];
+        defaults[256] = Self::hash_leaf([0u8; 32], &[]);
+        for depth in (0..256).rev() {
+            defaults[depth] = Self::hash_internal(defaults[depth + 1], defaults[depth + 1]);
+        }
+        defaults
+    }
+
+    fn hash_leaf(key: [u8; 32], value: &[u8]) -> [u8; 32] {
+        let value_hash: [u8; 32] = Sha256::digest(value).into();
+        let mut hasher = Sha256::new();
+        hasher.update([0u8]);
+        hasher.update(key);
+        hasher.update(value_hash);
+        hasher.finalize().into()
+    }
+
+    fn hash_internal(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update([1u8]);
+        hasher.update(left);
+        hasher.update(right);
+        hasher.finalize().into()
+    }
+
+    fn get_bit(key: &[u8; 32], bit_index: usize) -> u8 {
+        let byte_index = bit_index / 8;
+        let bit_in_byte = 7 - (bit_index % 8);
+        (key[byte_index] >> bit_in_byte) & 1
+    }
+
+    fn set_bit(key: &mut [u8; 32], bit_index: usize, value: u8) {
+        let byte_index = bit_index / 8;
+        let bit_in_byte = 7 - (bit_index % 8);
+        if value == 0 {
+            key[byte_index] &= !(1 << bit_in_byte);
+        } else {
+            key[byte_index] |= 1 << bit_in_byte;
+        }
+    }
+
+    fn truncate_key(mut key: [u8; 32], depth_bits: usize) -> [u8; 32] {
+        if depth_bits >= 256 {
+            return key;
+        }
+        for bit in depth_bits..256 {
+            Self::set_bit(&mut key, bit, 0);
+        }
+        key
+    }
+
+    fn child_prefix(parent_key: [u8; 32], child_depth: usize, bit: u8) -> [u8; 32] {
+        let mut key = Self::truncate_key(parent_key, child_depth);
+        Self::set_bit(&mut key, child_depth - 1, bit);
+        Self::truncate_key(key, child_depth)
+    }
+}
+
 // Remove serde derive from PublicKey since VerifyingKey doesn't support it
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PublicKey(VerifyingKey);
@@ -415,14 +592,20 @@ impl std::fmt::Display for Address {
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub enum TransactionPayload {
-    Transfer { amount: u64 },
-    ContractDeploy { wasm_bytes: Vec<u8> },
+    Transfer {
+        amount: u64,
+    },
+    ContractDeploy {
+        wasm_bytes: Vec<u8>,
+    },
     ContractCall {
         method: String,
         args: Vec<u8>,
         value: Option<u64>,
     },
-    Data { data: Vec<u8> },
+    Data {
+        data: Vec<u8>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -767,7 +950,7 @@ mod tests {
 
     #[test]
     fn test_merkle_tree_empty() {
-        let mut tree = MerkleTree::new();
+        let tree = MerkleTree::new();
         assert!(matches!(tree.root(), Err(MerkleError::EmptyTree)));
     }
 
@@ -784,5 +967,23 @@ mod tests {
         tree.add_leaf(b"data3");
         let root3 = tree.root().unwrap();
         assert_ne!(root1, root3);
+    }
+
+    #[test]
+    fn test_sparse_merkle_proof_roundtrip() {
+        let mut tree = SparseMerkleTree::new();
+        let key_a = [1u8; 32];
+        let key_b = [2u8; 32];
+        tree.insert(key_a, b"alpha".to_vec());
+        tree.insert(key_b, b"beta".to_vec());
+
+        let root = tree.root();
+        let proof_a = tree.generate_proof(key_a);
+        assert!(SparseMerkleTree::verify_proof(
+            key_a, b"alpha", &proof_a, root
+        ));
+        assert!(!SparseMerkleTree::verify_proof(
+            key_a, b"wrong", &proof_a, root
+        ));
     }
 }

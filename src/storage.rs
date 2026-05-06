@@ -110,6 +110,10 @@ pub trait Storage: Send + Sync {
         contract_id: &ContractId,
         key: &[u8],
     ) -> Result<(), StorageError>;
+    fn get_all_contract_storage_keys(
+        &self,
+        contract_id: &ContractId,
+    ) -> Result<Vec<Vec<u8>>, StorageError>;
 
     // Atomic Batching for Block Application
     fn apply_batch(&self, batch: StorageBatch) -> Result<(), StorageError>;
@@ -673,6 +677,28 @@ impl Storage for SledStorage {
         Ok(())
     }
 
+    fn get_all_contract_storage_keys(
+        &self,
+        contract_id: &ContractId,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        let prefix = format!("state:{}:", hex::encode(contract_id.id));
+        let mut keys = Vec::new();
+
+        for item in self.contract_storage_tree.scan_prefix(prefix.as_bytes()) {
+            let (raw_key, _value) = item?;
+            let raw_key_str = String::from_utf8(raw_key.to_vec())
+                .map_err(|e| StorageError::IndexError(format!("Invalid UTF-8 key: {}", e)))?;
+            let key_hex = raw_key_str
+                .strip_prefix(&prefix)
+                .ok_or_else(|| StorageError::IndexError("Invalid contract storage key".into()))?;
+            let decoded = hex::decode(key_hex)
+                .map_err(|e| StorageError::IndexError(format!("Invalid hex key: {}", e)))?;
+            keys.push(decoded);
+        }
+
+        Ok(keys)
+    }
+
     fn apply_batch(&self, batch: StorageBatch) -> Result<(), StorageError> {
         // Write-ahead log for crash recovery
         let batch_id = format!(
@@ -735,10 +761,7 @@ impl Storage for SledStorage {
         )?;
         export_tree(&self.mempool_tree, &backup_db.open_tree("mempool")?)?;
         export_tree(&self.accounts_tree, &backup_db.open_tree("accounts")?)?;
-        export_tree(
-            &self.chain_state_tree,
-            &backup_db.open_tree("chain_state")?,
-        )?;
+        export_tree(&self.chain_state_tree, &backup_db.open_tree("chain_state")?)?;
         export_tree(
             &self.contract_code_tree,
             &backup_db.open_tree("contract_code")?,
@@ -747,11 +770,11 @@ impl Storage for SledStorage {
             &self.contract_storage_tree,
             &backup_db.open_tree("contract_storage")?,
         )?;
-        export_tree(&self.height_to_block_tree, &backup_db.open_tree("height_to_block")?)?;
         export_tree(
-            &self.tx_by_block_tree,
-            &backup_db.open_tree("tx_by_block")?,
+            &self.height_to_block_tree,
+            &backup_db.open_tree("height_to_block")?,
         )?;
+        export_tree(&self.tx_by_block_tree, &backup_db.open_tree("tx_by_block")?)?;
         export_tree(
             &self.address_to_tx_tree,
             &backup_db.open_tree("address_to_tx")?,
@@ -770,37 +793,24 @@ impl Storage for SledStorage {
     fn restore_from(&self, path: &std::path::Path) -> Result<(), StorageError> {
         let backup_db = sled::open(path).map_err(StorageError::Sled)?;
 
-        let restore_tree =
-            |src_tree: &sled::Tree, dst: &sled::Tree| -> Result<(), StorageError> {
-                dst.clear()?;
-                for item in src_tree.iter() {
-                    let (key, value) = item?;
-                    dst.insert(key, value)?;
-                }
-                dst.flush()?;
-                Ok(())
-            };
+        let restore_tree = |src_tree: &sled::Tree, dst: &sled::Tree| -> Result<(), StorageError> {
+            dst.clear()?;
+            for item in src_tree.iter() {
+                let (key, value) = item?;
+                dst.insert(key, value)?;
+            }
+            dst.flush()?;
+            Ok(())
+        };
 
-        restore_tree(
-            &backup_db.open_tree("blocks")?,
-            &self.blocks_tree,
-        )?;
+        restore_tree(&backup_db.open_tree("blocks")?, &self.blocks_tree)?;
         restore_tree(
             &backup_db.open_tree("transactions")?,
             &self.transactions_tree,
         )?;
-        restore_tree(
-            &backup_db.open_tree("mempool")?,
-            &self.mempool_tree,
-        )?;
-        restore_tree(
-            &backup_db.open_tree("accounts")?,
-            &self.accounts_tree,
-        )?;
-        restore_tree(
-            &backup_db.open_tree("chain_state")?,
-            &self.chain_state_tree,
-        )?;
+        restore_tree(&backup_db.open_tree("mempool")?, &self.mempool_tree)?;
+        restore_tree(&backup_db.open_tree("accounts")?, &self.accounts_tree)?;
+        restore_tree(&backup_db.open_tree("chain_state")?, &self.chain_state_tree)?;
         restore_tree(
             &backup_db.open_tree("contract_code")?,
             &self.contract_code_tree,
@@ -813,10 +823,7 @@ impl Storage for SledStorage {
             &backup_db.open_tree("height_to_block")?,
             &self.height_to_block_tree,
         )?;
-        restore_tree(
-            &backup_db.open_tree("tx_by_block")?,
-            &self.tx_by_block_tree,
-        )?;
+        restore_tree(&backup_db.open_tree("tx_by_block")?, &self.tx_by_block_tree)?;
         restore_tree(
             &backup_db.open_tree("address_to_tx")?,
             &self.address_to_tx_tree,
@@ -825,10 +832,7 @@ impl Storage for SledStorage {
             &backup_db.open_tree("contract_to_tx")?,
             &self.contract_to_tx_tree,
         )?;
-        restore_tree(
-            &backup_db.open_tree("tx_count")?,
-            &self.tx_count_tree,
-        )?;
+        restore_tree(&backup_db.open_tree("tx_count")?, &self.tx_count_tree)?;
 
         self.db.flush()?;
         log::info!("Storage restore completed from {:?}", path);

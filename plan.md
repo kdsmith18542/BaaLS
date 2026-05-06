@@ -3,7 +3,7 @@
 **ALL CODE MUST BE PRODUCTION GRADE. NO STUBS WITHOUT EXPLICIT APPROVAL.**
 
 **Last Updated**: 2026-05-06
-**Project Status**: Phases 1-9 complete (core engine functional, all CLI/SDK/FFI implemented). 26 tests pass (11 lib + 15 integration), zero warnings. **37 spec-to-code gaps identified** — see Phase 10 roadmap below.
+**Project Status**: Phases 1-9 complete (core engine functional, all CLI/SDK/FFI implemented). 33 tests pass (12 lib + 1 cli lifecycle + 20 integration), 1 ignored daemon harness test. **31 spec-to-code gaps identified** — see Phase 10 roadmap below.
 **Compliance**: All implementation must satisfy the specifications in `docs/`.
 
 ---
@@ -15,14 +15,14 @@ Accurate status per full spec-to-code audit conducted 2026-05-06.
 | Spec Document | Governs | Primary Source Files | Status | Critical Gaps |
 |---|---|---|---|---|
 | `docs/BaaLS_Overview.md` | Architecture, use cases, core principles | `src/lib.rs`, `README.md` | Near Complete | Crate named `baals` not `libchain` (minor) |
-| `docs/BaaLS_Core_Engine_Runtime.md` | Runtime API, data flow, module boundaries | `src/runtime.rs`, `src/types.rs` | Near Complete | No automatic block production loop; no `WasmRuntime` subtrait; field type differences (hash strings vs bytes) |
-| `docs/BaaLS_Ledger_State_Transition.md` | Block validation, state transitions, Merkle roots | `src/ledger.rs` | Partial | Non-atomic block processing; dense Merkle tree vs sparse required; future timestamp not validated; nonce gaps rejected |
+| `docs/BaaLS_Core_Engine_Runtime.md` | Runtime API, data flow, module boundaries | `src/runtime.rs`, `src/types.rs` | Near Complete | No `WasmRuntime` subtrait; field type differences (hash strings vs bytes) |
+| `docs/BaaLS_Ledger_State_Transition.md` | Block validation, state transitions, Merkle roots | `src/ledger.rs` | Near Complete | Nonce gaps rejected |
 | `docs/BaaLS_Storage_Layer.md` | Storage trait, key-value schema, indexing, atomicity | `src/storage.rs` | Near Complete | Key prefix mismatches; `compact()` doesn't actually compact; sled config not applied; WAL implemented but per-tree not cross-DB |
-| `docs/BaaLS_Consensus_Engine_PoA.md` | PoA consensus, block signing, validation | `src/consensus.rs` | Partial | No automatic block scheduling; future-timestamp check missing; block nonce unvalidated; no fork resolution execution; no multi-validator support |
+| `docs/BaaLS_Consensus_Engine_PoA.md` | PoA consensus, block signing, validation | `src/consensus.rs` | Partial | Block nonce unvalidated; no fork resolution execution; no multi-validator support |
 | `docs/BaaLS_Transaction_Mempool.md` | Tx format, canonical serialization, verification, mempool | `src/types.rs`, `src/runtime.rs` | Near Complete | TTL 5min vs spec 24h; eviction missing least-gas tier; nonce gaps rejected vs queued |
 | `docs/BaaLS_Smart_Contract_Module.md` | WASM runtime, WASI host functions, gas metering | `src/contracts.rs` | Near Complete | Float opcodes not banned; no export/import whitelist validation; gas estimation stub; no capability-based security; events not persisted |
 | `docs/BaaLS_CLI_SDK_Wiring_Overview.md` | CLI commands, SDK APIs, FFI bindings | `src/main.rs`, `src/sdk.rs`, `src/ffi.rs` | Near Complete | No cdylib target; NodeJS SDK types-only (no native addon); Go SDK needs compiled `.so`/`.dll` to link |
-| `docs/BaaLS_Production_Readiness_Guide.md` | Deployment, monitoring, security, operations | `src/metrics.rs`, `docs/` | Partial | No TLS; no HTTP health endpoint; no certificate pinning; no rate limiting; no log rotation; `compact()` is a no-op |
+| `docs/BaaLS_Production_Readiness_Guide.md` | Deployment, monitoring, security, operations | `src/metrics.rs`, `docs/` | Partial | No TLS; no certificate pinning; no rate limiting; no log rotation; `compact()` is a no-op |
 
 ---
 
@@ -66,18 +66,12 @@ All 18 bugs from the Phase 9 audit have been fixed:
 17. `MerkleTree::root()` requiring `&mut self` (refactored to `&self` with `RefCell`)
 18. Dead dependencies `proptest` and `quickcheck` (removed)
 
-### 2.3 Remaining Gaps (37 Items — Full Audit)
+### 2.3 Remaining Gaps (31 Items — Full Audit)
 
-#### CRITICAL (7 items)
+#### CRITICAL (1 item)
 
 | # | Gap | Spec Ref | Source | Impact |
 |---|-----|----------|--------|--------|
-| C1 | No automatic/scheduled block production | `Core_Engine_Runtime.md:211-213`, `Consensus_PoA.md:63-70` | `runtime.rs:258-268`, `main.rs:500-529` | Node never produces blocks autonomously; requires manual `produce_block()` calls |
-| C2 | Future block timestamp not validated | `Ledger_State_Transition.md:79`, `Consensus_PoA.md:113-114` | `ledger.rs:166-177` (only checks > prev) | Blocks with timestamps years in the future pass validation |
-| C3 | Block processing not fully atomic | `Ledger_State_Transition.md:154,185-188` | `ledger.rs:474` (`if !tx_success { continue; }`) | Failed txs skipped rather than rolling back entire block |
-| C4 | Contract storage Merkle tree not maintained | `Storage_Layer.md:170-178`, `Ledger_State_Transition.md:159-160` | `ledger.rs:425-446` (ad-hoc SHA256, not actual contract KV state) | `storage_root_hash` is not a verifiable cryptographic commitment |
-| C5 | Dense Merkle tree instead of sparse for account state | `Ledger_State_Transition.md:60-68`, `Storage_Layer.md:162-168` | `types.rs:51-201` (sequential `MerkleTree`, no key-indexed leaves) | Light-client proofs for individual accounts impractical |
-| C6 | No HTTP server / health endpoint | `Production_Readiness_Guide.md:190-206` | `k8s/deployment.yaml:71-83` references `/health:8080` but no HTTP server exists | K8s liveness/readiness probes will fail |
 | C7 | No TLS for P2P communications | `Production_Readiness_Guide.md:54-58` | `sync.rs` uses raw `TcpStream` | All network traffic in plaintext; trivial MITM |
 
 #### HIGH (10 items)
@@ -133,35 +127,39 @@ All 18 bugs from the Phase 9 audit have been fixed:
 
 Phases 1-9 delivered the core engine, smart contracts, CLI, config, validation hardening, FFI/SDK layers, advanced ledger/consensus features, sync protocol, production hardening, and final spec compliance. Verified by audit: 64/72 claims confirmed, 3 Go SDK signatures fixed, 5 minor plan.md inaccuracies corrected.
 
-### Phase 10: Critical Spec Gaps (Current — 7 items)
+### Phase 10: Critical Spec Gaps (Current — 1 item)
 
-**Goal**: Fix the 7 critical gaps that prevent production deployment.
+**Goal**: Fix the remaining critical gaps that prevent production deployment.
 **Duration Estimate**: 1-2 weeks
 **Specs**: All 9 spec documents
 
-- [ ] **C1: Automatic block production** (`src/runtime.rs`, `src/main.rs`)
-  - Add `block_time_interval_ms` timer to `Runtime::start()` that spawns a background task calling `produce_block()` on schedule
-  - Wire existing `PoAConsensus.block_time_interval_ms` field into the timer
-  - Add mempool-threshold trigger: produce block when mempool reaches N transactions
-- [ ] **C2: Future block timestamp validation** (`src/ledger.rs`, `src/consensus.rs`)
-  - In `validate_block`, add wall-clock check: `block.timestamp <= now + MAX_FUTURE_SECONDS` (default 10s)
-  - Add the same check to `ConsensusEngine::validate_block` for the consensus layer
-- [ ] **C3: Atomic block processing** (`src/ledger.rs`)
-  - Change `apply_block` from `if !tx_success { continue; }` to `return Err(...)` on any tx failure
-  - Ensure `accounts_to_update` is discarded (not applied via `apply_batch`) on error
-  - Note: contract storage writes committed in-engine remain a known limitation requiring engine-level rollback
-- [ ] **C4: Contract storage Merkle tree** (`src/storage.rs`, `src/ledger.rs`)
-  - Add `get_all_contract_storage_keys(contract_id) -> Vec<Vec<u8>>` to `Storage` trait
-  - In `apply_block`, after contract execution, build a `MerkleTree` from all contract storage keys+values
-  - Store the resulting root in `Account::Contract { storage_root_hash }` at the correct contract address key
-- [ ] **C5: Sparse Merkle tree for account state** (`src/types.rs`)
-  - Implement `SparseMerkleTree` with key-indexed leaves (key = account address hash, value = account serialization)
-  - Wire into `apply_block` for `accounts_root_hash` calculation
-  - Add Merkle proof generation/verification for individual account lookups
-- [ ] **C6: HTTP health endpoint** (`src/main.rs` or new `src/server.rs`)
-  - Add a lightweight HTTP server (e.g., `tiny_http` or `axum`) exposing `GET /health`
-  - Return JSON `HealthStatus` from `MetricsCollector::health_check()`
-  - Expose on configured port (default 8080); wire into K8s probes
+- [x] **C1: Automatic block production** (`src/runtime.rs`, `src/main.rs`)
+  - `Runtime::start()` now spawns a background worker based on `PoAConsensus.block_time_interval_ms`
+  - Added consensus accessor `block_time_interval_ms()` to the `ConsensusEngine` trait
+  - Added mempool-threshold trigger (`mempool_size_limit / 2`, minimum 1) before automatic production
+  - Added integration coverage: `test_runtime_auto_block_production_from_mempool_threshold`
+- [x] **C2: Future block timestamp validation** (`src/ledger.rs`, `src/consensus.rs`)
+  - Added wall-clock bound check in both ledger and consensus (`MAX_FUTURE_BLOCK_TIMESTAMP_SECONDS = 10`)
+  - Added integration coverage: `test_ledger_rejects_future_block_timestamp`
+- [x] **C3: Atomic block processing** (`src/ledger.rs`)
+  - `apply_block` now fails fast on any transaction execution failure
+  - Prevents partial state commits by aborting before batch apply
+  - Added integration coverage: `test_block_application_is_atomic_on_transaction_failure`
+  - Contract engine-internal rollback remains a separate known limitation
+- [x] **C4: Contract storage Merkle tree** (`src/storage.rs`, `src/ledger.rs`)
+  - Added `get_all_contract_storage_keys(contract_id) -> Vec<Vec<u8>>` to `Storage` trait and `SledStorage`
+  - `apply_block` now recomputes Merkle roots from persisted contract storage key/value pairs
+  - `storage_root_hash` is now written to the contract account key (deterministic contract-id mapping)
+  - Added integration coverage: `test_contract_storage_root_tracks_contract_kv_state`
+- [x] **C5: Sparse Merkle tree for account state** (`src/types.rs`, `src/ledger.rs`)
+  - Implemented `SparseMerkleTree` with key-indexed leaves (key = account address hash, value = serialized account)
+  - Wired sparse tree root into ledger `accounts_root_hash` calculation
+  - Added sparse proof generation/verification primitives with unit coverage: `test_sparse_merkle_proof_roundtrip`
+- [x] **C6: HTTP health endpoint** (`src/main.rs`, `src/runtime.rs`, `src/config.rs`)
+  - Added lightweight `tiny_http` server exposing `GET /health`
+  - Returns JSON `HealthStatus` via `Runtime::get_health_status()` built on `MetricsCollector::health_check()`
+  - Added configurable `node.health_port` (default `8080`) and wired node-start lifecycle
+  - Added integration coverage for runtime health shape: `test_runtime_health_status_exposes_chain_and_mempool`
 - [ ] **C7: TLS for P2P** (`src/sync.rs`, `src/config.rs`)
   - Add TLS fields to `NetworkConfig` (`tls_enabled`, `cert_path`, `key_path`)
   - Upgrade `TcpStream` to `tokio_native_tls::TlsStream` when enabled
@@ -252,7 +250,7 @@ Phases 1-9 delivered the core engine, smart contracts, CLI, config, validation h
 | Phase 7: Sync Layer | ✅ Done | TCP P2P, 16 message types, fork detection |
 | Phase 8: Production Hardening | ✅ Done | 26 tests, zero warnings, plan updated |
 | Phase 9: Final Spec Compliance | ✅ Done | Audit fixes, Dockerfile, K8s, JSON logging, bounds-checking |
-| Phase 10: Critical Spec Gaps | ⬜ Pending | Auto block production, future timestamp validation, atomic blocks, contract storage Merkle tree, sparse Merkle tree, HTTP health endpoint, TLS |
+| Phase 10: Critical Spec Gaps | ⬜ Pending | TLS |
 | Phase 11: High Priority Gaps | ⬜ Pending | Nonce-gap queuing, eviction tiers, float opcode ban, deep WASM validation, sled config, chain reorg, nonce check, gas estimation, tx history, capability security |
 | Phase 12: Medium Priority Gaps | ⬜ Pending | TTL config, trait alignment, WasmRuntime subtrait, cdylib, key prefixes, return types, compaction, benchmarks, events, inter-contract results, naming |
 | Phase 13: Low Priority & Maintenance | ⬜ Pending | Design doc updates, NodeJS addon, storage_remove fix, documentation |
@@ -268,9 +266,6 @@ Phases 1-9 delivered the core engine, smart contracts, CLI, config, validation h
 | wasmtime 18.0 CVEs | High | Upgrade to 27+ in Phase 15; pin version with `=18.0` in interim |
 | sled maintenance status | Medium | `Storage` trait abstraction enables migration; evaluate `redb` in Phase 15 |
 | No TLS for P2P | High | Plaintext MITM; implement TLS in Phase 10 (C7) |
-| No automatic block production | High | Node requires manual triggers; implement timer in Phase 10 (C1) |
-| Non-atomic block processing | High | Partial state on tx failure; implement rollback in Phase 10 (C3) |
-| K8s health probes reference non-existent endpoint | High | Add HTTP server in Phase 10 (C6) |
 | Go SDK needs compiled cdylib to link | Medium | Add `crate-type = ["cdylib"]` and CI build in Phase 12/15 |
 | NodeJS SDK types-only | Low | Implement native addon in Phase 13 (L5) |
 | Benchmarks don't compile | Low | Fix in Phase 14 |

@@ -444,14 +444,8 @@ impl MetricsCollector {
 
         let (storage_healthy, latest_block_index, latest_block_hash, mempool_size) = {
             let m = self.metrics.lock().unwrap();
-            let healthy = m.error_count.values().sum::<u64>() == 0
-                || m.total_blocks_processed > 0;
-            (
-                healthy,
-                m.total_blocks_processed,
-                String::new(),
-                0usize,
-            )
+            let healthy = m.error_count.values().sum::<u64>() == 0 || m.total_blocks_processed > 0;
+            (healthy, m.total_blocks_processed, String::new(), 0usize)
         };
 
         let status = if !storage_healthy || used_memory > 4096.0 {

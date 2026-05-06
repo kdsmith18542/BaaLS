@@ -5,11 +5,10 @@ use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::sync::Mutex;
 use wasmtime::{Caller, Config, Engine, Linker, Module, Store};
 
 #[derive(Debug, Error)]
@@ -236,7 +235,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
         contract_id: &ContractId,
         execution_result: &ContractExecutionResult,
     ) {
-        let mut metrics = self.contract_metrics.blocking_lock();
+        let mut metrics = self.contract_metrics.lock().unwrap();
         let cm = metrics
             .entry(contract_id.clone())
             .or_insert_with(|| ContractMetrics {
@@ -918,15 +917,9 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     let mut callee = vec![0u8; callee_len];
                     let mut method = vec![0u8; method_len];
                     let mut args = vec![0u8; args_len];
-                    if mem
-                        .read(&caller, callee_ptr as usize, &mut callee)
-                        .is_err()
-                        || mem
-                            .read(&caller, method_ptr as usize, &mut method)
-                            .is_err()
-                        || mem
-                            .read(&caller, args_ptr as usize, &mut args)
-                            .is_err()
+                    if mem.read(&caller, callee_ptr as usize, &mut callee).is_err()
+                        || mem.read(&caller, method_ptr as usize, &mut method).is_err()
+                        || mem.read(&caller, args_ptr as usize, &mut args).is_err()
                     {
                         return -1;
                     }
@@ -935,9 +928,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     if state.read_only {
                         return -1;
                     }
-                    state
-                        .inter_contract_calls
-                        .push((callee, method, args));
+                    state.inter_contract_calls.push((callee, method, args));
                     state.inter_contract_calls.len() as i32 - 1
                 },
             )
@@ -1073,13 +1064,13 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
     ) -> Result<Vec<u8>, ContractError> {
         // Reentrancy guard: check if this contract is already executing
         {
-            let mut executing = self.executing_contracts.blocking_lock();
+            let mut executing = self.executing_contracts.lock().unwrap();
             let entry = executing.entry(contract_id.clone()).or_insert(0);
             *entry += 1;
             if *entry > 1 {
-                return Err(ContractError::ReentrancyDetected(
-                    hex::encode(contract_id.to_bytes()),
-                ));
+                return Err(ContractError::ReentrancyDetected(hex::encode(
+                    contract_id.to_bytes(),
+                )));
             }
         }
         // Cleanup on scope exit
@@ -1211,7 +1202,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         &self,
         contract_id: &ContractId,
     ) -> Result<ContractMetrics, ContractError> {
-        let metrics = self.contract_metrics.blocking_lock();
+        let metrics = self.contract_metrics.lock().unwrap();
         metrics.get(contract_id).cloned().ok_or_else(|| {
             ContractError::ContractNotFound(format!(
                 "Contract {} not found",
@@ -1241,7 +1232,7 @@ struct ReentrancyGuard {
 
 impl Drop for ReentrancyGuard {
     fn drop(&mut self) {
-        let mut executing = self.executing_contracts.blocking_lock();
+        let mut executing = self.executing_contracts.lock().unwrap();
         if let Some(entry) = executing.get_mut(&self.contract_id) {
             *entry = entry.saturating_sub(1);
             if *entry == 0 {
