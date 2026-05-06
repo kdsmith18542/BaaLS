@@ -982,6 +982,59 @@ impl<S: Storage> BaaLSContractEngine<S> {
 
         Ok(())
     }
+    fn validate_wasm_module(module: &wasmtime::Module) -> Result<(), ContractError> {
+        // Verify memory export exists
+        let has_memory = module
+            .exports()
+            .any(|e| e.name() == "memory" && matches!(e.ty(), wasmtime::ExternType::Memory(_)));
+        if !has_memory {
+            return Err(ContractError::BytecodeValidationFailed(
+                "WASM module must export a 'memory'".to_string(),
+            ));
+        }
+
+        // Validate imports are only from allowed modules
+        let allowed_modules = ["env"];
+        for import in module.imports() {
+            let mod_name = import.module();
+            if !allowed_modules.contains(&mod_name) {
+                return Err(ContractError::BytecodeValidationFailed(format!(
+                    "Disallowed import module: '{}'", mod_name
+                )));
+            }
+        }
+
+        // Check memory limits from the module
+        if let Some(mem_type) = module
+            .imports()
+            .find(|i| matches!(i.ty(), wasmtime::ExternType::Memory(_)))
+            .map(|i| i.ty())
+            .or_else(|| {
+                module
+                    .exports()
+                    .find(|e| matches!(e.ty(), wasmtime::ExternType::Memory(_)))
+                    .map(|e| e.ty())
+            })
+        {
+            if let wasmtime::ExternType::Memory(mem) = mem_type {
+                if mem.minimum() > 1024 {
+                    return Err(ContractError::BytecodeValidationFailed(format!(
+                        "Memory minimum pages ({}) exceeds limit (1024)", mem.minimum()
+                    )));
+                }
+                if let Some(max) = mem.maximum() {
+                    if max > 4096 {
+                        return Err(ContractError::BytecodeValidationFailed(format!(
+                            "Memory maximum pages ({}) exceeds limit (4096)", max
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn scan_for_float_opcodes(wasm_bytes: &[u8]) -> Result<(), String> {
         let mut i = 8; // skip WASM magic + version
         let mut in_code_section = false;
@@ -1046,7 +1099,11 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
             ContractError::BytecodeValidationFailed(e)
         })?;
         let engine = Engine::default();
-        Module::new(&engine, wasm_bytes).map_err(|e| ContractError::InvalidWasm(e.to_string()))?;
+        let module = Module::new(&engine, wasm_bytes)
+            .map_err(|e| ContractError::InvalidWasm(e.to_string()))?;
+
+        // Deep WASM validation
+        Self::validate_wasm_module(&module)?;
 
         // Generate contract ID from deployer + deployer_nonce + WASM hash + init_payload
         let mut hasher = Sha256::new();
