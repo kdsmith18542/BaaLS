@@ -109,6 +109,11 @@ impl PoAConsensus {
                 ConsensusError::InvalidSignature(CryptoError::SignatureVerificationFailed)
             })?;
 
+        // Nonce check — for PoA, nonce should be 0
+        if block.nonce != 0 {
+            return Err(ConsensusError::InvalidNonce);
+        }
+
         Ok(())
     }
 

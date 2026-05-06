@@ -179,7 +179,14 @@ pub struct SledStorage {
 
 impl SledStorage {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, StorageError> {
-        let db = sled::open(path)?;
+        Self::new_with_config(path, 64)
+    }
+
+    pub fn new_with_config(path: impl AsRef<Path>, cache_capacity_mb: u64) -> Result<Self, StorageError> {
+        let config = sled::Config::default()
+            .path(path)
+            .cache_capacity((cache_capacity_mb * 1024 * 1024) as u64);
+        let db = config.open()?;
         let storage = Self {
             blocks_tree: db.open_tree("blocks")?,
             transactions_tree: db.open_tree("transactions")?,

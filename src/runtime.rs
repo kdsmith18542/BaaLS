@@ -148,7 +148,8 @@ impl Mempool {
             .min_by(|a, b| {
                 a.priority
                     .cmp(&b.priority)
-                    .then_with(|| b.timestamp.cmp(&a.timestamp))
+                    .then_with(|| a.timestamp.cmp(&b.timestamp))  // oldest first
+                    .then_with(|| a.gas_limit.cmp(&b.gas_limit)) // least gas first
             })
             .map(|tx| tx.hash);
         if let Some(hash) = best {
@@ -554,7 +555,6 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         );
 
         info!("[PRODUCE_BLOCK] Collecting transactions from mempool (priority-ordered)");
-        // Evict expired before collecting
         mempool.evict_expired();
         let mut transactions: Vec<Transaction> = mempool
             .sorted_by_priority()
@@ -562,6 +562,31 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             .map(|tx| (*tx).clone())
             .collect();
         transactions.sort_by_key(|tx| (tx.sender, tx.nonce));
+
+        // Filter to only include txs with continuous nonces per sender.
+        // Gap transactions (nonce > next_expected) are kept in mempool for later blocks.
+        let mut sender_next: HashMap<PublicKey, u64> = HashMap::new();
+        transactions.retain(|tx| {
+            let expected = sender_next.entry(tx.sender).or_insert_with(|| {
+                self.storage
+                    .get_account(&tx.sender)
+                    .ok()
+                    .flatten()
+                    .map(|a| a.nonce() + 1)
+                    .unwrap_or(1)
+            });
+            if tx.nonce == *expected {
+                *expected = tx.nonce + 1;
+                true
+            } else if tx.nonce > *expected {
+                // Gap transaction — keep in mempool, skip for this block
+                false
+            } else {
+                // Stale nonce — should have been rejected earlier, skip
+                false
+            }
+        });
+
         info!(
             "[PRODUCE_BLOCK] Collected {} transactions",
             transactions.len()
@@ -766,18 +791,23 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         address: &PublicKey,
         limit: usize,
     ) -> Result<Vec<Transaction>, RuntimeError> {
-        // For now, return transactions from mempool that involve this address
-        // In a full implementation, this would query the blockchain for confirmed transactions
-        let mempool = self.mempool.lock().unwrap();
-        let mut history = Vec::new();
+        // Query confirmed transactions from storage
+        let mut history = self
+            .storage
+            .get_transactions_by_address(address, limit)
+            .map_err(RuntimeError::StorageError)?;
 
-        for tx in mempool.all().iter() {
-            if tx.sender == *address
-                || (matches!(tx.recipient, crate::types::Address::Wallet(pk) if pk == *address))
-            {
-                history.push((*tx).clone());
-                if history.len() >= limit {
-                    break;
+        // Supplement with pending mempool transactions
+        if history.len() < limit {
+            let mempool = self.mempool.lock().unwrap();
+            for tx in mempool.all().iter() {
+                if tx.sender == *address
+                    || (matches!(tx.recipient, crate::types::Address::Wallet(pk) if pk == *address))
+                {
+                    if history.len() >= limit {
+                        break;
+                    }
+                    history.push((*tx).clone());
                 }
             }
         }

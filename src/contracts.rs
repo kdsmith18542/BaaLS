@@ -964,6 +964,35 @@ impl<S: Storage> BaaLSContractEngine<S> {
 
         Ok(())
     }
+    fn scan_for_float_opcodes(wasm_bytes: &[u8]) -> Result<(), String> {
+        let mut i = 8; // skip WASM magic + version
+        let mut in_code_section = false;
+        while i < wasm_bytes.len() {
+            let op = wasm_bytes[i];
+            match op {
+                0x0A => in_code_section = true, // code section
+                0x00 | 0x01 | 0x02 | 0x03 | 0x04 | 0x05 | 0x06 | 0x07
+                | 0x08 | 0x09 | 0x0B | 0x0C => in_code_section = false,
+                0x2A | 0x2B | 0x2C | 0x2D if in_code_section => {
+                    return Err(format!(
+                        "Non-deterministic float memory opcode 0x{:02X} at byte {}", op, i
+                    ));
+                }
+                0x43 | 0x44 if in_code_section => {
+                    return Err(format!("Float constant opcode 0x{:02X} at byte {}", op, i));
+                }
+                0x5D..=0x66 if in_code_section => {
+                    return Err(format!("Float comparison opcode 0x{:02X} at byte {}", op, i));
+                }
+                0x8E..=0xA2 if in_code_section => {
+                    return Err(format!("Float arithmetic opcode 0x{:02X} at byte {}", op, i));
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        Ok(())
+    }
 }
 
 // ─── ContractEngine trait impl ───
@@ -994,6 +1023,10 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
                 "Invalid WASM magic bytes".to_string(),
             ));
         }
+        // Ban non-deterministic float opcodes
+        Self::scan_for_float_opcodes(wasm_bytes).map_err(|e| {
+            ContractError::BytecodeValidationFailed(e)
+        })?;
         let engine = Engine::default();
         Module::new(&engine, wasm_bytes).map_err(|e| ContractError::InvalidWasm(e.to_string()))?;
 
@@ -1186,16 +1219,59 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
 
     fn estimate_gas_usage(
         &self,
-        _contract_id: &ContractId,
-        _method_name: &str,
-        _args: &[u8],
-        _storage: &dyn Storage,
+        contract_id: &ContractId,
+        method_name: &str,
+        args: &[u8],
+        storage: &dyn Storage,
     ) -> Result<GasEstimate, ContractError> {
-        Ok(GasEstimate {
-            estimated_gas: 5000,
-            confidence_level: 0.5,
-            execution_time_estimate: Duration::from_millis(5),
-        })
+        let wasm_bytes = match storage.get_contract_code(contract_id) {
+            Ok(Some(bytes)) => bytes,
+            _ => {
+                return Ok(GasEstimate {
+                    estimated_gas: 21000,
+                    confidence_level: 0.1,
+                    execution_time_estimate: Duration::from_millis(1),
+                });
+            }
+        };
+
+        let dummy_caller = PublicKey::from_bytes(&[0; 32])
+            .map_err(|_| ContractError::ExecutionError("Invalid dummy key".to_string()))?;
+
+        // Dry-run execution to measure actual gas used
+        let start = Instant::now();
+        let estimate_gas = 1_000_000u64; // high gas limit for estimation
+        match self.execute_wasm_contract(
+            &wasm_bytes,
+            method_name,
+            args,
+            &dummy_caller,
+            contract_id,
+            storage,
+            true, // read-only
+            estimate_gas,
+            0,
+            0,
+        ) {
+            Ok((_, gas_used, _)) => {
+                let elapsed = start.elapsed();
+                // Add 20% buffer for safety
+                let estimated = ((gas_used as f64) * 1.2).ceil() as u64;
+                Ok(GasEstimate {
+                    estimated_gas: estimated.max(21000),
+                    confidence_level: 0.9,
+                    execution_time_estimate: elapsed,
+                })
+            }
+            Err(e) => {
+                // If execution fails, fall back to a reasonable default
+                Ok(GasEstimate {
+                    estimated_gas: 21000,
+                    confidence_level: 0.1,
+                    execution_time_estimate: Duration::from_millis(5),
+                })
+            }
+        }
     }
 
     fn get_contract_metrics(
