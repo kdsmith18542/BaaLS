@@ -10,7 +10,7 @@ BaaLS is designed to be the foundational layer for decentralized applications th
 - **Optional Peer-to-Peer Syncing**: Allows BaaLS instances to synchronize their ledgers, enabling distributed local trust and data sharing among a defined set of peers.
 - **Pluggable Consensus Engine**: Highly modular design allows developers to choose or implement their desired consensus mechanism (e.g., Proof-of-Authority (PoA) by default).
 - **Deterministic WASM Smart Contract Runtime**: Provides a secure, isolated, and predictable environment for executing smart contracts compiled to WebAssembly (WASM), enabling language agnosticism.
-- **Embedded Key-Value Store**: Utilizes `sled` (or `rocksdb`) for efficient, reliable, and persistent local data storage.
+- **Embedded Key-Value Store**: Utilizes `sled` for efficient, reliable, and persistent local data storage.
 - **Comprehensive SDKs & FFI Bindings**: Offers full Software Development Kits for Rust, Go, and JavaScript, alongside Foreign Function Interface (FFI) bindings.
 - **CLI Tools**: Provides robust command-line utilities for node management, wallet operations, transaction injection, and smart contract deployment.
 
@@ -68,10 +68,29 @@ git clone https://github.com/kdsmith18542/BaaLS.git
 cd BaaLS
 
 # Build the project
-cargo build
+cargo build --release
 
-# Run the CLI
-cargo run -- wallet generate
+# Initialize config and start a node
+cargo run -- node config init
+cargo run -- node start
+
+# Create a wallet
+cargo run -- wallet create
+
+# Check node status
+cargo run -- query head --data-dir ./data
+
+# Deploy a contract
+cargo run -- tx deploy-contract --sender <key> --wasm my_contract.wasm --data-dir ./data
+
+# Run tests
+cargo test --lib
+cargo test --test integration
+```
+
+For a full list of commands:
+```bash
+cargo run -- help
 ```
 
 ## Documentation

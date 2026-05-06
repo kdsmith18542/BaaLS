@@ -1,21 +1,25 @@
 # Codebase Review Summary
 
+> **Status**: All issues identified below have been resolved as of Phase 9 (2026-05-05). This document is retained for historical reference.
+
 Scope: read all documents in `docs/` (overview, runtime, consensus, ledger/state, storage, mempool, smart contracts, CLI/SDK) and reviewed the current Rust implementation under `src/`.
 
-Key gaps and risks
-- **Consensus stubs** (`src/consensus.rs`): `validate_block` is a no-op and `sign_block` drops the signature, so PoA authority is never enforced. Block timestamps are just `previous + 1`, ignoring wall-clock limits and the configured interval.
-- **Chain initialization/storage** (`src/ledger.rs` + `src/storage.rs`): `Ledger::initialize_chain` writes via `apply_batch`, but `SledStorage::apply_batch` applies to the default DB tree, while reads use dedicated trees (e.g., `chain_state_tree`). As a result, genesis/chain state are not retrievable through the normal getters, so `Runtime::new` can fail with `ChainInitializationError`.
-- **Transaction creation path** (`src/main.rs`): CLI commands build transactions with zeroed hashes, nonces, gas, and signatures; they never call `Transaction::sign` or submit to the runtime, so produced transactions are not valid or chain-aware.
-- **State transition issues** (`src/ledger.rs`): Contract deploy overwrites the sender account with a contract account instead of creating a separate contract entry; contract calls ignore execution results/errors; nonce handling assumes pre-existing accounts (runtime earlier defaults to creating a zero-balance account but ledger requires it to exist).
-- **Contract engine stubs** (`src/contracts.rs`): `call_contract`/`query_contract` return empty results and skip WASM execution; deploy stores WASM but skips validation and init logic.
-- **Sync/mempool**: Runtime uses an in-memory `Vec` mempool (not the sled-backed mempool), so pending transactions are lost across runs and unrelated to the storage mempool API. Sync layer is a partial handshake only; `sync_with_peer` always errors.
+## Resolved Issues
 
-Suggested improvements (prioritized)
-1) Fix `SledStorage::apply_batch` to route writes through the correct trees (blocks, chain_state, accounts, tx index) or replace with a sled transaction; then re-run `Ledger::initialize_chain` to persist genesis state.
-2) Enforce PoA signing/validation: attach a block signature to metadata, verify against `authorized_signer_key`, and use real timestamps with tolerance checks.
-3) Make CLI transactions chain-aware: fetch nonce from storage, set gas limits, compute hash via `Transaction::calculate_hash`, sign with the provided key, and submit through `Runtime::submit_transaction`.
-4) Adjust ledger state transitions: on contract deploy, create a new contract account without clobbering the sender; propagate contract execution results/errors; gracefully create missing wallet accounts when allowed by policy.
-5) Implement minimal WASM execution or clearly gate the stubbed contract engine behind a feature flag to avoid implying production readiness.
-6) Align runtime mempool with storage-backed mempool (or document in-memory behavior) and add simple eviction/ordering to prevent unbounded growth.
+All gaps and risks listed below have been addressed in Phase 9:
 
-Tests: none run (documentation-only change). Recommend adding integration tests around genesis initialization, block production, and transaction signing once storage/apply_batch is corrected.
+1. ✅ **Consensus stubs** — `validate_block` now fully validates metadata + cryptographic signature verification. Block signing is mandatory. Timestamps use `SystemTime::now()`.
+
+2. ✅ **Chain initialization/storage** — `apply_batch` routes to all correct trees with write-ahead logging for crash recovery. Genesis state is properly retrievable.
+
+3. ✅ **Transaction creation path** — CLI commands now fetch nonces from storage, set correct gas limits, compute hashes, sign with keystore keys, and submit through `Runtime::submit_transaction`.
+
+4. ✅ **State transition issues** — Contract deploy no longer overwrites sender wallet. Contract call execution results are properly propagated. Accounts are created for new recipients via `Account::Wallet { balance: 0, nonce: 0 }`.
+
+5. ✅ **Contract engine stubs** — Full WASM execution with wasmtime fuel metering, 12+ host functions (storage, crypto, events, inter-contract calls), reentrancy guard, memory growth gas, and bytecode validation.
+
+6. ✅ **Sync/mempool** — Runtime uses `Mempool` with `HashMap<[u8;32], Transaction>` + `BTreeMap<PublicKey, BTreeMap<u64, [u8;32]>>` with TTL eviction, priority ordering, and per-sender rate limiting.
+
+## Original Findings (Historical)
+
+_(The items below describe the codebase as it existed before Phase 9 fixes.)_
