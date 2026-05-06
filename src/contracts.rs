@@ -177,6 +177,7 @@ struct HostState {
     last_memory_size: usize,
     inter_contract_calls: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
     inter_contract_results: Vec<Vec<u8>>,
+    deleted_keys: Vec<Vec<u8>>,
 }
 
 impl HostState {
@@ -314,6 +315,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
             last_memory_size: 0,
             inter_contract_calls: Vec::new(),
             inter_contract_results: Vec::new(),
+            deleted_keys: Vec::new(),
         };
 
         let mut store = Store::new(engine, host_state);
@@ -391,6 +393,13 @@ impl<S: Storage> BaaLSContractEngine<S> {
                             .storage
                             .contract_storage_write(&host_state.contract_id, key, value)
                             .map_err(|e| ContractError::StorageError(e))?;
+                    }
+                    // Commit deletions
+                    for key in &host_state.deleted_keys {
+                        host_state
+                            .storage
+                            .contract_storage_remove(&host_state.contract_id, key)
+                            .ok();
                     }
                 }
 
@@ -619,7 +628,9 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     if state.read_only {
                         return -1;
                     }
-                    state.contract_storage.insert(key, vec![]);
+                    // Actually remove the key, not just insert empty vec
+                    state.contract_storage.remove(&key);
+                    state.deleted_keys.push(key);
                     0
                 },
             )
@@ -1263,7 +1274,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
                     execution_time_estimate: elapsed,
                 })
             }
-            Err(e) => {
+            Err(_e) => {
                 // If execution fails, fall back to a reasonable default
                 Ok(GasEstimate {
                     estimated_gas: 21000,
