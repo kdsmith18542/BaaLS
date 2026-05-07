@@ -51,7 +51,7 @@ pub trait Storage: Send + Sync {
     fn get_transaction_by_id(
         &self,
         tx_hash: &[u8; 32],
-    ) -> Result<Option<Transaction>, StorageError>;
+    ) -> Result<Option<(Block, Transaction)>, StorageError>;
     fn get_transactions_by_block(
         &self,
         block_hash: &[u8; 32],
@@ -184,6 +184,7 @@ pub struct SledStorage {
     contract_storage_tree: Tree,
     chain_state_tree: Tree,
     tx_by_block_tree: Tree,
+    tx_to_block_tree: Tree,
     // New: Advanced indexing trees for Phase 3
     height_to_block_tree: Tree,
     address_to_tx_tree: Tree,
@@ -212,6 +213,7 @@ impl SledStorage {
             contract_storage_tree: db.open_tree("contract_storage")?,
             chain_state_tree: db.open_tree("chain_state")?,
             tx_by_block_tree: db.open_tree("tx_by_block")?,
+            tx_to_block_tree: db.open_tree("tx_to_block")?,
             // New: Advanced indexing trees
             height_to_block_tree: db.open_tree("height_to_block")?,
             address_to_tx_tree: db.open_tree("address_to_tx")?,
@@ -344,6 +346,7 @@ impl Clone for SledStorage {
             contract_storage_tree: self.contract_storage_tree.clone(),
             chain_state_tree: self.chain_state_tree.clone(),
             tx_by_block_tree: self.tx_by_block_tree.clone(),
+            tx_to_block_tree: self.tx_to_block_tree.clone(),
             // New: Advanced indexing trees
             height_to_block_tree: self.height_to_block_tree.clone(),
             address_to_tx_tree: self.address_to_tx_tree.clone(),
@@ -446,15 +449,33 @@ impl Storage for SledStorage {
             tx_index_in_block
         );
         self.tx_by_block_tree.insert(key, tx_hash.as_slice())?;
+        // Store reverse mapping: tx_hash → block_hash
+        self.tx_to_block_tree.insert(tx_hash.as_slice(), block_hash.as_slice())?;
         Ok(())
     }
 
     fn get_transaction_by_id(
         &self,
         tx_hash: &[u8; 32],
-    ) -> Result<Option<Transaction>, StorageError> {
-        let encoded = self.transactions_tree.get(tx_hash)?;
-        Ok(encoded.map(|e| bincode::deserialize(&e)).transpose()?)
+    ) -> Result<Option<(Block, Transaction)>, StorageError> {
+        // Look up block hash for this transaction
+        let block_hash = match self.tx_to_block_tree.get(tx_hash)? {
+            Some(bytes) if bytes.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                arr
+            }
+            _ => return Ok(None),
+        };
+        let tx = match self.get_transaction(tx_hash)? {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let block = match self.get_block(&block_hash)? {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        Ok(Some((block, tx)))
     }
 
     fn get_transactions_by_block(
@@ -807,6 +828,7 @@ impl Storage for SledStorage {
         export_tree(&self.contract_storage_tree, &backup_db.open_tree("contract_storage")?)?;
         export_tree(&self.height_to_block_tree, &backup_db.open_tree("height_to_block")?)?;
         export_tree(&self.tx_by_block_tree, &backup_db.open_tree("tx_by_block")?)?;
+        export_tree(&self.tx_to_block_tree, &backup_db.open_tree("tx_to_block")?)?;
         export_tree(&self.address_to_tx_tree, &backup_db.open_tree("address_to_tx")?)?;
         export_tree(&self.contract_to_tx_tree, &backup_db.open_tree("contract_to_tx")?)?;
         export_tree(&self.tx_count_tree, &backup_db.open_tree("tx_count")?)?;
@@ -838,6 +860,7 @@ impl Storage for SledStorage {
         restore_tree(&backup_db.open_tree("contract_storage")?, &self.contract_storage_tree)?;
         restore_tree(&backup_db.open_tree("height_to_block")?, &self.height_to_block_tree)?;
         restore_tree(&backup_db.open_tree("tx_by_block")?, &self.tx_by_block_tree)?;
+        restore_tree(&backup_db.open_tree("tx_to_block")?, &self.tx_to_block_tree)?;
         restore_tree(&backup_db.open_tree("address_to_tx")?, &self.address_to_tx_tree)?;
         restore_tree(&backup_db.open_tree("contract_to_tx")?, &self.contract_to_tx_tree)?;
         restore_tree(&backup_db.open_tree("tx_count")?, &self.tx_count_tree)?;

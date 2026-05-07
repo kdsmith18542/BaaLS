@@ -177,8 +177,35 @@ impl Storage for RedbStorage {
     fn get_transaction_by_id(
         &self,
         tx_hash: &[u8; 32],
-    ) -> Result<Option<Transaction>, StorageError> {
-        self.get_transaction(tx_hash)
+    ) -> Result<Option<(Block, Transaction)>, StorageError> {
+        // Get the transaction
+        let tx = match self.get_transaction(tx_hash)? {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        // Find block hash from tx index: scan prefix "idx:{tx_hash}:"
+        let prefix = format!("idx:{}:", hex::encode(tx_hash));
+        let txn = self.db.begin_read().map_err(map_err)?;
+        let table = txn.open_table(TXS_TABLE).map_err(map_err)?;
+        let mut block_hash = None;
+        let iter = table.iter().map_err(map_err)?;
+        for item in iter {
+            let (k, v) = item.map_err(map_err)?;
+            let key_str = String::from_utf8_lossy(k.value());
+            if key_str.starts_with(&prefix) && v.value().len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(v.value());
+                block_hash = Some(arr);
+                break;
+            }
+        }
+        match block_hash {
+            Some(bh) => match self.get_block(&bh)? {
+                Some(block) => Ok(Some((block, tx))),
+                None => Ok(None),
+            },
+            None => Ok(None),
+        }
     }
 
     fn get_transactions_by_block(

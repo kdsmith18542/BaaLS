@@ -63,7 +63,7 @@ impl Storage for AnyStorage {
     fn get_transaction_by_id(
         &self,
         tx_hash: &[u8; 32],
-    ) -> Result<Option<Transaction>, StorageError> {
+    ) -> Result<Option<(Block, Transaction)>, StorageError> {
         dispatch!(self, get_transaction_by_id, tx_hash)
     }
     fn get_transactions_by_block(

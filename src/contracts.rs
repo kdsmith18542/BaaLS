@@ -264,6 +264,7 @@ pub struct BaaLSContractEngine<S: Storage> {
     contract_metrics: Arc<Mutex<HashMap<ContractId, ContractMetrics>>>,
     call_depth: Arc<AtomicU32>,
     executing_contracts: Arc<Mutex<HashMap<ContractId, u32>>>,
+    inter_contract_results: Arc<Mutex<HashMap<ContractId, Vec<Vec<u8>>>>>,
 }
 
 type WasmResult = (Vec<u8>, u64, Vec<(Vec<u8>, Vec<u8>)>);
@@ -284,6 +285,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
             contract_metrics: Arc::new(Mutex::new(HashMap::new())),
             call_depth: Arc::new(AtomicU32::new(0)),
             executing_contracts: Arc::new(Mutex::new(HashMap::new())),
+            inter_contract_results: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -351,6 +353,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
         let engine = module.engine();
 
         // Build host state
+        let pre_existing_results = {
+            let engine_results = self.inter_contract_results.lock().unwrap();
+            engine_results.get(contract_id).cloned().unwrap_or_default()
+        };
         let host_state = HostState {
             caller: *caller,
             contract_id: contract_id.clone(),
@@ -366,7 +372,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
             events: Vec::new(),
             last_memory_size: 0,
             inter_contract_calls: Vec::new(),
-            inter_contract_results: Vec::new(),
+            inter_contract_results: pre_existing_results,
             deleted_keys: Vec::new(),
             permissions: ContractPermissions::all(),
         };
@@ -502,6 +508,25 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         }
                     };
 
+                    // Reentrancy guard for inter-contract calls
+                    {
+                        let mut executing = self.executing_contracts.lock().unwrap();
+                        let entry = executing.entry(callee_id.clone()).or_insert(0);
+                        *entry += 1;
+                        if *entry > 1 {
+                            warn!(
+                                "[CONTRACTS] Reentrancy blocked on inter-contract call to {}",
+                                hex::encode(callee_id.to_bytes())
+                            );
+                            call_results.push(vec![]);
+                            continue;
+                        }
+                    }
+                    let _inter_guard = ReentrancyGuard {
+                        executing_contracts: self.executing_contracts.clone(),
+                        contract_id: callee_id.clone(),
+                    };
+
                     // Execute callee inline (synchronous inter-contract call)
                     match self.execute_wasm_contract(
                         &callee_wasm,
@@ -530,8 +555,12 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     }
                 }
                 // Store results for baals_read_call_result in case the initial caller reads them
-                // (Note: results are available to the caller in multi-call scenarios)
-                store.data_mut().inter_contract_results = call_results;
+                store.data_mut().inter_contract_results = call_results.clone();
+                // Persist results in engine for subsequent contract calls within this block
+                {
+                    let mut engine_results = self.inter_contract_results.lock().unwrap();
+                    engine_results.insert(contract_id.clone(), call_results);
+                }
 
                 Ok((result_data, gas_used, events))
             }
