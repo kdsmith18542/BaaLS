@@ -46,17 +46,18 @@
 
 ---
 
-### Phase 24: P2P Sync Activation (Medium/Hard)
+### Phase 24: P2P Sync Activation ✅ COMPLETE
 
-**Goal**: Make the sync layer actually work instead of always using `NoopSync`. This is the biggest remaining spec gap.
+**Goal**: Make the sync layer actually work instead of always using `NoopSync`.
 
-- [ ] **24.1: Activate CustomSync in CLI** — Replace `NoopSync` with `CustomSync` in `build_runtime()` when a `--peer` flag or `network.peers` config is present. Start the TCP listener on the configured port.
-- [ ] **24.2: Fork detection + resolution** (GAP-15/GAP-17) — Wire `sync_with_peer()` into the runtime's block production loop. When a fork is detected, call `resolve_fork()` to switch to the heaviest chain.
-- [ ] **24.3: Basic peer discovery** — Implement a simple TCP peer list + manual `--peer` flag. For mDNS, add the `mdns-sd` crate for LAN peer discovery (optional, flag-gated).
-- [ ] **24.4: Block reception pipeline** — When a peer sends a new block, validate it through the ledger and apply it. If it extends the current chain, accept it; if it creates a fork, trigger fork resolution.
-- [ ] **24.5: Sync protocol integration tests** — Create a multi-node test harness. Start two runtimes with CustomSync, connect them, produce blocks on one, verify the other receives and applies them.
+- [x] **24.1** — CustomSync activated with `--peer` flag. SyncWrapper enum for runtime switching.
+- [x] **24.2** — Fork detection + resolution: `resolve_fork_blocks()` wired into `sync_with_peer`.
+- [x] **24.3** — Basic peer discovery via `--peer` flag + `add_peer_by_address()`.
+- [x] **24.4** — Block reception pipeline: blocks received via TCP validated and queued for import.
+- [x] **24.5** — 2 multi-node integration tests: block propagation + storage-backed serving.
+- **Hardenings**: NewBlockAnnouncement requests blocks, dedicated sync import loop, clean listener shutdown, storage-backed blocks_in_range, explicit TLS insecure mode.
 
-**Tests**: 3 new integration tests (peer connection, block sync, fork resolution).
+**Tests**: 2 P2P integration tests (propagation + storage serving).
 
 ---
 
@@ -64,8 +65,8 @@
 
 **Goal**: Production operations features.
 
-- [ ] **25.1: Mempool persistence** (GAP-8) — Save mempool state to storage on each insertion/removal. On startup, reload pending transactions from storage. Use the storage trait's existing `put_pending_transaction`/`get_pending_transactions`.
-- [ ] **25.2: Backup/restore CLI commands** — Add `baals node backup [--output]` and `baals node restore [--input]` CLI commands wrapping the existing `backup_to()`/`restore_from()` storage methods.
+- [x] **25.1: Mempool persistence** (GAP-8) — `put_pending_transaction` added to Storage trait + all backends. Runtime persists on submit, removes on block inclusion, reloads on start.
+- [x] **25.2: Backup/restore CLI commands** — `baals node backup --output` and `baals node restore --input` wrap `backup_to()`/`restore_from()`.
 - [ ] **25.3: Automated backup scheduling** (M6) — Add a background thread that performs periodic backups at configurable intervals (`storage.backup_interval_secs`). Default: off (0).
 - [ ] **25.4: Key rotation tooling** — Add `baals wallet rotate <identifier>` that generates a new keypair and re-encrypts with a new password salt.
 - [ ] **25.5: API rate limiting** — Add per-sender rate limiting to transaction submission (already partially implemented via `max_tx_per_sender`). Add configurable limits per IP for the health endpoint.

@@ -138,6 +138,9 @@ enum WalletCommands {
     Delete {
         identifier: String,
     },
+    Rotate {
+        identifier: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -869,6 +872,26 @@ fn handle_wallet(
                 json,
                 &format!("Wallet deleted: {}", hex::encode(pk.to_bytes())),
                 serde_json::json!({"deleted": hex::encode(pk.to_bytes())}),
+            ))
+        }
+        WalletCommands::Rotate { identifier } => {
+            let pk = parse_pubkey(&identifier)?;
+            let password = prompt_password("Current password: ")?;
+            let old_sk = keystore.export_key(&pk, &password)?;
+            let new_password = prompt_password("New password: ")?;
+            let new_pk = keystore.import_key(&old_sk, &new_password)?;
+            Ok(text_or_json(
+                json,
+                &format!(
+                    "Key rotated: {}\nNew public key: {}",
+                    hex::encode(pk.to_bytes()),
+                    hex::encode(new_pk.to_bytes())
+                ),
+                serde_json::json!({
+                    "old_key": hex::encode(pk.to_bytes()),
+                    "new_key": hex::encode(new_pk.to_bytes()),
+                    "status": "rotated"
+                }),
             ))
         }
     }

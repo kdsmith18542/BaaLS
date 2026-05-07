@@ -45,6 +45,8 @@ pub struct StorageConfig {
     pub compression: bool,
     #[serde(default)]
     pub backend: StorageBackend,
+    #[serde(default)]
+    pub backup_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -156,6 +158,7 @@ impl Default for Config {
                 cache_size_mb: default_cache_mb(),
                 compression: default_compression(),
                 backend: StorageBackend::default(),
+                backup_interval_secs: 0,
             },
             network: NetworkConfig {
                 max_peers: default_max_peers(),
@@ -282,6 +285,11 @@ impl Config {
                     "redb" => StorageBackend::Redb,
                     _ => return Err(ConfigError::Invalid(format!("Unknown backend: {}", value))),
                 }
+            }
+            "storage.backup_interval_secs" => {
+                self.storage.backup_interval_secs = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid backup_interval_secs".into()))?
             }
             "network.tls_enabled" => {
                 self.network.tls_enabled = value

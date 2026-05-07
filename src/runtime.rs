@@ -183,9 +183,11 @@ pub struct Runtime<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> {
     mempool_size_limit: usize,
     pub auto_block_interval_ms: u64,
     pub auto_block_mempool_threshold: usize,
+    pub backup_interval_secs: u64,
     metrics: Arc<MetricsCollector>,
     started_at: Arc<Mutex<Option<SystemTime>>>,
     block_production_shutdown: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
+    backup_shutdown: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
 }
 
 impl<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> Clone for Runtime<S, C, Y> {
@@ -202,9 +204,11 @@ impl<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> Clone for Runtime<S
             mempool_size_limit: self.mempool_size_limit,
             auto_block_interval_ms: self.auto_block_interval_ms,
             auto_block_mempool_threshold: self.auto_block_mempool_threshold,
+            backup_interval_secs: self.backup_interval_secs,
             metrics: Arc::clone(&self.metrics),
             started_at: Arc::clone(&self.started_at),
             block_production_shutdown: Arc::clone(&self.block_production_shutdown),
+            backup_shutdown: Arc::clone(&self.backup_shutdown),
         }
     }
 }
@@ -247,6 +251,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             ledger,
             auto_block_interval_ms: 0, // disabled by default; set before start() to enable
             auto_block_mempool_threshold: 100,
+            backup_interval_secs: 0,
             consensus: Arc::new(consensus),
             mempool: Arc::new(Mutex::new(Mempool::new(mempool_size_limit))),
             chain_state: Arc::new(Mutex::new(initial_chain_state)),
@@ -257,6 +262,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             metrics: Arc::new(MetricsCollector::new()),
             started_at: Arc::new(Mutex::new(None)),
             block_production_shutdown: Arc::new(Mutex::new(None)),
+            backup_shutdown: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -320,6 +326,48 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                 }
             });
         });
+
+        // Spawn automated backup if configured
+        if self.backup_interval_secs > 0 {
+            let (backup_tx, mut backup_rx) = tokio::sync::watch::channel(false);
+            *self.backup_shutdown.lock().unwrap() = Some(backup_tx);
+            let self_clone = self.clone();
+            let interval = self.backup_interval_secs;
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    let mut ticker =
+                        tokio::time::interval(tokio::time::Duration::from_secs(interval));
+                    loop {
+                        tokio::select! {
+                            _ = ticker.tick() => {}
+                            _ = backup_rx.changed() => {
+                                if *backup_rx.borrow() { break; }
+                                continue;
+                            }
+                        }
+                        {
+                            let running = self_clone.is_running.lock().unwrap();
+                            if !*running {
+                                break;
+                            }
+                        }
+                        let backup_path = std::path::PathBuf::from(format!(
+                            "backup_{}.baals",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs()
+                        ));
+                        match self_clone.storage().backup_to(&backup_path) {
+                            Ok(()) => info!("Automated backup saved to {:?}", backup_path),
+                            Err(e) => warn!("Automated backup failed: {}", e),
+                        }
+                    }
+                });
+            });
+            info!("Automated backup enabled (interval: {}s)", self.backup_interval_secs);
+        }
 
         // Spawn automatic block production if configured
         if self.auto_block_interval_ms > 0 && self.auto_block_mempool_threshold > 0 {
@@ -414,6 +462,11 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         // Signal block production to stop
         if let Some(shutdown_tx) = self.block_production_shutdown.lock().unwrap().take() {
             let _ = shutdown_tx.send(true);
+        }
+
+        // Signal backup thread to stop
+        if let Some(backup_tx) = self.backup_shutdown.lock().unwrap().take() {
+            let _ = backup_tx.send(true);
         }
 
         // Signal P2P listener to stop

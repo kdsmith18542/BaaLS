@@ -110,6 +110,38 @@ pub trait ContractEngine: Send + Sync {
     ) -> Result<(), ContractError>;
 }
 
+/// Abstraction over the WASM runtime execution layer.
+/// Enables swapping wasmtime for other runtimes (wasmer, etc.) without
+/// changing the ContractEngine logic.
+pub trait WasmRuntime: Send + Sync {
+    /// Execute a WASM contract method and return (result_data, gas_used, events).
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn execute_wasm_contract(
+        &self,
+        wasm_bytes: &[u8],
+        method_name: &str,
+        args: &[u8],
+        caller: &PublicKey,
+        contract_id: &ContractId,
+        storage: &dyn Storage,
+        read_only: bool,
+        gas_limit: u64,
+        block_index: u64,
+        block_timestamp: u64,
+    ) -> Result<(Vec<u8>, u64, Vec<(Vec<u8>, Vec<u8>)>), ContractError>;
+
+    /// Validate WASM bytecode before deployment (magic bytes, size, opcodes, memory limits).
+    fn validate_wasm_module(&self, wasm_bytes: &[u8]) -> Result<(), ContractError>;
+
+    /// Estimate gas usage for a contract method call.
+    fn estimate_gas(
+        &self,
+        wasm_bytes: &[u8],
+        method_name: &str,
+        args: &[u8],
+    ) -> Result<u64, ContractError>;
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ContractExecutionResult {
     pub success: bool,
@@ -1139,6 +1171,54 @@ impl<S: Storage> BaaLSContractEngine<S> {
             }
         }
         Ok(())
+    }
+}
+
+// ─── WasmRuntime trait impl ───
+
+impl<S: Storage> WasmRuntime for BaaLSContractEngine<S> {
+    fn execute_wasm_contract(
+        &self,
+        wasm_bytes: &[u8],
+        method_name: &str,
+        args: &[u8],
+        caller: &PublicKey,
+        contract_id: &ContractId,
+        storage: &dyn Storage,
+        read_only: bool,
+        gas_limit: u64,
+        block_index: u64,
+        block_timestamp: u64,
+    ) -> Result<(Vec<u8>, u64, Vec<(Vec<u8>, Vec<u8>)>), ContractError> {
+        BaaLSContractEngine::execute_wasm_contract(
+            self,
+            wasm_bytes,
+            method_name,
+            args,
+            caller,
+            contract_id,
+            storage,
+            read_only,
+            gas_limit,
+            block_index,
+            block_timestamp,
+        )
+    }
+
+    fn validate_wasm_module(&self, wasm_bytes: &[u8]) -> Result<(), ContractError> {
+        let module = wasmtime::Module::new(&self.wasm_engine, wasm_bytes)
+            .map_err(|e| ContractError::InvalidWasm(e.to_string()))?;
+        Self::validate_wasm_module(&module)
+    }
+
+    fn estimate_gas(
+        &self,
+        wasm_bytes: &[u8],
+        _method_name: &str,
+        _args: &[u8],
+    ) -> Result<u64, ContractError> {
+        // Base cost + bytecode size proportional cost
+        Ok(21_000 + (wasm_bytes.len() as u64 / 100))
     }
 }
 
