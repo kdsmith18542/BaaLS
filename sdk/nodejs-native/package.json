@@ -1,0 +1,20 @@
+{
+  "name": "@baals/sdk",
+  "version": "0.2.0",
+  "description": "BaaLS blockchain Node.js native addon (napi-rs)",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "baals-nodejs-native",
+    "triples": {
+      "defaults": true
+    }
+  },
+  "scripts": {
+    "build": "napi build --release",
+    "build:debug": "napi build"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0"
+  }
+}

@@ -10,10 +10,10 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use baals::{
     config::{generate_default_config, setup_logging, Config, NodeStatus},
-    Account, Address, AnyStorage, BaaLSContractEngine, ContractEngine, ContractId, CustomSync,
-    Keystore, MetricsCollector, NoopSync, PoAConsensus, PublicKey, RedbStorage, Runtime,
-    SledStorage, Storage, SyncLayer, SyncWrapper, Transaction, TransactionPayload,
-    TransactionSignature,
+    Account, Address, AnyStorage, BaaLSContractEngine, ContractId, CustomSync, Keystore,
+    MetricsCollector, NoopSync, PoAConsensus, PublicKey, RedbStorage, Runtime, SledStorage,
+    Storage, SyncLayer, SyncWrapper, Transaction, TransactionPayload, TransactionSignature,
+    WasmRuntime,
 };
 
 #[derive(Parser)]
@@ -75,6 +75,8 @@ enum NodeCommands {
         peer: Vec<String>,
         #[arg(long, default_value = "0.0.0.0:9070")]
         listen: String,
+        #[arg(long)]
+        mdns: bool,
     },
     Stop {
         #[arg(short, long, default_value = "./data")]
@@ -423,6 +425,31 @@ fn build_runtime(
     Ok(runtime)
 }
 
+struct RateLimiter {
+    requests: std::collections::HashMap<String, Vec<std::time::Instant>>,
+    max_requests: usize,
+    window_secs: u64,
+}
+
+impl RateLimiter {
+    fn new(max_requests: usize, window_secs: u64) -> Self {
+        Self { requests: std::collections::HashMap::new(), max_requests, window_secs }
+    }
+
+    fn check_and_record(&mut self, ip: &str) -> bool {
+        let now = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(self.window_secs);
+        let entries = self.requests.entry(ip.to_string()).or_default();
+        entries.retain(|t| now.duration_since(*t) < window);
+        if entries.len() >= self.max_requests {
+            false
+        } else {
+            entries.push(now);
+            true
+        }
+    }
+}
+
 fn spawn_health_server(
     runtime: BaaLSRuntime,
     bind_addr: String,
@@ -435,10 +462,20 @@ fn spawn_health_server(
     })?;
 
     std::thread::spawn(move || {
+        let mut rate_limiter = RateLimiter::new(10, 1); // 10 req/sec per IP
         info!("Health endpoint listening on http://{}/health", bind_addr);
         while runtime.is_running() {
             match server.recv_timeout(std::time::Duration::from_millis(250)) {
                 Ok(Some(request)) => {
+                    let client_ip =
+                        request.remote_addr().map(|a| a.to_string()).unwrap_or_default();
+                    if !rate_limiter.check_and_record(&client_ip) {
+                        let _ = request.respond(
+                            Response::from_string("Too Many Requests")
+                                .with_status_code(StatusCode(429)),
+                        );
+                        continue;
+                    }
                     let is_health = request.method() == &Method::Get && request.url() == "/health";
                     if is_health {
                         match runtime.get_health_status() {
@@ -471,6 +508,96 @@ fn spawn_health_server(
                                 }
                                 let _ = request.respond(response);
                             }
+                        }
+                    } else if request.method() == &Method::Get
+                        && request.url().starts_with("/proof/account/")
+                    {
+                        let url = request.url();
+                        let addr_hex = &url["/proof/account/".len()..];
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let pk = parse_pubkey(addr_hex)?;
+                                let account =
+                                    runtime.get_account(&pk)?.ok_or("Account not found")?;
+                                let mut smt = baals::SparseMerkleTree::new();
+                                let account_bytes = bincode::serialize(&account)?;
+                                smt.insert(pk.to_bytes(), account_bytes);
+                                let proof = smt.generate_proof(pk.to_bytes());
+                                Ok(serde_json::json!({
+                                    "root": hex::encode(proof.root),
+                                    "proof": proof.proof.iter().map(hex::encode).collect::<Vec<_>>(),
+                                    "key": hex::encode(proof.key),
+                                    "value_hex": hex::encode(&proof.value),
+                                }))
+                            })();
+                        let body = match response_json {
+                            Ok(json) => json.to_string(),
+                            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                        };
+                        let mut response =
+                            Response::from_string(body).with_status_code(StatusCode(200));
+                        if let Ok(header) = Header::from_bytes(
+                            b"Content-Type".as_slice(),
+                            b"application/json".as_slice(),
+                        ) {
+                            response = response.with_header(header);
+                        }
+                        let _ = request.respond(response);
+                    } else if request.method() == &Method::Get
+                        && request.url().starts_with("/proof/contract/")
+                    {
+                        let url = request.url();
+                        let path = &url["/proof/contract/".len()..];
+                        let parts: Vec<&str> = path.split("/storage/").collect();
+                        if parts.len() == 2 {
+                            let cid_hex = parts[0];
+                            let key_hex = parts[1];
+                            let response_json =
+                                (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                    let cid_bytes = hex::decode(cid_hex)
+                                        .map_err(|_| "Invalid contract id hex")?;
+                                    if cid_bytes.len() != 32 {
+                                        return Err("Contract ID must be 32 bytes".into());
+                                    }
+                                    let mut cid_arr = [0u8; 32];
+                                    cid_arr.copy_from_slice(&cid_bytes);
+                                    let cid = baals::ContractId::from_bytes(&cid_arr);
+                                    let key_bytes = hex::decode(key_hex)
+                                        .map_err(|_| "Invalid storage key hex")?;
+                                    let value = runtime
+                                        .contract_storage_read(&cid, &key_bytes)?
+                                        .ok_or("Storage key not found")?;
+                                    let mut smt = baals::SparseMerkleTree::new();
+                                    let mut key_arr = [0u8; 32];
+                                    let copy_len = key_bytes.len().min(32);
+                                    key_arr[..copy_len].copy_from_slice(&key_bytes[..copy_len]);
+                                    smt.insert(key_arr, value.clone());
+                                    let proof = smt.generate_proof(key_arr);
+                                    Ok(serde_json::json!({
+                                        "root": hex::encode(proof.root),
+                                        "proof": proof.proof.iter().map(hex::encode).collect::<Vec<_>>(),
+                                        "key": hex::encode(proof.key),
+                                        "value_hex": hex::encode(&proof.value),
+                                    }))
+                                })();
+                            let body = match response_json {
+                                Ok(json) => json.to_string(),
+                                Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                            };
+                            let mut response =
+                                Response::from_string(body).with_status_code(StatusCode(200));
+                            if let Ok(header) = Header::from_bytes(
+                                b"Content-Type".as_slice(),
+                                b"application/json".as_slice(),
+                            ) {
+                                response = response.with_header(header);
+                            }
+                            let _ = request.respond(response);
+                        } else {
+                            let _ = request.respond(
+                                Response::from_string("Not Found")
+                                    .with_status_code(StatusCode(404)),
+                            );
                         }
                     } else {
                         let _ = request.respond(
@@ -555,6 +682,7 @@ fn handle_node(
             foreground_internal,
             peer,
             listen,
+            mdns: _mdns,
         } => {
             if daemon && !foreground_internal {
                 std::fs::create_dir_all(&data_dir)?;
@@ -622,6 +750,38 @@ fn handle_node(
 
             let runtime =
                 build_runtime(&data_dir, backend, cfg.consensus.block_time_ms, &peer, &listen)?;
+
+            #[cfg(feature = "mdns")]
+            if _mdns {
+                use baals::sync::discovery::MdnsDiscovery;
+                let key_path = data_dir.join("consensus.key");
+                let key_bytes = std::fs::read(&key_path)?;
+                if key_bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&key_bytes);
+                    let signing_key = SigningKey::from_bytes(&arr);
+                    let node_public_key = PublicKey::from(signing_key.verifying_key());
+                    let discovery = MdnsDiscovery::new(node_public_key, port)
+                        .map_err(|e| format!("mDNS discovery init: {}", e))?;
+                    discovery.start_announcing().map_err(|e| format!("mDNS announce: {}", e))?;
+                    if let Ok(discovered) = discovery.browse() {
+                        for (addr_str, peer_port) in discovered {
+                            let peer_addr = format!("{}:{}", addr_str, peer_port);
+                            let _ = runtime.add_peer(&peer_addr);
+                        }
+                    }
+                    std::thread::spawn(move || loop {
+                        std::thread::sleep(std::time::Duration::from_secs(30));
+                        if let Ok(discovered) = discovery.browse() {
+                            for (addr_str, peer_port) in discovered {
+                                let peer_addr = format!("{}:{}", addr_str, peer_port);
+                                let _ = runtime.add_peer(&peer_addr);
+                            }
+                        }
+                    });
+                }
+            }
+
             let health_bind = format!("0.0.0.0:{}", cfg.node.health_port);
             spawn_health_server(runtime.clone(), health_bind)?;
             info!("Node started. Press Ctrl+C to stop.");
@@ -1005,7 +1165,7 @@ fn handle_tx(
             cid_arr.copy_from_slice(&cid_bytes);
             let cid = ContractId::from_bytes(&cid_arr);
 
-            let arg_bytes = args.map(|a| a.into_bytes()).unwrap_or_default();
+            let arg_bytes = args.map(|a| vec![a.into_bytes()]).unwrap_or_default();
             let call_value = if value > 0 { Some(value) } else { None };
             let result = runtime
                 .call_contract(&sender_pk, &cid, &method, &arg_bytes, call_value, gas_limit)?;
@@ -1247,7 +1407,7 @@ fn handle_dev(
             Ok(text_or_json(json, &keys.join("\n"), serde_json::json!({"keys": keys})))
         }
         DevCommands::SimulateContract { wasm, method, args, sender, data_dir } => {
-            let _wasm_bytes = std::fs::read(&wasm)?;
+            let wasm_bytes = std::fs::read(&wasm)?;
             let storage = SledStorage::new(&data_dir)?;
             let engine = BaaLSContractEngine::new(storage.clone())?;
             let dummy_pk = sender
@@ -1255,18 +1415,53 @@ fn handle_dev(
                 .map(|s| parse_pubkey(s))
                 .unwrap_or_else(|| Ok(PublicKey::from_bytes(&[0u8; 32]).unwrap()))
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-            let cid = ContractId::from_bytes(&[0u8; 32]); // dummy for simulation
-            let arg_bytes = args.map(|a| a.into_bytes()).unwrap_or_default();
-            let result =
-                engine.call_contract(&dummy_pk, &cid, &method, &arg_bytes, None, &storage, 0, 0)?;
+            let cid = ContractId::from_bytes(&[0u8; 32]);
+            let arg_bytes = args.map(|a| vec![a.into_bytes()]).unwrap_or_default();
+
+            let gas_estimate = engine.estimate_gas(&wasm_bytes, &method, &arg_bytes).unwrap_or(0);
+
+            let start = std::time::Instant::now();
+            let (result, gas_used, events) = engine.execute_wasm_contract(
+                &wasm_bytes,
+                &method,
+                &arg_bytes,
+                &dummy_pk,
+                &cid,
+                &storage,
+                false,
+                1_000_000,
+                0,
+                0,
+            )?;
+            let exec_time = start.elapsed();
+
+            let events_count = events.len();
+            let state_changes = if !events.is_empty() {
+                format!("{} events emitted", events_count)
+            } else {
+                "no events emitted".to_string()
+            };
+
             Ok(text_or_json(
                 json,
                 &format!(
-                    "Result ({} bytes): {}",
+                    "Result ({} bytes): {}\nGas: {}/{} (est: {})\nTime: {:?}\nState: {}",
                     result.len(),
-                    String::from_utf8_lossy(&result[..result.len().min(64)])
+                    String::from_utf8_lossy(&result[..result.len().min(64)]),
+                    gas_used,
+                    1_000_000u64,
+                    gas_estimate,
+                    exec_time,
+                    state_changes
                 ),
-                serde_json::json!({"result_hex": hex::encode(&result)}),
+                serde_json::json!({
+                    "result_hex": hex::encode(&result),
+                    "result_len": result.len(),
+                    "gas_used": gas_used,
+                    "gas_estimate": gas_estimate,
+                    "execution_time_us": exec_time.as_micros(),
+                    "events_count": events_count,
+                }),
             ))
         }
         DevCommands::ValidateTx { file } => {

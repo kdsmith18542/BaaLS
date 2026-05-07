@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use wasmtime::{Caller, Config, Engine, Linker, Module, Store};
 
-type InterContractCall = (Vec<u8>, Vec<u8>, Vec<u8>, u64);
+type InterContractCall = (Vec<u8>, Vec<u8>, Vec<Vec<u8>>, u64);
 
 #[derive(Debug, Error)]
 pub enum ContractError {
@@ -62,7 +62,7 @@ pub trait ContractEngine: Send + Sync {
         caller: &PublicKey,
         contract_id: &ContractId,
         method_name: &str,
-        args: &[u8],
+        args: &[Vec<u8>],
         value: Option<u64>,
         storage: &dyn Storage,
         block_index: u64,
@@ -93,7 +93,7 @@ pub trait ContractEngine: Send + Sync {
         &self,
         contract_id: &ContractId,
         method_name: &str,
-        args: &[u8],
+        args: &[Vec<u8>],
         storage: &dyn Storage,
     ) -> Result<GasEstimate, ContractError>;
 
@@ -120,7 +120,7 @@ pub trait WasmRuntime: Send + Sync {
         &self,
         wasm_bytes: &[u8],
         method_name: &str,
-        args: &[u8],
+        args: &[Vec<u8>],
         caller: &PublicKey,
         contract_id: &ContractId,
         storage: &dyn Storage,
@@ -138,7 +138,7 @@ pub trait WasmRuntime: Send + Sync {
         &self,
         wasm_bytes: &[u8],
         method_name: &str,
-        args: &[u8],
+        args: &[Vec<u8>],
     ) -> Result<u64, ContractError>;
 }
 
@@ -242,6 +242,17 @@ impl ContractPermissions {
             revert: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractAbi {
+    pub methods: Vec<ContractMethod>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractMethod {
+    pub name: String,
+    pub arg_count: usize,
 }
 
 // ─── HostState: passed through wasmtime Caller ───
@@ -370,7 +381,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
         &self,
         wasm_bytes: &[u8],
         method_name: &str,
-        args: &[u8],
+        args: &[Vec<u8>],
         caller: &PublicKey,
         contract_id: &ContractId,
         storage: &dyn Storage,
@@ -383,6 +394,11 @@ impl<S: Storage> BaaLSContractEngine<S> {
             .map_err(|e| ContractError::InvalidWasm(e.to_string()))?;
 
         let engine = module.engine();
+
+        // Serialize multi-args to flat bytes for WASM
+        let serialized_args = bincode::serialize(args).map_err(|e| {
+            ContractError::ExecutionError(format!("Args serialization failed: {}", e))
+        })?;
 
         // Build host state
         let pre_existing_results = {
@@ -399,7 +415,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
             gas_limit,
             block_index,
             block_timestamp,
-            input_data: args.to_vec(),
+            input_data: serialized_args.clone(),
             reverted: false,
             events: Vec::new(),
             last_memory_size: 0,
@@ -439,11 +455,11 @@ impl<S: Storage> BaaLSContractEngine<S> {
             .get_memory(&mut store, "memory")
             .ok_or_else(|| ContractError::ExecutionError("Memory export not found".to_string()))?;
 
-        // Write args to WASM memory
-        let args_len = args.len() as i32;
+        // Write serialized args to WASM memory
+        let args_len = serialized_args.len() as i32;
         if args_len > 0 {
             memory
-                .write(&mut store, 0, args)
+                .write(&mut store, 0, &serialized_args)
                 .map_err(|e| ContractError::MemoryAccessError(e.to_string()))?;
         }
 
@@ -1019,7 +1035,9 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         return -1;
                     }
                     let native_value = if value < 0 { 0 } else { value as u64 };
-                    state.inter_contract_calls.push((callee, method, args, native_value));
+                    let parsed_args: Vec<Vec<u8>> =
+                        bincode::deserialize(&args).unwrap_or_else(|_| vec![args.to_vec()]);
+                    state.inter_contract_calls.push((callee, method, parsed_args, native_value));
                     state.inter_contract_calls.len() as i32 - 1
                 },
             )
@@ -1181,7 +1199,7 @@ impl<S: Storage> WasmRuntime for BaaLSContractEngine<S> {
         &self,
         wasm_bytes: &[u8],
         method_name: &str,
-        args: &[u8],
+        args: &[Vec<u8>],
         caller: &PublicKey,
         contract_id: &ContractId,
         storage: &dyn Storage,
@@ -1215,7 +1233,7 @@ impl<S: Storage> WasmRuntime for BaaLSContractEngine<S> {
         &self,
         wasm_bytes: &[u8],
         _method_name: &str,
-        _args: &[u8],
+        _args: &[Vec<u8>],
     ) -> Result<u64, ContractError> {
         // Base cost + bytecode size proportional cost
         Ok(21_000 + (wasm_bytes.len() as u64 / 100))
@@ -1260,6 +1278,14 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         // Deep WASM validation
         Self::validate_wasm_module(&module)?;
 
+        // Validate that contract exports at least one function
+        let has_exports = module.exports().any(|e| matches!(e.ty(), wasmtime::ExternType::Func(_)));
+        if !has_exports {
+            return Err(ContractError::BytecodeValidationFailed(
+                "Contract must export at least one function".to_string(),
+            ));
+        }
+
         // Generate contract ID from deployer + deployer_nonce + WASM hash + init_payload
         let mut hasher = Sha256::new();
         hasher.update(deployer.to_bytes());
@@ -1274,6 +1300,11 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         // Store contract code
         storage.put_contract_code(&contract_id, wasm_bytes).map_err(ContractError::StorageError)?;
 
+        // Store deployer address
+        storage
+            .put_contract_deployer(&contract_id, deployer)
+            .map_err(ContractError::StorageError)?;
+
         // If init_payload is provided, call the contract's init/instantiate function
         if let Some(payload) = init_payload {
             if !payload.is_empty() {
@@ -1282,10 +1313,11 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
                     hex::encode(contract_id.to_bytes()),
                     payload.len()
                 );
+                let init_args = [payload.to_vec()];
                 match self.execute_wasm_contract(
                     wasm_bytes,
                     "init",
-                    payload,
+                    &init_args,
                     deployer,
                     &contract_id,
                     storage,
@@ -1316,7 +1348,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         caller: &PublicKey,
         contract_id: &ContractId,
         method_name: &str,
-        args: &[u8],
+        args: &[Vec<u8>],
         value: Option<u64>,
         storage: &dyn Storage,
         block_index: u64,
@@ -1356,6 +1388,34 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
                     hex::encode(contract_id.to_bytes())
                 ))
             })?;
+
+        // Check deployer — log warning if caller is not the deployer
+        if let Ok(Some(deployer)) = storage.get_contract_deployer(contract_id) {
+            if deployer != *caller {
+                warn!(
+                    "[CONTRACTS] Caller {} is not the deployer of contract {}",
+                    hex::encode(caller.to_bytes()),
+                    hex::encode(contract_id.to_bytes())
+                );
+            }
+        }
+
+        // Validate that the requested method exists as a module export
+        {
+            let module = wasmtime::Module::new(&self.wasm_engine, &wasm_bytes)
+                .map_err(|e| ContractError::InvalidWasm(e.to_string()))?;
+            let has_export = module.exports().any(|e| {
+                e.name() == method_name
+                    || e.name() == format!("_{}", method_name)
+                    || e.name() == "main"
+            });
+            if !has_export {
+                return Err(ContractError::ExecutionError(format!(
+                    "Method '{}' not found in contract exports",
+                    method_name
+                )));
+            }
+        }
 
         let _ = value; // value transfer handled by ledger
 
@@ -1417,10 +1477,21 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         let dummy_caller = PublicKey::from_bytes(&[0; 32])
             .map_err(|_| ContractError::ExecutionError("Invalid dummy key".to_string()))?;
 
+        if let Ok(Some(deployer)) = storage.get_contract_deployer(contract_id) {
+            if deployer != dummy_caller {
+                warn!(
+                    "[CONTRACTS] Query caller {} is not the deployer of contract {}",
+                    hex::encode(dummy_caller.to_bytes()),
+                    hex::encode(contract_id.to_bytes())
+                );
+            }
+        }
+
+        let args = [payload.to_vec()];
         let (result, _, _) = self.execute_wasm_contract(
             &wasm_bytes,
             method_name,
-            payload,
+            &args,
             &dummy_caller,
             contract_id,
             storage,
@@ -1446,7 +1517,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         &self,
         contract_id: &ContractId,
         method_name: &str,
-        args: &[u8],
+        args: &[Vec<u8>],
         storage: &dyn Storage,
     ) -> Result<GasEstimate, ContractError> {
         let wasm_bytes = match storage.get_contract_code(contract_id) {

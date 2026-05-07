@@ -915,7 +915,41 @@ impl SyncLayer for CustomSync {
                     ));
                 }
 
-                // Peer is ahead: request the latest block
+                if height > local_chain_state.latest_block_index + 1 {
+                    Self::send_message(
+                        &mut stream,
+                        NetworkMessage::GetBlocks {
+                            from_height: local_chain_state.latest_block_index + 1,
+                            to_height: height,
+                        },
+                    )
+                    .await?;
+                    let blocks_response = Self::receive_message(&mut stream).await?;
+                    match blocks_response {
+                        NetworkMessage::BlocksResponse { blocks } => {
+                            for block in &blocks {
+                                let mut cache = self.block_cache.lock().await;
+                                cache.insert(block.hash, block.clone());
+                                drop(cache);
+                            }
+                            let mut recv = self.received_blocks.lock().await;
+                            recv.extend(blocks.clone());
+                            if let Some(last) = blocks.last() {
+                                return Ok(last.clone());
+                            }
+                            return Err(SyncError::SynchronizationError(
+                                "Empty blocks response".to_string(),
+                            ));
+                        }
+                        _ => {
+                            return Err(SyncError::SynchronizationError(
+                                "Unexpected response for GetBlocks".to_string(),
+                            ));
+                        }
+                    }
+                }
+
+                // Peer is ahead by exactly 1: request the latest block
                 Self::send_message(
                     &mut stream,
                     NetworkMessage::RequestBlock { hash: latest_block_hash },
@@ -1017,6 +1051,74 @@ impl SyncLayer for CustomSync {
                 let _ = tx.send(true);
                 log::info!("P2P listener shutdown signal sent");
             }
+        }
+    }
+}
+
+#[cfg(feature = "mdns")]
+pub mod discovery {
+    use super::*;
+    use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+    use std::collections::HashSet;
+
+    pub struct MdnsDiscovery {
+        daemon: ServiceDaemon,
+        service_name: String,
+        listen_port: u16,
+        node_id: PublicKey,
+    }
+
+    impl MdnsDiscovery {
+        pub fn new(node_id: PublicKey, listen_port: u16) -> Result<Self, SyncError> {
+            let daemon = ServiceDaemon::new()
+                .map_err(|e| SyncError::NetworkError(format!("mDNS daemon: {}", e)))?;
+            Ok(Self {
+                daemon,
+                service_name: "_baals._tcp.local.".to_string(),
+                listen_port,
+                node_id,
+            })
+        }
+
+        pub fn start_announcing(&self) -> Result<(), SyncError> {
+            let node_id_hex = hex::encode(self.node_id.to_bytes());
+            let service_info = ServiceInfo::new(
+                &self.service_name,
+                &node_id_hex,
+                "",
+                self.listen_port,
+                &[("node_id", node_id_hex.as_str())],
+            )
+            .map_err(|e| SyncError::NetworkError(format!("mDNS register: {}", e)))?;
+            self.daemon
+                .register(service_info)
+                .map_err(|e| SyncError::NetworkError(format!("mDNS register: {}", e)))?;
+            log::info!("mDNS: announcing BaaLS node {} on port {}", node_id_hex, self.listen_port);
+            Ok(())
+        }
+
+        pub fn browse(&self) -> Result<Vec<(String, u16)>, SyncError> {
+            let receiver = self
+                .daemon
+                .browse(&self.service_name)
+                .map_err(|e| SyncError::NetworkError(format!("mDNS browse: {}", e)))?;
+            let mut discovered = HashSet::new();
+            loop {
+                match receiver.recv_timeout(std::time::Duration::from_millis(500)) {
+                    Ok(event) => match event {
+                        ServiceEvent::ServiceResolved(info) => {
+                            let addr =
+                                info.get_addresses().iter().next().cloned().unwrap_or_default();
+                            let port = info.get_port();
+                            discovered.insert((addr, port));
+                        }
+                        ServiceEvent::SearchStarted(_) => {}
+                        _ => break,
+                    },
+                    Err(_) => break,
+                }
+            }
+            Ok(discovered.into_iter().collect())
         }
     }
 }

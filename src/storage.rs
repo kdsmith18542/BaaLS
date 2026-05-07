@@ -129,6 +129,16 @@ pub trait Storage: Send + Sync {
         contract_id: &ContractId,
     ) -> Result<Vec<Vec<u8>>, StorageError>;
 
+    fn put_contract_deployer(
+        &self,
+        contract_id: &ContractId,
+        deployer: &PublicKey,
+    ) -> Result<(), StorageError>;
+    fn get_contract_deployer(
+        &self,
+        contract_id: &ContractId,
+    ) -> Result<Option<PublicKey>, StorageError>;
+
     // Atomic Batching for Block Application
     fn apply_batch(&self, batch: StorageBatch) -> Result<(), StorageError>;
 
@@ -225,7 +235,77 @@ impl SledStorage {
         // Recover any pending batches from previous crash
         storage.recover_pending_batches()?;
 
+        // Migrate keys from old format (raw bytes) to prefixed format (hash:/acc:/code:)
+        storage.migrate_key_prefixes()?;
+
+        // Recover from interrupted compaction
+        storage.recover_compaction()?;
+
         Ok(storage)
+    }
+
+    fn migrate_key_prefixes(&self) -> Result<(), StorageError> {
+        // Migrate blocks_tree: raw 32-byte hash -> "hash:{32bytehash}"
+        if let Some(Ok((first_key, _))) = self.blocks_tree.iter().next() {
+            if first_key.len() == 32 {
+                let entries: Vec<(Vec<u8>, Vec<u8>)> = self
+                    .blocks_tree
+                    .iter()
+                    .filter_map(|r| r.ok())
+                    .filter(|(k, _)| k.len() == 32)
+                    .map(|(k, v)| (k.to_vec(), v.to_vec()))
+                    .collect();
+                self.blocks_tree.clear()?;
+                for (old_key, value) in &entries {
+                    let mut new_key = b"hash:".to_vec();
+                    new_key.extend_from_slice(old_key);
+                    self.blocks_tree.insert(new_key, value.as_slice())?;
+                }
+                self.blocks_tree.flush()?;
+            }
+        }
+
+        // Migrate accounts_tree: raw 32-byte address -> "acc:{32byteaddr}"
+        if let Some(Ok((first_key, _))) = self.accounts_tree.iter().next() {
+            if first_key.len() == 32 {
+                let entries: Vec<(Vec<u8>, Vec<u8>)> = self
+                    .accounts_tree
+                    .iter()
+                    .filter_map(|r| r.ok())
+                    .filter(|(k, _)| k.len() == 32)
+                    .map(|(k, v)| (k.to_vec(), v.to_vec()))
+                    .collect();
+                self.accounts_tree.clear()?;
+                for (old_key, value) in &entries {
+                    let mut new_key = b"acc:".to_vec();
+                    new_key.extend_from_slice(old_key);
+                    self.accounts_tree.insert(new_key, value.as_slice())?;
+                }
+                self.accounts_tree.flush()?;
+            }
+        }
+
+        // Migrate contract_code_tree: raw 32-byte id -> "code:{32byteid}"
+        if let Some(Ok((first_key, _))) = self.contract_code_tree.iter().next() {
+            if first_key.len() == 32 {
+                let entries: Vec<(Vec<u8>, Vec<u8>)> = self
+                    .contract_code_tree
+                    .iter()
+                    .filter_map(|r| r.ok())
+                    .filter(|(k, _)| k.len() == 32)
+                    .map(|(k, v)| (k.to_vec(), v.to_vec()))
+                    .collect();
+                self.contract_code_tree.clear()?;
+                for (old_key, value) in &entries {
+                    let mut new_key = b"code:".to_vec();
+                    new_key.extend_from_slice(old_key);
+                    self.contract_code_tree.insert(new_key, value.as_slice())?;
+                }
+                self.contract_code_tree.flush()?;
+            }
+        }
+
+        Ok(())
     }
 
     fn recover_pending_batches(&self) -> Result<(), StorageError> {
@@ -249,23 +329,31 @@ impl SledStorage {
     fn apply_batch_without_wal(&self, batch: StorageBatch) -> Result<(), StorageError> {
         for op in batch.ops {
             match op {
-                StorageOperation::PutBlock(key, value) => {
-                    self.blocks_tree.insert(key, value)?;
+                StorageOperation::PutBlock(_, value) => {
+                    if let Ok(block) = bincode::deserialize::<Block>(&value) {
+                        self.put_block(&block)?;
+                    }
                 }
                 StorageOperation::PutAccount(key, value) => {
-                    self.accounts_tree.insert(key, value)?;
+                    let mut prefixed_key = b"acc:".to_vec();
+                    prefixed_key.extend_from_slice(&key);
+                    self.accounts_tree.insert(prefixed_key, value)?;
                 }
                 StorageOperation::PutChainState(key, value) => {
                     self.chain_state_tree.insert(key, value)?;
                 }
-                StorageOperation::PutTransaction(key, value) => {
-                    self.transactions_tree.insert(key, value)?;
+                StorageOperation::PutTransaction(_key, value) => {
+                    if let Ok(tx) = bincode::deserialize::<Transaction>(&value) {
+                        self.put_transaction(&tx)?;
+                    }
                 }
                 StorageOperation::PutTxIndex(key, value) => {
                     self.tx_by_block_tree.insert(key, value)?;
                 }
                 StorageOperation::PutContractCode(key, value) => {
-                    self.contract_code_tree.insert(key, value)?;
+                    let mut prefixed_key = b"code:".to_vec();
+                    prefixed_key.extend_from_slice(&key);
+                    self.contract_code_tree.insert(prefixed_key, value)?;
                 }
                 StorageOperation::PutContractStorage(key, value) => {
                     self.contract_storage_tree.insert(key, value)?;
@@ -332,6 +420,48 @@ impl SledStorage {
         self.tx_count_tree.insert(key.as_bytes(), new_count.to_string().as_bytes())?;
         Ok(())
     }
+
+    fn compact_tree(tree: &sled::Tree) -> Result<(), StorageError> {
+        let mut entries = std::collections::BTreeMap::<Vec<u8>, Vec<u8>>::new();
+        for item in tree.iter() {
+            let (key, value) = item?;
+            entries.insert(key.to_vec(), value.to_vec());
+        }
+        tree.clear()?;
+        for (key, value) in entries {
+            tree.insert(key, value)?;
+        }
+        tree.flush()?;
+        Ok(())
+    }
+
+    fn recover_compaction(&self) -> Result<(), StorageError> {
+        if self.db.get("compaction_in_progress")?.is_none() {
+            return Ok(());
+        }
+
+        log::warn!("Detected incomplete compaction, recovering...");
+
+        Self::compact_tree(&self.blocks_tree)?;
+        Self::compact_tree(&self.transactions_tree)?;
+        Self::compact_tree(&self.mempool_tree)?;
+        Self::compact_tree(&self.accounts_tree)?;
+        Self::compact_tree(&self.contract_code_tree)?;
+        Self::compact_tree(&self.contract_storage_tree)?;
+        Self::compact_tree(&self.chain_state_tree)?;
+        Self::compact_tree(&self.tx_by_block_tree)?;
+        Self::compact_tree(&self.tx_to_block_tree)?;
+        Self::compact_tree(&self.height_to_block_tree)?;
+        Self::compact_tree(&self.address_to_tx_tree)?;
+        Self::compact_tree(&self.contract_to_tx_tree)?;
+        Self::compact_tree(&self.tx_count_tree)?;
+
+        self.db.remove("compaction_in_progress")?;
+        self.db.flush()?;
+
+        log::info!("Compaction recovery completed");
+        Ok(())
+    }
 }
 
 impl Clone for SledStorage {
@@ -362,13 +492,17 @@ impl Storage for SledStorage {
         let block_height = block.index;
         let encoded = bincode::serialize(block)?;
 
-        self.blocks_tree.insert(block_hash, encoded.clone())?;
+        let mut key = b"hash:".to_vec();
+        key.extend_from_slice(&block_hash);
+        self.blocks_tree.insert(key, encoded.clone())?;
         self.blocks_tree.insert(format!("height:{:0>20}", block_height).as_bytes(), encoded)?;
         Ok(())
     }
 
     fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>, StorageError> {
-        let encoded = self.blocks_tree.get(hash)?;
+        let mut key = b"hash:".to_vec();
+        key.extend_from_slice(hash);
+        let encoded = self.blocks_tree.get(key)?;
         Ok(encoded.map(|e| bincode::deserialize(&e)).transpose()?)
     }
 
@@ -611,32 +745,40 @@ impl Storage for SledStorage {
 
     fn put_account(&self, address: &PublicKey, account: &Account) -> Result<(), StorageError> {
         let encoded = bincode::serialize(account)?;
-        self.accounts_tree.insert(address.to_bytes(), encoded)?;
+        let mut key = b"acc:".to_vec();
+        key.extend_from_slice(&address.to_bytes());
+        self.accounts_tree.insert(key, encoded)?;
         self.accounts_tree.flush()?;
         Ok(())
     }
 
     fn get_account(&self, address: &PublicKey) -> Result<Option<Account>, StorageError> {
-        let encoded = self.accounts_tree.get(address.to_bytes())?;
+        let mut key = b"acc:".to_vec();
+        key.extend_from_slice(&address.to_bytes());
+        let encoded = self.accounts_tree.get(key)?;
         Ok(encoded.map(|e| bincode::deserialize(&e)).transpose()?)
     }
 
     fn delete_account(&self, address: &PublicKey) -> Result<(), StorageError> {
-        self.accounts_tree.remove(address.to_bytes())?;
+        let mut key = b"acc:".to_vec();
+        key.extend_from_slice(&address.to_bytes());
+        self.accounts_tree.remove(key)?;
         Ok(())
     }
 
     fn get_all_accounts(&self) -> Result<Vec<(PublicKey, Account)>, StorageError> {
         let mut accounts = Vec::new();
-        for item in self.accounts_tree.iter() {
+        for item in self.accounts_tree.scan_prefix("acc:") {
             let (key, value) = item?;
-            let pk = PublicKey::from_bytes(
-                &key.as_ref()
+            let key_bytes = key.as_ref();
+            if key_bytes.len() > 4 {
+                let addr_bytes: [u8; 32] = key_bytes[4..]
                     .try_into()
-                    .map_err(|_| StorageError::Crypto(CryptoError::InvalidPublicKey))?,
-            )?;
-            let account: Account = bincode::deserialize(&value)?;
-            accounts.push((pk, account));
+                    .map_err(|_| StorageError::Crypto(CryptoError::InvalidPublicKey))?;
+                let pk = PublicKey::from_bytes(&addr_bytes)?;
+                let account: Account = bincode::deserialize(&value)?;
+                accounts.push((pk, account));
+            }
         }
         Ok(accounts)
     }
@@ -661,12 +803,16 @@ impl Storage for SledStorage {
         contract_id: &ContractId,
         wasm_bytes: &[u8],
     ) -> Result<(), StorageError> {
-        self.contract_code_tree.insert(contract_id.id, wasm_bytes)?;
+        let mut key = b"code:".to_vec();
+        key.extend_from_slice(&contract_id.id);
+        self.contract_code_tree.insert(key, wasm_bytes)?;
         Ok(())
     }
 
     fn get_contract_code(&self, contract_id: &ContractId) -> Result<Option<Vec<u8>>, StorageError> {
-        let encoded = self.contract_code_tree.get(contract_id.id)?;
+        let mut key = b"code:".to_vec();
+        key.extend_from_slice(&contract_id.id);
+        let encoded = self.contract_code_tree.get(key)?;
         Ok(encoded.map(|e| e.to_vec()))
     }
 
@@ -764,6 +910,28 @@ impl Storage for SledStorage {
         Ok(keys)
     }
 
+    fn put_contract_deployer(
+        &self,
+        contract_id: &ContractId,
+        deployer: &PublicKey,
+    ) -> Result<(), StorageError> {
+        let mut key = b"deployer:".to_vec();
+        key.extend_from_slice(&contract_id.id);
+        let encoded = bincode::serialize(deployer)?;
+        self.contract_code_tree.insert(key, encoded)?;
+        Ok(())
+    }
+
+    fn get_contract_deployer(
+        &self,
+        contract_id: &ContractId,
+    ) -> Result<Option<PublicKey>, StorageError> {
+        let mut key = b"deployer:".to_vec();
+        key.extend_from_slice(&contract_id.id);
+        let encoded = self.contract_code_tree.get(key)?;
+        Ok(encoded.map(|e| bincode::deserialize(&e)).transpose()?)
+    }
+
     fn apply_batch(&self, batch: StorageBatch) -> Result<(), StorageError> {
         // Write-ahead log for crash recovery
         let batch_id = format!(
@@ -787,19 +955,28 @@ impl Storage for SledStorage {
 
     // New: Performance and maintenance methods
     fn compact(&self) -> Result<(), StorageError> {
-        // Flush all trees to ensure durability and trigger sled cleanup
-        self.blocks_tree.flush()?;
-        self.transactions_tree.flush()?;
-        self.mempool_tree.flush()?;
-        self.accounts_tree.flush()?;
-        self.chain_state_tree.flush()?;
-        self.contract_code_tree.flush()?;
-        self.contract_storage_tree.flush()?;
-        self.height_to_block_tree.flush()?;
-        self.tx_by_block_tree.flush()?;
-        self.address_to_tx_tree.flush()?;
-        self.contract_to_tx_tree.flush()?;
-        self.tx_count_tree.flush()?;
+        // Write crash-recovery marker
+        self.db.insert("compaction_in_progress", b"1")?;
+        self.db.flush()?;
+
+        Self::compact_tree(&self.blocks_tree)?;
+        Self::compact_tree(&self.transactions_tree)?;
+        Self::compact_tree(&self.mempool_tree)?;
+        Self::compact_tree(&self.accounts_tree)?;
+        Self::compact_tree(&self.contract_code_tree)?;
+        Self::compact_tree(&self.contract_storage_tree)?;
+        Self::compact_tree(&self.chain_state_tree)?;
+        Self::compact_tree(&self.tx_by_block_tree)?;
+        Self::compact_tree(&self.tx_to_block_tree)?;
+        Self::compact_tree(&self.height_to_block_tree)?;
+        Self::compact_tree(&self.address_to_tx_tree)?;
+        Self::compact_tree(&self.contract_to_tx_tree)?;
+        Self::compact_tree(&self.tx_count_tree)?;
+
+        // Remove crash-recovery marker
+        self.db.remove("compaction_in_progress")?;
+        self.db.flush()?;
+
         Ok(())
     }
 

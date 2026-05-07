@@ -174,6 +174,19 @@ impl Storage for AnyStorage {
     ) -> Result<Vec<Vec<u8>>, StorageError> {
         dispatch!(self, get_all_contract_storage_keys, contract_id)
     }
+    fn put_contract_deployer(
+        &self,
+        contract_id: &ContractId,
+        deployer: &PublicKey,
+    ) -> Result<(), StorageError> {
+        dispatch!(self, put_contract_deployer, contract_id, deployer)
+    }
+    fn get_contract_deployer(
+        &self,
+        contract_id: &ContractId,
+    ) -> Result<Option<PublicKey>, StorageError> {
+        dispatch!(self, get_contract_deployer, contract_id)
+    }
     fn apply_batch(&self, batch: StorageBatch) -> Result<(), StorageError> {
         dispatch!(self, apply_batch, batch)
     }

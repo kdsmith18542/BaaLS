@@ -102,17 +102,9 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             total_supply: 0,             // No native token for now
         };
 
-        let mut batch = StorageBatch::default();
-        batch.ops.push(StorageOperation::PutBlock(
-            bincode::serialize(&genesis_block.hash)?,
-            bincode::serialize(&genesis_block)?,
-        ));
-        batch.ops.push(StorageOperation::PutChainState(
-            "global:current".as_bytes().to_vec(),
-            bincode::serialize(&initial_chain_state)?,
-        ));
-
-        self.storage.apply_batch(batch)?;
+        // Use put_block for proper indexing (hash: + height: keys)
+        self.storage.put_block(&genesis_block)?;
+        self.storage.put_chain_state(&initial_chain_state)?;
         debug!(
             "Chain initialized with genesis block: {}",
             crate::types::format_hex(&genesis_block.hash)
@@ -487,7 +479,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                             &tx.sender,
                             contract_id,
                             method,
-                            args,
+                            args.as_slice(),
                             *value,
                             &*self.storage,
                             block.index,
@@ -603,17 +595,13 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             bincode::serialize(current_chain_state)?,
         ));
 
-        // Store the block itself
-        batch
-            .ops
-            .push(StorageOperation::PutBlock(block.hash.to_vec(), bincode::serialize(&block)?));
+        // Store the block with proper prefix indexing
+        self.storage.put_block(&block)?;
 
         // Store transactions and index them by block hash
         for (i, tx) in block.transactions.iter().enumerate() {
             // Store the transaction
-            batch
-                .ops
-                .push(StorageOperation::PutTransaction(tx.hash.to_vec(), bincode::serialize(tx)?));
+            self.storage.put_transaction(tx)?;
             // Index the transaction by block (add to batch)
             let index_key =
                 format!("block_tx:{}:{}:{:0>10}", hex::encode(block.hash), hex::encode(tx.hash), i);

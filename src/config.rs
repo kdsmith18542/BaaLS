@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -86,6 +86,10 @@ pub struct LoggingConfig {
     pub file: String,
     #[serde(default = "default_json_format")]
     pub json_format: bool,
+    #[serde(default = "default_log_max_size_mb")]
+    pub log_max_size_mb: u64,
+    #[serde(default = "default_log_max_files")]
+    pub log_max_files: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +143,12 @@ fn default_log_file() -> String {
 fn default_json_format() -> bool {
     false
 }
+fn default_log_max_size_mb() -> u64 {
+    100
+}
+fn default_log_max_files() -> u32 {
+    5
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -172,6 +182,8 @@ impl Default for Config {
                 level: default_log_level(),
                 file: default_log_file(),
                 json_format: default_json_format(),
+                log_max_size_mb: default_log_max_size_mb(),
+                log_max_files: default_log_max_files(),
             },
         }
     }
@@ -269,6 +281,21 @@ impl Config {
                 self.validate()?;
             }
             "logging.file" => self.logging.file = value.to_string(),
+            "logging.json_format" => {
+                self.logging.json_format = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid json_format (true/false)".into()))?
+            }
+            "logging.log_max_size_mb" => {
+                self.logging.log_max_size_mb = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid log_max_size_mb".into()))?
+            }
+            "logging.log_max_files" => {
+                self.logging.log_max_files = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid log_max_files".into()))?
+            }
             "storage.cache_size_mb" => {
                 self.storage.cache_size_mb = value
                     .parse()
@@ -310,10 +337,22 @@ impl Config {
 /// If `config.logging.json_format` is true, each log line is emitted as:
 /// `{"timestamp":"...","level":"...","module":"...","message":"..."}`
 ///
+/// If `config.logging.log_max_size_mb > 0`, a rotating file logger writes to
+/// `config.logging.file`, rotating files when the size limit is reached.
+///
 /// If a logger is already initialized, this call is a no-op.
-pub fn setup_logging(config: &Config, default_level: &str) -> Result<(), ConfigError> {
-    let mut builder =
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level));
+pub fn setup_logging(config: &Config, _default_level: &str) -> Result<(), ConfigError> {
+    let level_filter = match config.logging.level.as_str() {
+        "trace" => log::LevelFilter::Trace,
+        "debug" => log::LevelFilter::Debug,
+        "info" => log::LevelFilter::Info,
+        "warn" => log::LevelFilter::Warn,
+        "error" => log::LevelFilter::Error,
+        _ => log::LevelFilter::Info,
+    };
+
+    let mut builder = env_logger::Builder::new();
+    builder.filter_level(level_filter);
 
     if config.logging.json_format {
         builder.format(|buf, record| {
@@ -334,9 +373,67 @@ pub fn setup_logging(config: &Config, default_level: &str) -> Result<(), ConfigE
         builder.format_timestamp_secs();
     }
 
-    // Ignore "already initialized" errors
+    if config.logging.log_max_size_mb > 0 && !config.logging.file.is_empty() {
+        let log_path = PathBuf::from(&config.logging.file);
+        let max_size = config.logging.log_max_size_mb * 1024 * 1024;
+        let max_files = config.logging.log_max_files;
+        let writer = RotatingFileWriter::new(log_path, max_size, max_files)
+            .map_err(|e| ConfigError::Invalid(format!("Failed to open log file: {}", e)))?;
+        builder.target(env_logger::Target::Pipe(Box::new(writer)));
+    }
+
     let _ = builder.try_init();
     Ok(())
+}
+
+struct RotatingFileWriter {
+    file: std::fs::File,
+    path: PathBuf,
+    max_size: u64,
+    max_files: u32,
+}
+
+impl RotatingFileWriter {
+    fn new(path: PathBuf, max_size: u64, max_files: u32) -> std::io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        Ok(Self { file, path, max_size, max_files })
+    }
+
+    fn maybe_rotate(&mut self) -> std::io::Result<()> {
+        if self.max_size == 0 {
+            return Ok(());
+        }
+        let current_size = self.file.metadata()?.len();
+        if current_size >= self.max_size {
+            for i in (1..self.max_files).rev() {
+                let from = self.path.with_extension(format!("{}.log", i));
+                let to = self.path.with_extension(format!("{}.log", i + 1));
+                if from.exists() {
+                    let _ = std::fs::rename(&from, &to);
+                }
+            }
+            let backup = self.path.with_extension("1.log");
+            let _ = std::fs::rename(&self.path, &backup);
+            self.file = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::io::Write for RotatingFileWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.file.write(buf)?;
+        let _ = self.file.flush();
+        self.maybe_rotate()?;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
 }
 
 pub fn format_for_logging(config: &LoggingConfig) -> LogFormat {

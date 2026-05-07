@@ -2113,3 +2113,95 @@ fn test_p2p_storage_backed_block_serving() {
     rt_a.stop().unwrap();
     info!("[SYNC-TEST] Storage-backed block serving test passed");
 }
+
+#[test]
+fn test_sdk_basic_operations() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let data_dir = temp_dir.path().to_path_buf();
+
+    let sdk = BaaLSSdk::new(data_dir.clone()).unwrap();
+    sdk.start().unwrap();
+
+    // Create an account
+    let sk = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let pk = PublicKey::from(sk.verifying_key());
+    sdk.create_account(&pk, Account::Wallet { balance: 1000, nonce: 0 }).unwrap();
+
+    // Verify account via get_account
+    let acc = sdk.get_account(&pk).unwrap().unwrap();
+    assert_eq!(acc.balance(), 1000);
+
+    // Check chain state exists
+    let state = sdk.get_chain_state().unwrap();
+    assert_eq!(state.latest_block_index, 0);
+
+    // Submit a transaction and produce a block
+    let mut tx = Transaction {
+        hash: [0u8; 32],
+        sender: pk,
+        recipient: Address::Wallet(pk),
+        payload: TransactionPayload::Transfer { amount: 50 },
+        nonce: 1,
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+        gas_limit: 100_000,
+        priority: 0,
+        metadata: None,
+    };
+    tx.hash = tx.calculate_hash().unwrap();
+    tx.sign(&sk).unwrap();
+    sdk.submit_transaction(tx).unwrap();
+
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    tokio_rt.block_on(sdk.produce_block()).unwrap();
+
+    let state2 = sdk.get_chain_state().unwrap();
+    assert_eq!(state2.latest_block_index, 1);
+
+    let block = sdk.get_block_by_height(1).unwrap().unwrap();
+    assert_eq!(block.transactions.len(), 1);
+
+    sdk.stop().unwrap();
+}
+
+#[test]
+fn test_backup_and_restore() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let data_dir = temp_dir.path().join("data");
+    let backup_dir = temp_dir.path().join("backup");
+
+    let storage = SledStorage::new(&data_dir).unwrap();
+
+    // Create a test account and block
+    let pk = PublicKey::from_bytes(&[1u8; 32]).unwrap();
+    storage.put_account(&pk, &Account::Wallet { balance: 500, nonce: 0 }).unwrap();
+
+    let genesis = Block {
+        index: 0,
+        timestamp: 0,
+        prev_hash: [0; 32],
+        hash: [0; 32],
+        nonce: 0,
+        transactions: vec![],
+        metadata: None,
+    };
+    let mut genesis = genesis;
+    genesis.hash = genesis.calculate_hash().unwrap();
+    storage.put_block(&genesis).unwrap();
+
+    // Backup
+    storage.backup_to(&backup_dir).unwrap();
+
+    // Verify backup by restoring to a new storage
+    let restore_dir = temp_dir.path().join("restore");
+    let restored = SledStorage::new(&restore_dir).unwrap();
+    restored.restore_from(&backup_dir).unwrap();
+
+    assert_eq!(restored.get_account(&pk).unwrap().unwrap().balance(), 500);
+    assert!(restored.get_block_by_height(0).unwrap().is_some());
+}

@@ -1,6 +1,7 @@
 # Rust
 /target/
 **/*.rs.bk
+sdk/nodejs-native/target/
 
 # IDEs and editors
 .idea/
@@ -29,4 +30,5 @@ Thumbs.db
 *.tmp
 *.temp
 main_rs_errors.txt
-plan_remaining.md 
+plan_remaining.md
+plan.md 

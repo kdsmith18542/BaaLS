@@ -1098,7 +1098,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         caller: &PublicKey,
         contract_id: &ContractId,
         method_name: &str,
-        args: &[u8],
+        args: &[Vec<u8>],
         value: Option<u64>,
         _gas_limit: u64,
     ) -> Result<Vec<u8>, RuntimeError> {

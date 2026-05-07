@@ -40,7 +40,7 @@ impl BaaLSSdk {
         rand::rng().fill_bytes(&mut secret);
         let signing_key = SigningKey::from_bytes(&secret);
         let test_key = PublicKey::from(signing_key.verifying_key());
-        let consensus = PoAConsensus::new(test_key, 1000);
+        let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(signing_key);
         let contract_engine = BaaLSContractEngine::new(storage.clone())?;
         let sync_layer = NoopSync;
 
@@ -60,7 +60,7 @@ impl BaaLSSdk {
         rand::rng().fill_bytes(&mut secret);
         let signing_key = SigningKey::from_bytes(&secret);
         let test_key = PublicKey::from(signing_key.verifying_key());
-        let consensus = PoAConsensus::new(test_key, 1000);
+        let consensus = PoAConsensus::new(test_key, 1000).with_signing_key(signing_key);
         let contract_engine = BaaLSContractEngine::new(storage.clone())?;
         let sync_layer = NoopSync;
 
@@ -184,7 +184,7 @@ impl BaaLSSdk {
         caller: &PublicKey,
         contract_id: &ContractId,
         method_name: &str,
-        args: &[u8],
+        args: &[Vec<u8>],
         value: Option<u64>,
     ) -> Result<Vec<u8>, SdkError> {
         let result = self.runtime.contract_engine().call_contract(

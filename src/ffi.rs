@@ -257,10 +257,15 @@ pub unsafe extern "C" fn baals_sdk_call_contract(
     let cid = ContractId::from_bytes(&cid_arr);
 
     let method_str = unsafe { CStr::from_ptr(method) }.to_string_lossy().to_string();
-    let args = unsafe { std::slice::from_raw_parts(args_ptr, args_len as usize) };
+    let args_bytes = unsafe { std::slice::from_raw_parts(args_ptr, args_len as usize) };
+    let args: Vec<Vec<u8>> = if args_bytes.is_empty() {
+        Vec::new()
+    } else {
+        bincode::deserialize(args_bytes).unwrap_or_else(|_| vec![args_bytes.to_vec()])
+    };
 
     unsafe {
-        with_sdk(|s| s.call_contract(&caller, &cid, &method_str, args, Some(value)))
+        with_sdk(|s| s.call_contract(&caller, &cid, &method_str, &args, Some(value)))
             .map(|result| json_or_null(&serde_json::json!({"result_hex": hex::encode(&result)})))
             .unwrap_or(ptr::null_mut())
     }

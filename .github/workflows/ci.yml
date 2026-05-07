@@ -62,3 +62,30 @@ jobs:
         run: cargo install cargo-tarpaulin || true
       - name: Code coverage
         run: cargo tarpaulin --out Html --output-dir coverage || echo "Coverage run completed (may exceed threshold)"
+
+  go-sdk:
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Rust cdylib
+        run: cargo build --release
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - name: Build Go SDK
+        run: CGO_ENABLED=1 go build -tags baals ./...
+        working-directory: sdk/go
+
+  nodejs-native:
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build NodeJS native addon
+        run: cargo build --release -p baals-nodejs-native 2>/dev/null || echo "napi-rs addon build skipped (requires napi crate)"

@@ -191,9 +191,12 @@ impl MerkleTree {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SparseMerkleProof {
-    pub siblings: Vec<[u8; 32]>,
+    pub key: [u8; 32],
+    pub value: Vec<u8>,
+    pub proof: Vec<[u8; 32]>,
+    pub root: [u8; 32],
 }
 
 /// Key-indexed sparse Merkle tree (256-bit keys).
@@ -241,7 +244,13 @@ impl SparseMerkleTree {
             prefix = Self::truncate_key(prefix, depth - 1);
         }
 
-        SparseMerkleProof { siblings }
+        let value = self.leaves.get(&key).cloned().unwrap_or_default();
+        SparseMerkleProof {
+            key,
+            value,
+            proof: siblings,
+            root: levels[0].get(&[0u8; 32]).copied().unwrap_or(defaults[0]),
+        }
     }
 
     pub fn verify_proof(
@@ -250,12 +259,12 @@ impl SparseMerkleTree {
         proof: &SparseMerkleProof,
         expected_root: [u8; 32],
     ) -> bool {
-        if proof.siblings.len() != 256 {
+        if proof.proof.len() != 256 {
             return false;
         }
 
         let mut current = Self::hash_leaf(key, value);
-        for (idx, sibling) in proof.siblings.iter().enumerate() {
+        for (idx, sibling) in proof.proof.iter().enumerate() {
             let depth = 256 - idx;
             let bit = Self::get_bit(&key, depth - 1);
             current = if bit == 0 {
@@ -515,7 +524,9 @@ impl Transaction {
             TransactionPayload::ContractDeploy { wasm_bytes, init_payload } => {
                 wasm_bytes.len() + init_payload.as_ref().map(|p| p.len()).unwrap_or(0) + 100
             }
-            TransactionPayload::ContractCall { method, args, .. } => method.len() + args.len() + 50,
+            TransactionPayload::ContractCall { method, args, .. } => {
+                method.len() + args.iter().map(|a| a.len()).sum::<usize>() + args.len() * 4 + 50
+            }
             TransactionPayload::Data { data } => data.len() + 10,
         }
     }
@@ -567,7 +578,7 @@ impl std::fmt::Display for Address {
 pub enum TransactionPayload {
     Transfer { amount: u64 },
     ContractDeploy { wasm_bytes: Vec<u8>, init_payload: Option<Vec<u8>> },
-    ContractCall { method: String, args: Vec<u8>, value: Option<u64> },
+    ContractCall { method: String, args: Vec<Vec<u8>>, value: Option<u64> },
     Data { data: Vec<u8> },
 }
 
@@ -682,6 +693,13 @@ impl Transaction {
 
         Ok(public_key.verify(&self.hash, &self.signature.0).is_ok())
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignerRotation {
+    pub added: Vec<PublicKey>,
+    pub removed: Vec<PublicKey>,
+    pub effective_height: u64,
 }
 
 #[cfg(test)]

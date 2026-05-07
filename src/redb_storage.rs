@@ -14,32 +14,130 @@ const ACCOUNTS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("acco
 const CHAIN_STATE_KEY: &[u8] = b"global:current";
 const CONTRACTS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("contracts");
 const EVENTS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("events");
+const HEIGHT_TO_BLOCK_TABLE: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("height_to_block");
+const ADDR_TO_TX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("addr_to_tx");
+const CONTRACT_TO_TX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("contract_to_tx");
+const TX_COUNT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tx_count");
 
 fn map_err(e: impl std::fmt::Display) -> StorageError {
     StorageError::IndexError(e.to_string())
 }
 
 pub struct RedbStorage {
-    db: Arc<Database>,
+    db: Arc<std::sync::RwLock<Arc<Database>>>,
+    db_path: std::path::PathBuf,
 }
 
 impl RedbStorage {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let path = path.as_ref();
-        if path.is_dir() {
+        let (db_path, db) = if path.is_dir() {
             std::fs::create_dir_all(path).map_err(map_err)?;
             let db_path = path.join("data.redb");
-            let db = Database::create(db_path).map_err(map_err)?;
+            let db = Database::create(&db_path).map_err(map_err)?;
             Self::init_tables(&db)?;
-            Ok(Self { db: Arc::new(db) })
+            (db_path, db)
         } else {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(map_err)?;
             }
             let db = Database::create(path).map_err(map_err)?;
             Self::init_tables(&db)?;
-            Ok(Self { db: Arc::new(db) })
+            (path.to_path_buf(), db)
+        };
+        Ok(Self { db: Arc::new(std::sync::RwLock::new(Arc::new(db))), db_path })
+    }
+
+    fn db_guard(&self) -> Result<std::sync::RwLockReadGuard<'_, Arc<Database>>, StorageError> {
+        self.db.read().map_err(|e| StorageError::IndexError(e.to_string()))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn read_all_tables(db: &Database) -> Result<Vec<(String, Vec<u8>, Vec<u8>)>, StorageError> {
+        let txn = db.begin_read().map_err(map_err)?;
+        #[allow(clippy::type_complexity)]
+        let tables: [(&str, TableDefinition<&[u8], &[u8]>); 10] = [
+            ("blocks", BLOCKS_TABLE),
+            ("txs", TXS_TABLE),
+            ("pending", PENDING_TABLE),
+            ("accounts", ACCOUNTS_TABLE),
+            ("contracts", CONTRACTS_TABLE),
+            ("events", EVENTS_TABLE),
+            ("height_to_block", HEIGHT_TO_BLOCK_TABLE),
+            ("addr_to_tx", ADDR_TO_TX_TABLE),
+            ("contract_to_tx", CONTRACT_TO_TX_TABLE),
+            ("tx_count", TX_COUNT_TABLE),
+        ];
+        let mut data = Vec::new();
+        for (name, def) in &tables {
+            let table = txn.open_table(*def).map_err(map_err)?;
+            let iter = table.iter().map_err(map_err)?;
+            for item in iter {
+                let (k, v) = item.map_err(map_err)?;
+                data.push((name.to_string(), k.value().to_vec(), v.value().to_vec()));
+            }
         }
+        Ok(data)
+    }
+
+    fn write_all_tables(
+        db: &Database,
+        data: Vec<(String, Vec<u8>, Vec<u8>)>,
+    ) -> Result<(), StorageError> {
+        let txn = db.begin_write().map_err(map_err)?;
+        {
+            let mut blocks = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
+            let mut txs = txn.open_table(TXS_TABLE).map_err(map_err)?;
+            let mut pending = txn.open_table(PENDING_TABLE).map_err(map_err)?;
+            let mut accounts = txn.open_table(ACCOUNTS_TABLE).map_err(map_err)?;
+            let mut contracts = txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
+            let mut events = txn.open_table(EVENTS_TABLE).map_err(map_err)?;
+            let mut height_to_block = txn.open_table(HEIGHT_TO_BLOCK_TABLE).map_err(map_err)?;
+            let mut addr_to_tx = txn.open_table(ADDR_TO_TX_TABLE).map_err(map_err)?;
+            let mut contract_to_tx = txn.open_table(CONTRACT_TO_TX_TABLE).map_err(map_err)?;
+            let mut tx_count = txn.open_table(TX_COUNT_TABLE).map_err(map_err)?;
+
+            for (table_name, key, value) in data {
+                match table_name.as_str() {
+                    "blocks" => {
+                        blocks.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
+                    }
+                    "txs" => {
+                        txs.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
+                    }
+                    "pending" => {
+                        pending.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
+                    }
+                    "accounts" => {
+                        accounts.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
+                    }
+                    "contracts" => {
+                        contracts.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
+                    }
+                    "events" => {
+                        events.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
+                    }
+                    "height_to_block" => {
+                        height_to_block
+                            .insert(key.as_slice(), value.as_slice())
+                            .map_err(map_err)?;
+                    }
+                    "addr_to_tx" => {
+                        addr_to_tx.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
+                    }
+                    "contract_to_tx" => {
+                        contract_to_tx.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
+                    }
+                    "tx_count" => {
+                        tx_count.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        txn.commit().map_err(map_err)?;
+        Ok(())
     }
 
     fn init_tables(db: &Database) -> Result<(), StorageError> {
@@ -51,6 +149,10 @@ impl RedbStorage {
             txn.open_table(ACCOUNTS_TABLE).map_err(map_err)?;
             txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
             txn.open_table(EVENTS_TABLE).map_err(map_err)?;
+            txn.open_table(HEIGHT_TO_BLOCK_TABLE).map_err(map_err)?;
+            txn.open_table(ADDR_TO_TX_TABLE).map_err(map_err)?;
+            txn.open_table(CONTRACT_TO_TX_TABLE).map_err(map_err)?;
+            txn.open_table(TX_COUNT_TABLE).map_err(map_err)?;
         }
         txn.commit().map_err(map_err)?;
         Ok(())
@@ -60,17 +162,20 @@ impl RedbStorage {
 impl Storage for RedbStorage {
     fn put_block(&self, block: &Block) -> Result<(), StorageError> {
         let val = bincode::serialize(block)?;
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
             table.insert(block.hash.as_slice(), val.as_slice()).map_err(map_err)?;
+            let mut height_table = txn.open_table(HEIGHT_TO_BLOCK_TABLE).map_err(map_err)?;
+            let height_key = format!("height:{}", block.index);
+            height_table.insert(height_key.as_bytes(), block.hash.as_slice()).map_err(map_err)?;
         }
         txn.commit().map_err(map_err)?;
         Ok(())
     }
 
     fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>, StorageError> {
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let table = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
         match table.get(hash.as_slice()).map_err(map_err)? {
             Some(v) => Ok(Some(bincode::deserialize(v.value())?)),
@@ -92,28 +197,75 @@ impl Storage for RedbStorage {
     }
 
     fn get_block_by_height(&self, height: u64) -> Result<Option<Block>, StorageError> {
-        let txn = self.db.begin_read().map_err(map_err)?;
-        let table = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
+        let height_table = txn.open_table(HEIGHT_TO_BLOCK_TABLE).map_err(map_err)?;
         let height_key = format!("height:{}", height);
-        match table.get(height_key.as_bytes()).map_err(map_err)? {
-            Some(v) => Ok(Some(bincode::deserialize(v.value())?)),
+        match height_table.get(height_key.as_bytes()).map_err(map_err)? {
+            Some(hash_entry) => {
+                let mut block_hash = [0u8; 32];
+                let hash_bytes = hash_entry.value();
+                if hash_bytes.len() == 32 {
+                    block_hash.copy_from_slice(hash_bytes);
+                }
+                let blocks = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
+                match blocks.get(block_hash.as_slice()).map_err(map_err)? {
+                    Some(v) => Ok(Some(bincode::deserialize(v.value())?)),
+                    None => Ok(None),
+                }
+            }
             None => Ok(None),
         }
     }
 
     fn put_transaction(&self, tx: &Transaction) -> Result<(), StorageError> {
         let val = bincode::serialize(tx)?;
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(TXS_TABLE).map_err(map_err)?;
             table.insert(tx.hash.as_slice(), val.as_slice()).map_err(map_err)?;
+
+            // Index by sender address
+            let mut addr_table = txn.open_table(ADDR_TO_TX_TABLE).map_err(map_err)?;
+            let addr_key = format!(
+                "{}:{:0>20}:{}",
+                hex::encode(tx.sender.to_bytes()),
+                tx.timestamp,
+                hex::encode(tx.hash)
+            );
+            addr_table.insert(addr_key.as_bytes(), tx.hash.as_slice()).map_err(map_err)?;
+
+            // Index by contract recipient
+            if let crate::types::Address::Contract(contract_id) = &tx.recipient {
+                let mut contract_table = txn.open_table(CONTRACT_TO_TX_TABLE).map_err(map_err)?;
+                let contract_key = format!(
+                    "{}:{:0>20}:{}",
+                    hex::encode(contract_id.to_bytes()),
+                    tx.timestamp,
+                    hex::encode(tx.hash)
+                );
+                contract_table
+                    .insert(contract_key.as_bytes(), tx.hash.as_slice())
+                    .map_err(map_err)?;
+            }
+
+            // Increment transaction count
+            let mut count_table = txn.open_table(TX_COUNT_TABLE).map_err(map_err)?;
+            let count_key = hex::encode(tx.sender.to_bytes());
+            let current_count = count_table
+                .get(count_key.as_bytes())
+                .map_err(map_err)?
+                .map(|v| String::from_utf8_lossy(v.value()).parse::<u64>().unwrap_or(0))
+                .unwrap_or(0);
+            count_table
+                .insert(count_key.as_bytes(), (current_count + 1).to_string().as_bytes())
+                .map_err(map_err)?;
         }
         txn.commit().map_err(map_err)?;
         Ok(())
     }
 
     fn get_transaction(&self, tx_hash: &[u8; 32]) -> Result<Option<Transaction>, StorageError> {
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let table = txn.open_table(TXS_TABLE).map_err(map_err)?;
         match table.get(tx_hash.as_slice()).map_err(map_err)? {
             Some(v) => Ok(Some(bincode::deserialize(v.value())?)),
@@ -122,7 +274,7 @@ impl Storage for RedbStorage {
     }
 
     fn get_pending_transactions(&self) -> Result<Vec<Transaction>, StorageError> {
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let table = txn.open_table(PENDING_TABLE).map_err(map_err)?;
         let mut txs = Vec::new();
         let iter = table.iter().map_err(map_err)?;
@@ -137,7 +289,7 @@ impl Storage for RedbStorage {
 
     fn remove_pending_transaction(&self, tx_hash: &[u8; 32]) -> Result<(), StorageError> {
         let key = format!("pending:{}", hex::encode(tx_hash));
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(PENDING_TABLE).map_err(map_err)?;
             table.remove(key.as_bytes()).map_err(map_err)?;
@@ -149,7 +301,7 @@ impl Storage for RedbStorage {
     fn put_pending_transaction(&self, tx: &Transaction) -> Result<(), StorageError> {
         let key = format!("pending:{}", hex::encode(tx.hash));
         let encoded = bincode::serialize(tx)?;
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(PENDING_TABLE).map_err(map_err)?;
             table.insert(key.as_bytes(), encoded.as_slice()).map_err(map_err)?;
@@ -165,7 +317,7 @@ impl Storage for RedbStorage {
         _tx_index_in_block: u32,
     ) -> Result<(), StorageError> {
         let key = format!("idx:{}:{}", hex::encode(tx_hash), hex::encode(block_hash));
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(TXS_TABLE).map_err(map_err)?;
             table.insert(key.as_bytes(), block_hash.as_slice()).map_err(map_err)?;
@@ -185,7 +337,7 @@ impl Storage for RedbStorage {
         };
         // Find block hash from tx index: scan prefix "idx:{tx_hash}:"
         let prefix = format!("idx:{}:", hex::encode(tx_hash));
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let table = txn.open_table(TXS_TABLE).map_err(map_err)?;
         let mut block_hash = None;
         let iter = table.iter().map_err(map_err)?;
@@ -212,7 +364,7 @@ impl Storage for RedbStorage {
         &self,
         _block_hash: &[u8; 32],
     ) -> Result<Vec<Transaction>, StorageError> {
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let table = txn.open_table(TXS_TABLE).map_err(map_err)?;
         let mut txs = Vec::new();
         let iter = table.iter().map_err(map_err)?;
@@ -230,17 +382,20 @@ impl Storage for RedbStorage {
         address: &PublicKey,
         limit: usize,
     ) -> Result<Vec<Transaction>, StorageError> {
-        let txn = self.db.begin_read().map_err(map_err)?;
-        let table = txn.open_table(TXS_TABLE).map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
+        let addr_table = txn.open_table(ADDR_TO_TX_TABLE).map_err(map_err)?;
+        let txs_table = txn.open_table(TXS_TABLE).map_err(map_err)?;
+        let prefix = format!("{}:", hex::encode(address.to_bytes()));
         let mut txs = Vec::new();
-        let addr_bytes = address.to_bytes();
-        let iter = table.iter().map_err(map_err)?;
+        let iter = addr_table.iter().map_err(map_err)?;
         for item in iter {
-            let (_, v) = item.map_err(map_err)?;
-            if let Ok(tx) = bincode::deserialize::<Transaction>(v.value()) {
-                if tx.sender.to_bytes() == addr_bytes
-                    || matches!(&tx.recipient, crate::types::Address::Wallet(pk) if pk.to_bytes() == addr_bytes)
-                {
+            let (k, v) = item.map_err(map_err)?;
+            let key_str = String::from_utf8_lossy(k.value());
+            if key_str.starts_with(&prefix) {
+                let tx_hash = v.value();
+                if let Ok(tx) = bincode::deserialize::<Transaction>(
+                    txs_table.get(tx_hash).map_err(map_err)?.unwrap().value(),
+                ) {
                     txs.push(tx);
                     if txs.len() >= limit {
                         break;
@@ -256,7 +411,7 @@ impl Storage for RedbStorage {
         from: u64,
         to: u64,
     ) -> Result<Vec<Transaction>, StorageError> {
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let blocks = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
         let txs_table = txn.open_table(TXS_TABLE).map_err(map_err)?;
         let mut result = Vec::new();
@@ -283,7 +438,7 @@ impl Storage for RedbStorage {
         from: u64,
         to: u64,
     ) -> Result<Vec<[u8; 32]>, StorageError> {
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let table = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
         let mut hashes = Vec::new();
         let iter = table.iter().map_err(map_err)?;
@@ -299,8 +454,16 @@ impl Storage for RedbStorage {
     }
 
     fn get_account_transaction_count(&self, address: &PublicKey) -> Result<u64, StorageError> {
-        let txs = self.get_transactions_by_address(address, usize::MAX)?;
-        Ok(txs.len() as u64)
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
+        let table = txn.open_table(TX_COUNT_TABLE).map_err(map_err)?;
+        let key = hex::encode(address.to_bytes());
+        match table.get(key.as_bytes()).map_err(map_err)? {
+            Some(v) => {
+                let count = String::from_utf8_lossy(v.value()).parse::<u64>().unwrap_or(0);
+                Ok(count)
+            }
+            None => Ok(0),
+        }
     }
 
     fn get_contract_transactions(
@@ -308,17 +471,23 @@ impl Storage for RedbStorage {
         contract_id: &ContractId,
         limit: usize,
     ) -> Result<Vec<Transaction>, StorageError> {
-        let txn = self.db.begin_read().map_err(map_err)?;
-        let table = txn.open_table(TXS_TABLE).map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
+        let contract_table = txn.open_table(CONTRACT_TO_TX_TABLE).map_err(map_err)?;
+        let txs_table = txn.open_table(TXS_TABLE).map_err(map_err)?;
+        let prefix = format!("{}:", hex::encode(contract_id.to_bytes()));
         let mut txs = Vec::new();
-        let cid_bytes = contract_id.to_bytes();
-        let iter = table.iter().map_err(map_err)?;
+        let iter = contract_table.iter().map_err(map_err)?;
         for item in iter {
-            let (_, v) = item.map_err(map_err)?;
-            if let Ok(tx) = bincode::deserialize::<Transaction>(v.value()) {
-                if let crate::types::Address::Contract(c) = &tx.recipient {
-                    if c.to_bytes() == cid_bytes && txs.len() < limit {
-                        txs.push(tx);
+            let (k, v) = item.map_err(map_err)?;
+            let key_str = String::from_utf8_lossy(k.value());
+            if key_str.starts_with(&prefix) {
+                let tx_hash = v.value();
+                if let Ok(tx) = bincode::deserialize::<Transaction>(
+                    txs_table.get(tx_hash).map_err(map_err)?.unwrap().value(),
+                ) {
+                    txs.push(tx);
+                    if txs.len() >= limit {
+                        break;
                     }
                 }
             }
@@ -329,7 +498,7 @@ impl Storage for RedbStorage {
     fn put_account(&self, address: &PublicKey, account: &Account) -> Result<(), StorageError> {
         let key = address.to_bytes();
         let val = bincode::serialize(account)?;
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(ACCOUNTS_TABLE).map_err(map_err)?;
             table.insert(key.as_slice(), val.as_slice()).map_err(map_err)?;
@@ -340,7 +509,7 @@ impl Storage for RedbStorage {
 
     fn get_account(&self, address: &PublicKey) -> Result<Option<Account>, StorageError> {
         let key = address.to_bytes();
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let table = txn.open_table(ACCOUNTS_TABLE).map_err(map_err)?;
         match table.get(key.as_slice()).map_err(map_err)? {
             Some(v) => Ok(Some(bincode::deserialize(v.value())?)),
@@ -350,7 +519,7 @@ impl Storage for RedbStorage {
 
     fn delete_account(&self, address: &PublicKey) -> Result<(), StorageError> {
         let key = address.to_bytes();
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(ACCOUNTS_TABLE).map_err(map_err)?;
             table.remove(key.as_slice()).map_err(map_err)?;
@@ -360,7 +529,7 @@ impl Storage for RedbStorage {
     }
 
     fn get_all_accounts(&self) -> Result<Vec<(PublicKey, Account)>, StorageError> {
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let table = txn.open_table(ACCOUNTS_TABLE).map_err(map_err)?;
         let mut accounts = Vec::new();
         let iter = table.iter().map_err(map_err)?;
@@ -384,7 +553,7 @@ impl Storage for RedbStorage {
 
     fn put_chain_state(&self, state: &ChainState) -> Result<(), StorageError> {
         let val = bincode::serialize(state)?;
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(ACCOUNTS_TABLE).map_err(map_err)?;
             table.insert(CHAIN_STATE_KEY, val.as_slice()).map_err(map_err)?;
@@ -394,7 +563,7 @@ impl Storage for RedbStorage {
     }
 
     fn get_chain_state(&self) -> Result<Option<ChainState>, StorageError> {
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let table = txn.open_table(ACCOUNTS_TABLE).map_err(map_err)?;
         match table.get(CHAIN_STATE_KEY).map_err(map_err)? {
             Some(v) => Ok(Some(bincode::deserialize(v.value())?)),
@@ -408,7 +577,7 @@ impl Storage for RedbStorage {
         wasm_bytes: &[u8],
     ) -> Result<(), StorageError> {
         let key = format!("code:{}", hex::encode(contract_id.to_bytes()));
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
             table.insert(key.as_bytes(), wasm_bytes).map_err(map_err)?;
@@ -419,7 +588,7 @@ impl Storage for RedbStorage {
 
     fn get_contract_code(&self, contract_id: &ContractId) -> Result<Option<Vec<u8>>, StorageError> {
         let key = format!("code:{}", hex::encode(contract_id.to_bytes()));
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let table = txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
         match table.get(key.as_bytes()).map_err(map_err)? {
             Some(v) => Ok(Some(v.value().to_vec())),
@@ -433,7 +602,7 @@ impl Storage for RedbStorage {
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, StorageError> {
         let db_key = format!("cstore:{}:{}", hex::encode(contract_id.to_bytes()), hex::encode(key));
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let table = txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
         match table.get(db_key.as_bytes()).map_err(map_err)? {
             Some(v) => Ok(Some(v.value().to_vec())),
@@ -448,7 +617,7 @@ impl Storage for RedbStorage {
         value: &[u8],
     ) -> Result<(), StorageError> {
         let db_key = format!("cstore:{}:{}", hex::encode(contract_id.to_bytes()), hex::encode(key));
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
             table.insert(db_key.as_bytes(), value).map_err(map_err)?;
@@ -463,7 +632,7 @@ impl Storage for RedbStorage {
         key: &[u8],
     ) -> Result<(), StorageError> {
         let db_key = format!("cstore:{}:{}", hex::encode(contract_id.to_bytes()), hex::encode(key));
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
             table.remove(db_key.as_bytes()).map_err(map_err)?;
@@ -479,7 +648,7 @@ impl Storage for RedbStorage {
         data: &[u8],
     ) -> Result<(), StorageError> {
         let key = format!("event:{}:{}", hex::encode(contract_id.to_bytes()), hex::encode(topic));
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(EVENTS_TABLE).map_err(map_err)?;
             table.insert(key.as_bytes(), data).map_err(map_err)?;
@@ -494,7 +663,7 @@ impl Storage for RedbStorage {
         limit: usize,
     ) -> Result<ContractEvents, StorageError> {
         let prefix = format!("event:{}:", hex::encode(contract_id.to_bytes()));
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let table = txn.open_table(EVENTS_TABLE).map_err(map_err)?;
         let mut events = Vec::new();
         let iter = table.iter().map_err(map_err)?;
@@ -515,7 +684,7 @@ impl Storage for RedbStorage {
         contract_id: &ContractId,
     ) -> Result<Vec<Vec<u8>>, StorageError> {
         let prefix = format!("cstore:{}:", hex::encode(contract_id.to_bytes()));
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let table = txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
         let mut keys = Vec::new();
         let iter = table.iter().map_err(map_err)?;
@@ -530,8 +699,37 @@ impl Storage for RedbStorage {
         Ok(keys)
     }
 
+    fn put_contract_deployer(
+        &self,
+        contract_id: &ContractId,
+        deployer: &PublicKey,
+    ) -> Result<(), StorageError> {
+        let key = format!("deployer:{}", hex::encode(contract_id.to_bytes()));
+        let val = bincode::serialize(deployer)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
+        {
+            let mut table = txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
+            table.insert(key.as_bytes(), val.as_slice()).map_err(map_err)?;
+        }
+        txn.commit().map_err(map_err)?;
+        Ok(())
+    }
+
+    fn get_contract_deployer(
+        &self,
+        contract_id: &ContractId,
+    ) -> Result<Option<PublicKey>, StorageError> {
+        let key = format!("deployer:{}", hex::encode(contract_id.to_bytes()));
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
+        let table = txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
+        match table.get(key.as_bytes()).map_err(map_err)? {
+            Some(v) => Ok(Some(bincode::deserialize(v.value())?)),
+            None => Ok(None),
+        }
+    }
+
     fn apply_batch(&self, batch: StorageBatch) -> Result<(), StorageError> {
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut blocks = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
             let mut txs_table = txn.open_table(TXS_TABLE).map_err(map_err)?;
@@ -579,11 +777,46 @@ impl Storage for RedbStorage {
     }
 
     fn compact(&self) -> Result<(), StorageError> {
-        Ok(())
+        // Read all data from the current database
+        let data = {
+            let db = self.db_guard()?;
+            Self::read_all_tables(&db)?
+        };
+
+        let backup_path = self.db_path.with_extension("redb.backup");
+
+        // Rename current db file to backup
+        std::fs::rename(&self.db_path, &backup_path).map_err(|e| {
+            StorageError::IndexError(format!("Failed to rename db to backup: {}", e))
+        })?;
+
+        let result = (|| -> Result<(), StorageError> {
+            let new_db = Database::create(&self.db_path).map_err(map_err)?;
+            Self::init_tables(&new_db)?;
+            Self::write_all_tables(&new_db, data)?;
+
+            let mut db_guard =
+                self.db.write().map_err(|e| StorageError::IndexError(e.to_string()))?;
+            *db_guard = Arc::new(new_db);
+
+            Ok(())
+        })();
+
+        if result.is_err() {
+            if let Err(e) = std::fs::rename(&backup_path, &self.db_path) {
+                log::error!("Failed to restore backup after compaction failure: {}", e);
+            }
+        } else {
+            if let Err(e) = std::fs::remove_file(&backup_path) {
+                log::warn!("Failed to remove backup file after compaction: {}", e);
+            }
+        }
+
+        result
     }
 
     fn get_storage_stats(&self) -> Result<StorageStats, StorageError> {
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let blocks = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
         let txs = txn.open_table(TXS_TABLE).map_err(map_err)?;
         let accounts = txn.open_table(ACCOUNTS_TABLE).map_err(map_err)?;
@@ -608,7 +841,7 @@ impl Storage for RedbStorage {
     }
 
     fn clear_pending_transactions(&self) -> Result<(), StorageError> {
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(PENDING_TABLE).map_err(map_err)?;
             let keys: Vec<Vec<u8>> = {
@@ -628,12 +861,12 @@ impl Storage for RedbStorage {
     }
 
     fn clone_storage(&self) -> Box<dyn Storage> {
-        Box::new(Self { db: Arc::clone(&self.db) })
+        Box::new(Self { db: Arc::clone(&self.db), db_path: self.db_path.clone() })
     }
 
     fn backup_to(&self, path: &std::path::Path) -> Result<(), StorageError> {
         use std::io::Write;
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let mut file = std::fs::File::create(path).map_err(map_err)?;
         let tables = [
             ("blocks", BLOCKS_TABLE),
@@ -642,6 +875,10 @@ impl Storage for RedbStorage {
             ("accounts", ACCOUNTS_TABLE),
             ("contracts", CONTRACTS_TABLE),
             ("events", EVENTS_TABLE),
+            ("height_to_block", HEIGHT_TO_BLOCK_TABLE),
+            ("addr_to_tx", ADDR_TO_TX_TABLE),
+            ("contract_to_tx", CONTRACT_TO_TX_TABLE),
+            ("tx_count", TX_COUNT_TABLE),
         ];
         for (name, def) in &tables {
             let table = txn.open_table(*def).map_err(map_err)?;
@@ -657,7 +894,7 @@ impl Storage for RedbStorage {
 
     fn restore_from(&self, path: &std::path::Path) -> Result<(), StorageError> {
         let content = std::fs::read_to_string(path).map_err(map_err)?;
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         for line in content.lines() {
             let parts: Vec<&str> = line.splitn(3, ':').collect();
             if parts.len() != 3 {
@@ -672,6 +909,10 @@ impl Storage for RedbStorage {
                 "accounts" => ACCOUNTS_TABLE,
                 "contracts" => CONTRACTS_TABLE,
                 "events" => EVENTS_TABLE,
+                "height_to_block" => HEIGHT_TO_BLOCK_TABLE,
+                "addr_to_tx" => ADDR_TO_TX_TABLE,
+                "contract_to_tx" => CONTRACT_TO_TX_TABLE,
+                "tx_count" => TX_COUNT_TABLE,
                 _ => continue,
             };
             let mut table = txn.open_table(table_def).map_err(map_err)?;
@@ -684,6 +925,6 @@ impl Storage for RedbStorage {
 
 impl Clone for RedbStorage {
     fn clone(&self) -> Self {
-        Self { db: Arc::clone(&self.db) }
+        Self { db: Arc::clone(&self.db), db_path: self.db_path.clone() }
     }
 }

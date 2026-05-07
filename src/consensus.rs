@@ -35,6 +35,10 @@ pub trait ConsensusEngine: Send + Sync {
         chain_state: &ChainState,
     ) -> Result<Block, ConsensusError>;
 
+    fn supports_signer_rotation(&self) -> bool {
+        false
+    }
+
     fn block_time_interval_ms(&self) -> u64 {
         5000
     }
@@ -42,6 +46,7 @@ pub trait ConsensusEngine: Send + Sync {
 
 pub struct PoAConsensus {
     authorized_signer_key: PublicKey,
+    authorized_signers: Vec<PublicKey>,
     #[allow(dead_code)]
     block_time_interval_ms: u64,
     signing_key: Option<SigningKey>,
@@ -54,6 +59,7 @@ impl PoAConsensus {
     pub fn new(authorized_signer_key: PublicKey, block_time_interval_ms: u64) -> Self {
         Self {
             authorized_signer_key,
+            authorized_signers: Vec::new(),
             block_time_interval_ms,
             signing_key: None,
             block_gas_limit: 30_000_000,        // 30M gas per block
@@ -64,6 +70,16 @@ impl PoAConsensus {
     pub fn with_signing_key(mut self, signing_key: SigningKey) -> Self {
         self.signing_key = Some(signing_key);
         self
+    }
+
+    pub fn add_authorized_signer(&mut self, pk: PublicKey) {
+        if !self.authorized_signers.contains(&pk) {
+            self.authorized_signers.push(pk);
+        }
+    }
+
+    pub fn remove_authorized_signer(&mut self, pk: PublicKey) {
+        self.authorized_signers.retain(|k| *k != pk);
     }
 
     pub fn validate_block(&self, block: &Block) -> Result<(), ConsensusError> {
@@ -79,13 +95,26 @@ impl PoAConsensus {
             ConsensusError::ValidationFailed("Block metadata missing".to_string())
         })?;
 
-        // Verify signer matches authorized key
+        // Verify signer matches authorized key or authorized signers set
         let signer_hex = metadata.get("signer").ok_or_else(|| {
             ConsensusError::ValidationFailed("Signer not found in block metadata".to_string())
         })?;
-        if *signer_hex != hex::encode(self.authorized_signer_key.to_bytes()) {
-            return Err(ConsensusError::UnauthorizedSigner);
-        }
+
+        let primary_key_hex = hex::encode(self.authorized_signer_key.to_bytes());
+        let is_primary = *signer_hex == primary_key_hex;
+
+        let verifier_pk = if is_primary {
+            self.authorized_signer_key
+        } else {
+            match self
+                .authorized_signers
+                .iter()
+                .find(|pk| hex::encode(pk.to_bytes()) == *signer_hex)
+            {
+                Some(pk) => *pk,
+                None => return Err(ConsensusError::UnauthorizedSigner),
+            }
+        };
 
         // Verify signature cryptographically
         let signature_hex = metadata.get("signature").ok_or_else(|| {
@@ -101,7 +130,7 @@ impl PoAConsensus {
             ConsensusError::ValidationFailed("Invalid signature format".to_string())
         })?;
 
-        self.authorized_signer_key.verify(&block.hash, &signature).map_err(|_| {
+        verifier_pk.verify(&block.hash, &signature).map_err(|_| {
             ConsensusError::InvalidSignature(CryptoError::SignatureVerificationFailed)
         })?;
 
