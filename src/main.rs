@@ -466,7 +466,7 @@ fn spawn_health_server(
         info!("Health endpoint listening on http://{}/health", bind_addr);
         while runtime.is_running() {
             match server.recv_timeout(std::time::Duration::from_millis(250)) {
-                Ok(Some(request)) => {
+                Ok(Some(mut request)) => {
                     let client_ip =
                         request.remote_addr().map(|a| a.to_string()).unwrap_or_default();
                     if !rate_limiter.check_and_record(&client_ip) {
@@ -599,6 +599,205 @@ fn spawn_health_server(
                                     .with_status_code(StatusCode(404)),
                             );
                         }
+                    } else if request.method() == &Method::Post && request.url() == "/tx/submit" {
+                        let mut body = String::new();
+                        let _ = request.as_reader().read_to_string(&mut body);
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let tx: Transaction = serde_json::from_str(&body)?;
+                                runtime.submit_transaction(tx)?;
+                                Ok(serde_json::json!({"status": "ok"}))
+                            })();
+                        let body = match response_json {
+                            Ok(json) => json.to_string(),
+                            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                        };
+                        let mut response =
+                            Response::from_string(body).with_status_code(StatusCode(200));
+                        if let Ok(header) = Header::from_bytes(
+                            b"Content-Type".as_slice(),
+                            b"application/json".as_slice(),
+                        ) {
+                            response = response.with_header(header);
+                        }
+                        let _ = request.respond(response);
+                    } else if request.method() == &Method::Post && request.url() == "/account" {
+                        let mut body = String::new();
+                        let _ = request.as_reader().read_to_string(&mut body);
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let v: serde_json::Value = serde_json::from_str(&body)?;
+                                let pubkey_hex =
+                                    v["pubkey"].as_str().ok_or("Missing 'pubkey' field")?;
+                                let balance = v["balance"].as_u64().unwrap_or(0);
+                                let pk = parse_pubkey(pubkey_hex)?;
+                                let account = Account::Wallet { balance, nonce: 0 };
+                                runtime.create_account(&pk, account)?;
+                                Ok(serde_json::json!({"status": "ok"}))
+                            })();
+                        let body = match response_json {
+                            Ok(json) => json.to_string(),
+                            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                        };
+                        let mut response =
+                            Response::from_string(body).with_status_code(StatusCode(200));
+                        if let Ok(header) = Header::from_bytes(
+                            b"Content-Type".as_slice(),
+                            b"application/json".as_slice(),
+                        ) {
+                            response = response.with_header(header);
+                        }
+                        let _ = request.respond(response);
+                    } else if request.method() == &Method::Post
+                        && request.url() == "/contract/deploy"
+                    {
+                        let mut body = String::new();
+                        let _ = request.as_reader().read_to_string(&mut body);
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let v: serde_json::Value = serde_json::from_str(&body)?;
+                                let deployer_hex =
+                                    v["deployer_hex"].as_str().ok_or("Missing 'deployer_hex'")?;
+                                let wasm_hex =
+                                    v["wasm_hex"].as_str().ok_or("Missing 'wasm_hex'")?;
+                                let init_hex = v["init_hex"].as_str().unwrap_or("");
+                                let gas_limit = v["gas_limit"].as_u64().unwrap_or(1_000_000);
+                                let deployer = parse_pubkey(deployer_hex)?;
+                                let wasm_bytes = hex::decode(wasm_hex)
+                                    .map_err(|e| format!("Invalid wasm hex: {}", e))?;
+                                let init_payload: Option<Vec<u8>> = if init_hex.is_empty() {
+                                    None
+                                } else {
+                                    Some(
+                                        hex::decode(init_hex)
+                                            .map_err(|e| format!("Invalid init hex: {}", e))?,
+                                    )
+                                };
+                                let cid = runtime.deploy_contract(
+                                    &deployer,
+                                    &wasm_bytes,
+                                    init_payload.as_deref(),
+                                    gas_limit,
+                                )?;
+                                Ok(serde_json::json!({"contract_id": hex::encode(cid.to_bytes())}))
+                            })();
+                        let body = match response_json {
+                            Ok(json) => json.to_string(),
+                            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                        };
+                        let mut response =
+                            Response::from_string(body).with_status_code(StatusCode(200));
+                        if let Ok(header) = Header::from_bytes(
+                            b"Content-Type".as_slice(),
+                            b"application/json".as_slice(),
+                        ) {
+                            response = response.with_header(header);
+                        }
+                        let _ = request.respond(response);
+                    } else if request.method() == &Method::Post && request.url() == "/contract/call"
+                    {
+                        let mut body = String::new();
+                        let _ = request.as_reader().read_to_string(&mut body);
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let v: serde_json::Value = serde_json::from_str(&body)?;
+                                let caller_hex =
+                                    v["caller_hex"].as_str().ok_or("Missing 'caller_hex'")?;
+                                let cid_hex =
+                                    v["contract_id"].as_str().ok_or("Missing 'contract_id'")?;
+                                let method = v["method"].as_str().ok_or("Missing 'method'")?;
+                                let value = v["value"].as_u64();
+                                let caller = parse_pubkey(caller_hex)?;
+                                let cid_bytes = hex::decode(cid_hex)
+                                    .map_err(|e| format!("Invalid contract id: {}", e))?;
+                                if cid_bytes.len() != 32 {
+                                    return Err("Contract id must be 32 bytes".into());
+                                }
+                                let mut cid_arr = [0u8; 32];
+                                cid_arr.copy_from_slice(&cid_bytes);
+                                let cid = ContractId::from_bytes(&cid_arr);
+
+                                let args: Vec<Vec<u8>> = if let Some(arr) = v["args"].as_array() {
+                                    arr.iter()
+                                        .map(|a| {
+                                            hex::decode(a.as_str().unwrap_or(""))
+                                                .map_err(|e| format!("Invalid arg hex: {}", e))
+                                        })
+                                        .collect::<Result<_, _>>()?
+                                } else {
+                                    Vec::new()
+                                };
+
+                                let wrapped_value = value.filter(|&val| val > 0);
+                                let gas_limit = v["gas_limit"].as_u64().unwrap_or(1_000_000);
+                                let result = runtime.call_contract(
+                                    &caller,
+                                    &cid,
+                                    method,
+                                    &args,
+                                    wrapped_value,
+                                    gas_limit,
+                                )?;
+                                Ok(serde_json::json!({
+                                    "result_hex": hex::encode(&result),
+                                    "result_len": result.len(),
+                                }))
+                            })();
+                        let body = match response_json {
+                            Ok(json) => json.to_string(),
+                            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                        };
+                        let mut response =
+                            Response::from_string(body).with_status_code(StatusCode(200));
+                        if let Ok(header) = Header::from_bytes(
+                            b"Content-Type".as_slice(),
+                            b"application/json".as_slice(),
+                        ) {
+                            response = response.with_header(header);
+                        }
+                        let _ = request.respond(response);
+                    } else if request.method() == &Method::Post
+                        && request.url() == "/contract/query"
+                    {
+                        let mut body = String::new();
+                        let _ = request.as_reader().read_to_string(&mut body);
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let v: serde_json::Value = serde_json::from_str(&body)?;
+                                let cid_hex =
+                                    v["contract_id"].as_str().ok_or("Missing 'contract_id'")?;
+                                let method = v["method"].as_str().ok_or("Missing 'method'")?;
+                                let payload_hex = v["payload_hex"].as_str().unwrap_or("");
+                                let cid_bytes = hex::decode(cid_hex)
+                                    .map_err(|e| format!("Invalid contract id: {}", e))?;
+                                if cid_bytes.len() != 32 {
+                                    return Err("Contract id must be 32 bytes".into());
+                                }
+                                let mut cid_arr = [0u8; 32];
+                                cid_arr.copy_from_slice(&cid_bytes);
+                                let cid = ContractId::from_bytes(&cid_arr);
+                                let payload = if payload_hex.is_empty() {
+                                    vec![]
+                                } else {
+                                    hex::decode(payload_hex)
+                                        .map_err(|e| format!("Invalid payload hex: {}", e))?
+                                };
+                                let result = runtime.query_contract(&cid, method, &payload)?;
+                                Ok(serde_json::json!({"result_hex": hex::encode(&result)}))
+                            })();
+                        let body = match response_json {
+                            Ok(json) => json.to_string(),
+                            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                        };
+                        let mut response =
+                            Response::from_string(body).with_status_code(StatusCode(200));
+                        if let Ok(header) = Header::from_bytes(
+                            b"Content-Type".as_slice(),
+                            b"application/json".as_slice(),
+                        ) {
+                            response = response.with_header(header);
+                        }
+                        let _ = request.respond(response);
                     } else {
                         let _ = request.respond(
                             Response::from_string("Not Found").with_status_code(StatusCode(404)),

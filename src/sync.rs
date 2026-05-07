@@ -4,9 +4,10 @@ use hex;
 use log;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::RwLock;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -173,6 +174,7 @@ impl std::fmt::Debug for CustomSync {
 pub struct TlsConfig {
     pub server_config: tokio_rustls::rustls::ServerConfig,
     pub client_config: tokio_rustls::rustls::ClientConfig,
+    pub cert_pins: Arc<RwLock<HashSet<Vec<u8>>>>,
 }
 
 impl std::fmt::Debug for TlsConfig {
@@ -186,6 +188,7 @@ impl Clone for TlsConfig {
         TlsConfig {
             server_config: self.server_config.clone(),
             client_config: self.client_config.clone(),
+            cert_pins: Arc::clone(&self.cert_pins),
         }
     }
 }
@@ -228,13 +231,16 @@ impl TlsConfig {
                 SyncError::NetworkError(format!("Failed to build server TLS config: {}", e))
             })?;
 
-        // Build client config — accept all certs for P2P mode
+        // Build client config with certificate pinning
+        let cert_pins = Arc::new(RwLock::new(HashSet::new()));
         let client_config = tokio_rustls::rustls::ClientConfig::builder()
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification::new()))
+            .with_custom_certificate_verifier(Arc::new(CertificatePinner::new(Arc::clone(
+                &cert_pins,
+            ))))
             .with_no_client_auth();
 
-        Ok(TlsConfig { server_config, client_config })
+        Ok(TlsConfig { server_config, client_config, cert_pins })
     }
 
     /// Generate a self-signed TLS config for development
@@ -266,35 +272,73 @@ impl TlsConfig {
             )
             .map_err(|e| SyncError::NetworkError(format!("Server TLS config: {}", e)))?;
 
+        let cert_pins = Arc::new(RwLock::new(HashSet::new()));
         let client_config = tokio_rustls::rustls::ClientConfig::builder()
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification::new()))
+            .with_custom_certificate_verifier(Arc::new(CertificatePinner::new(Arc::clone(
+                &cert_pins,
+            ))))
             .with_no_client_auth();
 
-        Ok(TlsConfig { server_config, client_config })
+        Ok(TlsConfig { server_config, client_config, cert_pins })
+    }
+
+    /// Add a certificate pin from a hex-encoded SHA256 fingerprint.
+    /// Once pins are set, only certificates matching a pinned fingerprint are accepted.
+    pub fn add_cert_pin(&self, fingerprint_hex: &str) -> Result<(), SyncError> {
+        let bytes = hex::decode(fingerprint_hex)
+            .map_err(|e| SyncError::NetworkError(format!("Invalid hex fingerprint: {}", e)))?;
+        if bytes.len() != 32 {
+            return Err(SyncError::NetworkError(
+                "Fingerprint must be 32 bytes (SHA256)".to_string(),
+            ));
+        }
+        let mut pins =
+            self.cert_pins.write().map_err(|e| SyncError::NetworkError(e.to_string()))?;
+        pins.insert(bytes);
+        log::info!("Added certificate pin: {} ({} total)", fingerprint_hex, pins.len());
+        Ok(())
     }
 }
 
-/// No-op certificate verifier for P2P mode (accepts all certs)
-#[derive(Debug)]
-struct NoCertificateVerification(rustls::crypto::CryptoProvider);
+/// Certificate pinning verifier — checks SHA256 fingerprint against pin set.
+/// If pin set is empty, accepts any certificate (backward compatible).
+struct CertificatePinner {
+    cert_pins: Arc<RwLock<HashSet<Vec<u8>>>>,
+    provider: rustls::crypto::CryptoProvider,
+}
 
-impl NoCertificateVerification {
-    fn new() -> Self {
-        Self(rustls::crypto::aws_lc_rs::default_provider())
+impl std::fmt::Debug for CertificatePinner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CertificatePinner").finish_non_exhaustive()
     }
 }
 
-impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
+impl CertificatePinner {
+    fn new(cert_pins: Arc<RwLock<HashSet<Vec<u8>>>>) -> Self {
+        Self { cert_pins, provider: rustls::crypto::aws_lc_rs::default_provider() }
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for CertificatePinner {
     fn verify_server_cert(
         &self,
-        _end_entity: &rustls::pki_types::CertificateDer,
+        end_entity: &rustls::pki_types::CertificateDer,
         _intermediates: &[rustls::pki_types::CertificateDer],
         _server_name: &rustls::pki_types::ServerName,
         _ocsp_response: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
+        let pins = self.cert_pins.read().map_err(|e| rustls::Error::General(e.to_string()))?;
+        if pins.is_empty() {
+            return Ok(rustls::client::danger::ServerCertVerified::assertion());
+        }
+        let cert_hash = Sha256::digest(end_entity.as_ref()).to_vec();
+        if pins.contains(&cert_hash) {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General("certificate fingerprint not in pin set".into()))
+        }
     }
 
     fn verify_tls12_signature(
@@ -307,7 +351,7 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
             message,
             cert,
             dss,
-            &self.0.signature_verification_algorithms,
+            &self.provider.signature_verification_algorithms,
         )
     }
 
@@ -321,12 +365,12 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
             message,
             cert,
             dss,
-            &self.0.signature_verification_algorithms,
+            &self.provider.signature_verification_algorithms,
         )
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
+        self.provider.signature_verification_algorithms.supported_schemes()
     }
 }
 
