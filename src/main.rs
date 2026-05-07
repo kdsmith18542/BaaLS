@@ -10,9 +10,10 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use baals::{
     config::{generate_default_config, setup_logging, Config, NodeStatus},
-    Account, Address, AnyStorage, BaaLSContractEngine, ContractEngine, ContractId, Keystore,
-    MetricsCollector, NoopSync, PoAConsensus, PublicKey, RedbStorage, Runtime, SledStorage,
-    Storage, Transaction, TransactionPayload, TransactionSignature,
+    Account, Address, AnyStorage, BaaLSContractEngine, ContractEngine, ContractId, CustomSync,
+    Keystore, MetricsCollector, NoopSync, PoAConsensus, PublicKey, RedbStorage, Runtime,
+    SledStorage, Storage, SyncLayer, SyncWrapper, Transaction, TransactionPayload,
+    TransactionSignature,
 };
 
 #[derive(Parser)]
@@ -70,6 +71,10 @@ enum NodeCommands {
         daemon: bool,
         #[arg(long, hide = true, default_value_t = false)]
         foreground_internal: bool,
+        #[arg(long)]
+        peer: Vec<String>,
+        #[arg(long, default_value = "0.0.0.0:9070")]
+        listen: String,
     },
     Stop {
         #[arg(short, long, default_value = "./data")]
@@ -82,6 +87,18 @@ enum NodeCommands {
     Config {
         #[command(subcommand)]
         action: ConfigCommands,
+    },
+    Backup {
+        #[arg(short, long, default_value = "./data")]
+        data_dir: PathBuf,
+        #[arg(short, long, default_value = "backup.baals")]
+        output: PathBuf,
+    },
+    Restore {
+        #[arg(short, long, default_value = "./data")]
+        data_dir: PathBuf,
+        #[arg(short, long)]
+        input: PathBuf,
     },
 }
 
@@ -117,6 +134,9 @@ enum WalletCommands {
     Sign {
         identifier: String,
         message: String,
+    },
+    Delete {
+        identifier: String,
     },
 }
 
@@ -274,7 +294,7 @@ fn text_or_json(json: bool, text: &str, json_val: serde_json::Value) -> String {
 
 // ─── Runtime helpers ───
 
-type BaaLSRuntime = Runtime<AnyStorage, PoAConsensus, NoopSync>;
+type BaaLSRuntime = Runtime<AnyStorage, PoAConsensus, SyncWrapper>;
 
 const NODE_STOP_FILENAME: &str = "baals.stop";
 
@@ -343,6 +363,9 @@ fn wait_for_pid_file(
 fn build_runtime(
     data_dir: &PathBuf,
     backend: &str,
+    block_time_ms: u64,
+    peers: &[String],
+    listen_addr: &str,
 ) -> Result<BaaLSRuntime, Box<dyn std::error::Error>> {
     std::fs::create_dir_all(data_dir)?;
     let storage: AnyStorage = match backend {
@@ -352,7 +375,7 @@ fn build_runtime(
 
     // Load or generate persistent consensus key
     let key_path = data_dir.join("consensus.key");
-    let (_public_key, consensus) = if key_path.exists() {
+    let (public_key, consensus) = if key_path.exists() {
         let key_bytes = std::fs::read(&key_path)?;
         if key_bytes.len() != 32 {
             return Err("Invalid consensus key length".into());
@@ -361,7 +384,7 @@ fn build_runtime(
         arr.copy_from_slice(&key_bytes);
         let signing_key = SigningKey::from_bytes(&arr);
         let pk = PublicKey::from(signing_key.verifying_key());
-        let consensus = PoAConsensus::new(pk, 5000).with_signing_key(signing_key);
+        let consensus = PoAConsensus::new(pk, block_time_ms).with_signing_key(signing_key);
         (pk, consensus)
     } else {
         let mut secret_bytes = [0u8; 32];
@@ -369,14 +392,29 @@ fn build_runtime(
         let signing_key = SigningKey::from_bytes(&secret_bytes);
         std::fs::write(&key_path, secret_bytes)?;
         let pk = PublicKey::from(signing_key.verifying_key());
-        let consensus = PoAConsensus::new(pk, 5000).with_signing_key(signing_key);
+        let consensus = PoAConsensus::new(pk, block_time_ms).with_signing_key(signing_key);
         (pk, consensus)
     };
 
     let contract_engine = BaaLSContractEngine::new(storage.clone())?;
-    let sync_layer = NoopSync;
+
+    // Create sync layer: CustomSync if peers configured, NoopSync otherwise
+    let listen_socket: std::net::SocketAddr =
+        listen_addr.parse().unwrap_or_else(|_| "0.0.0.0:9070".parse().unwrap());
+    let sync_layer = if peers.is_empty() {
+        SyncWrapper::Noop(NoopSync)
+    } else {
+        let cs = CustomSync::new(public_key, listen_socket).with_storage(storage.clone_storage());
+        for peer_addr in peers {
+            if let Err(e) = cs.add_peer_by_address(peer_addr) {
+                log::warn!("Failed to add peer '{}': {}", peer_addr, e);
+            }
+        }
+        SyncWrapper::Custom(Box::new(cs))
+    };
+
     let mut runtime = Runtime::new(storage, consensus, contract_engine, sync_layer)?;
-    runtime.auto_block_interval_ms = 5000;
+    runtime.auto_block_interval_ms = block_time_ms;
     runtime.auto_block_mempool_threshold = 10;
     runtime.start()?;
     Ok(runtime)
@@ -506,7 +544,15 @@ fn handle_node(
     backend: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     match action {
-        NodeCommands::Start { config, data_dir, port, daemon, foreground_internal } => {
+        NodeCommands::Start {
+            config,
+            data_dir,
+            port,
+            daemon,
+            foreground_internal,
+            peer,
+            listen,
+        } => {
             if daemon && !foreground_internal {
                 std::fs::create_dir_all(&data_dir)?;
                 let exe = std::env::current_exe()?;
@@ -571,7 +617,8 @@ fn handle_node(
             let started_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             write_pid_info(&pid_path, std::process::id(), started_at)?;
 
-            let runtime = build_runtime(&data_dir, backend)?;
+            let runtime =
+                build_runtime(&data_dir, backend, cfg.consensus.block_time_ms, &peer, &listen)?;
             let health_bind = format!("0.0.0.0:{}", cfg.node.health_port);
             spawn_health_server(runtime.clone(), health_bind)?;
             info!("Node started. Press Ctrl+C to stop.");
@@ -707,6 +754,24 @@ fn handle_node(
             ))
         }
         NodeCommands::Config { action } => handle_config(action, json),
+        NodeCommands::Backup { data_dir, output } => {
+            let storage = SledStorage::new(&data_dir)?;
+            storage.backup_to(&output)?;
+            Ok(text_or_json(
+                json,
+                &format!("Backup saved to {:?}", output),
+                serde_json::json!({"status": "backup_complete", "output": output.to_string_lossy()}),
+            ))
+        }
+        NodeCommands::Restore { data_dir, input } => {
+            let storage = SledStorage::new(&data_dir)?;
+            storage.restore_from(&input)?;
+            Ok(text_or_json(
+                json,
+                &format!("Restored from {:?}", input),
+                serde_json::json!({"status": "restore_complete", "input": input.to_string_lossy()}),
+            ))
+        }
     }
 }
 
@@ -797,6 +862,15 @@ fn handle_wallet(
                 serde_json::json!({"signature": hex::encode(sig.to_bytes())}),
             ))
         }
+        WalletCommands::Delete { identifier } => {
+            let pk = parse_pubkey(&identifier)?;
+            keystore.delete_key(&pk)?;
+            Ok(text_or_json(
+                json,
+                &format!("Wallet deleted: {}", hex::encode(pk.to_bytes())),
+                serde_json::json!({"deleted": hex::encode(pk.to_bytes())}),
+            ))
+        }
     }
 }
 
@@ -811,7 +885,7 @@ fn handle_tx(
 
     match action {
         TxCommands::Transfer { sender, recipient, amount, memo, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend)?;
+            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
             let sender_pk = parse_pubkey(&sender)?;
             let recipient_pk = parse_pubkey(&recipient)?;
 
@@ -868,7 +942,7 @@ fn handle_tx(
             ))
         }
         TxCommands::DeployContract { sender, wasm, init_args, gas_limit, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend)?;
+            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
             let sender_pk = parse_pubkey(&sender)?;
             let wasm_bytes = std::fs::read(&wasm)?;
             let _account = runtime
@@ -898,7 +972,7 @@ fn handle_tx(
             gas_limit,
             data_dir,
         } => {
-            let runtime = build_runtime(&data_dir, backend)?;
+            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
             let sender_pk = parse_pubkey(&sender)?;
             let cid_bytes = hex::decode(&contract_id)?;
             if cid_bytes.len() != 32 {
@@ -924,7 +998,7 @@ fn handle_tx(
             ))
         }
         TxCommands::Data { sender, data, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend)?;
+            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
             let sender_pk = parse_pubkey(&sender)?;
             let account = runtime
                 .get_account(&sender_pk)?
@@ -991,7 +1065,7 @@ fn handle_query(
 ) -> Result<String, Box<dyn std::error::Error>> {
     match action {
         QueryCommands::Head { data_dir } => {
-            let runtime = build_runtime(&data_dir, backend)?;
+            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
             let chain = runtime.get_chain_state()?;
             let block = runtime.get_block(&chain.latest_block_hash)?.ok_or("No block found")?;
             Ok(text_or_json(
@@ -1006,7 +1080,7 @@ fn handle_query(
             ))
         }
         QueryCommands::Block { identifier, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend)?;
+            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
             let block = if let Ok(h) = hex::decode(&identifier) {
                 if h.len() == 32 {
                     let mut arr = [0u8; 32];
@@ -1041,7 +1115,7 @@ fn handle_query(
             }
         }
         QueryCommands::Tx { hash, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend)?;
+            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
             let h = hex::decode(&hash)?;
             if h.len() != 32 {
                 return Err("Hash must be 32 bytes hex".into());
@@ -1063,7 +1137,7 @@ fn handle_query(
             }
         }
         QueryCommands::Account { address, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend)?;
+            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
             let pk = parse_pubkey(&address)?;
             match runtime.get_account(&pk)? {
                 Some(Account::Wallet { balance, nonce }) => Ok(text_or_json(
@@ -1087,7 +1161,7 @@ fn handle_query(
             }
         }
         QueryCommands::ContractState { contract_id, key, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend)?;
+            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
             let cid_bytes = hex::decode(&contract_id)?;
             if cid_bytes.len() != 32 {
                 return Err("CID must be 32 bytes hex".into());
@@ -1111,7 +1185,7 @@ fn handle_query(
             }
         }
         QueryCommands::ContractCall { contract_id, method, args, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend)?;
+            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
             let cid_bytes = hex::decode(&contract_id)?;
             if cid_bytes.len() != 32 {
                 return Err("CID must be 32 bytes hex".into());
@@ -1161,7 +1235,7 @@ fn handle_dev(
             let cid = ContractId::from_bytes(&[0u8; 32]); // dummy for simulation
             let arg_bytes = args.map(|a| a.into_bytes()).unwrap_or_default();
             let result =
-                engine.call_contract(&dummy_pk, &cid, &method, &arg_bytes, None, &storage)?;
+                engine.call_contract(&dummy_pk, &cid, &method, &arg_bytes, None, &storage, 0, 0)?;
             Ok(text_or_json(
                 json,
                 &format!(
@@ -1211,7 +1285,7 @@ fn handle_dev(
             ))
         }
         DevCommands::PerformanceReport { data_dir } => {
-            let runtime = build_runtime(&data_dir, backend)?;
+            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
             let metrics = runtime.get_detailed_metrics()?;
             Ok(text_or_json(
                 json,

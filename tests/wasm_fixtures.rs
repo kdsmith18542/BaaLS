@@ -2,7 +2,7 @@ pub fn make_self_calling_module() -> Vec<u8> {
     wat::parse_str(
         r#"(module
   (import "env" "baals_get_contract_id" (func $get_id (param i32)))
-  (import "env" "baals_call_contract" (func $call_ct (param i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "env" "baals_call_contract" (func $call_ct (param i32 i32 i32 i32 i32 i32 i64) (result i32)))
   (memory (export "memory") 1)
   (func (export "reenter") (param i32 i32) (result i32)
     (call $get_id (i32.const 0))
@@ -10,7 +10,7 @@ pub fn make_self_calling_module() -> Vec<u8> {
     (i32.store8 (i32.const 33) (i32.const 101))
     (i32.store8 (i32.const 34) (i32.const 115))
     (i32.store8 (i32.const 35) (i32.const 116))
-    (i32.store (i32.const 0) (call $call_ct (i32.const 0) (i32.const 32) (i32.const 32) (i32.const 4) (i32.const 36) (i32.const 0)))
+    (i32.store (i32.const 0) (call $call_ct (i32.const 0) (i32.const 32) (i32.const 32) (i32.const 4) (i32.const 36) (i32.const 0) (i64.const 0)))
     i32.const 4
   )
   (func (export "safe") (param i32 i32) (result i32)

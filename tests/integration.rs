@@ -689,7 +689,10 @@ fn test_contract_storage_root_tracks_contract_kv_state() {
         hash: [0u8; 32],
         sender: deployer,
         recipient: Address::Wallet(deployer),
-        payload: TransactionPayload::ContractDeploy { wasm_bytes: wasm_bytes.clone() },
+        payload: TransactionPayload::ContractDeploy {
+            wasm_bytes: wasm_bytes.clone(),
+            init_payload: None,
+        },
         nonce: 1,
         timestamp: now,
         signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
@@ -738,21 +741,17 @@ fn test_contract_storage_root_tracks_contract_kv_state() {
     std::thread::sleep(Duration::from_secs(1));
     tokio_rt.block_on(runtime.produce_block()).unwrap();
 
-    // Recompute expected storage root using the same leaf encoding as ledger.
-    let mut expected_merkle = MerkleTree::new();
+    // Recompute expected storage root using SparseMerkleTree (matching ledger impl).
+    let mut expected_smt = SparseMerkleTree::new();
     let kvs = vec![
         (b"alpha".as_ref().to_vec(), b"value-1".as_ref().to_vec()),
         (b"beta".as_ref().to_vec(), b"value-2".as_ref().to_vec()),
     ];
     for (k, v) in kvs {
-        let mut leaf = Vec::with_capacity(16 + k.len() + v.len());
-        leaf.extend_from_slice(&(k.len() as u64).to_le_bytes());
-        leaf.extend_from_slice(&k);
-        leaf.extend_from_slice(&(v.len() as u64).to_le_bytes());
-        leaf.extend_from_slice(&v);
-        expected_merkle.add_leaf(&leaf);
+        let smt_key: [u8; 32] = sha2::Sha256::digest(&k).into();
+        expected_smt.insert(smt_key, v);
     }
-    let expected_root = expected_merkle.root().unwrap();
+    let expected_root = expected_smt.root();
 
     // Find the contract account and verify its storage root matches contract KV state.
     let all_accounts = runtime.storage().get_all_accounts().unwrap();

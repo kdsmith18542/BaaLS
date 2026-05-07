@@ -146,6 +146,18 @@ impl Storage for RedbStorage {
         Ok(())
     }
 
+    fn put_pending_transaction(&self, tx: &Transaction) -> Result<(), StorageError> {
+        let key = format!("pending:{}", hex::encode(tx.hash));
+        let encoded = bincode::serialize(tx)?;
+        let txn = self.db.begin_write().map_err(map_err)?;
+        {
+            let mut table = txn.open_table(PENDING_TABLE).map_err(map_err)?;
+            table.insert(key.as_bytes(), encoded.as_slice()).map_err(map_err)?;
+        }
+        txn.commit().map_err(map_err)?;
+        Ok(())
+    }
+
     fn index_transaction(
         &self,
         tx_hash: &[u8; 32],

@@ -277,6 +277,29 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         *self.started_at.lock().unwrap() = Some(SystemTime::now());
 
+        // Reload pending transactions from storage (crash recovery)
+        if let Ok(pending) = self.storage.get_pending_transactions() {
+            if !pending.is_empty() {
+                let mut mempool = self.mempool.lock().unwrap();
+                for tx in pending {
+                    let _ = mempool.insert(tx);
+                }
+                info!("Loaded {} pending transactions from storage", mempool.len());
+            }
+        }
+
+        // Spawn P2P sync listener in background
+        let sync_layer = Arc::clone(&self.sync_layer);
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new()
+                .expect("Failed to create sync listener tokio runtime");
+            rt.block_on(async move {
+                if let Err(e) = sync_layer.start_listener().await {
+                    log::error!("Sync listener error: {}", e);
+                }
+            });
+        });
+
         // Spawn automatic block production if configured
         if self.auto_block_interval_ms > 0 && self.auto_block_mempool_threshold > 0 {
             self.spawn_block_production();
@@ -326,10 +349,10 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                     let should_produce = {
                         let mempool = self_clone.mempool.lock().unwrap();
                         !mempool.is_empty() && mempool.len() >= threshold
-                    } || {
-                        let mempool = self_clone.mempool.lock().unwrap();
-                        !mempool.is_empty()
                     };
+
+                    // Apply any blocks received from peers
+                    self_clone.apply_received_blocks();
 
                     if should_produce {
                         match self_clone.produce_block().await {
@@ -350,6 +373,9 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                             }
                         }
                     }
+
+                    // Sync with peers to check if we're behind
+                    self_clone.sync_with_all_peers();
                 }
                 debug!("Block production loop terminated");
             });
@@ -424,7 +450,10 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                             ));
                         }
                     }
-                    crate::types::TransactionPayload::ContractDeploy { wasm_bytes } => {
+                    crate::types::TransactionPayload::ContractDeploy {
+                        wasm_bytes,
+                        init_payload: _,
+                    } => {
                         if wasm_bytes.len() < 8 {
                             return Err(RuntimeError::InvalidTransaction(
                                 "WASM bytecode too short".to_string(),
@@ -504,6 +533,8 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         let mut mempool = self.mempool.lock().unwrap();
         mempool.insert(transaction)?;
+        // Persist to storage for crash recovery
+        let _ = self.storage.put_pending_transaction(mempool.get(&hash).unwrap());
         self.metrics.record_mempool_operation();
         info!("Transaction submitted: {}", crate::types::format_hex(&hash));
         Ok(())
@@ -658,6 +689,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         let mut mempool = self.mempool.lock().unwrap();
         for tx in &new_block.transactions {
             mempool.remove(&tx.hash);
+            let _ = self.storage.remove_pending_transaction(&tx.hash);
         }
         info!(
             "[PRODUCE_BLOCK] Removed {} transactions from mempool",
@@ -823,13 +855,73 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         self.get_chain_state()
     }
 
-    pub fn add_peer(
-        &self,
-        _address: &[u8; 32],
-        _public_key: PublicKey,
-    ) -> Result<(), RuntimeError> {
-        // For now, just return success - in a full implementation, this would add to peer list
-        Ok(())
+    pub fn add_peer(&self, address: &str) -> Result<(), RuntimeError> {
+        self.sync_layer
+            .add_peer_by_address(address)
+            .map_err(|e| RuntimeError::InvalidTransaction(format!("Add peer failed: {}", e)))
+    }
+
+    /// Apply blocks received from peers via the sync layer.
+    fn apply_received_blocks(&self) {
+        let blocks = self.sync_layer.poll_received_blocks();
+        if blocks.is_empty() {
+            return;
+        }
+        info!("[SYNC] Processing {} blocks received from peers", blocks.len());
+        for block in blocks {
+            match self.ledger.validate_block(&block, &self.chain_state.lock().unwrap()) {
+                Ok(()) => {
+                    let mut chain_state = self.chain_state.lock().unwrap();
+                    match self.ledger.apply_block(block.clone(), &mut chain_state) {
+                        Ok(()) => {
+                            info!(
+                                "[SYNC] Applied received block #{} ({} txns)",
+                                block.index,
+                                block.transactions.len()
+                            );
+                        }
+                        Err(e) => {
+                            warn!("[SYNC] Failed to apply received block #{}: {}", block.index, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("[SYNC] Received block #{} failed validation: {}", block.index, e);
+                }
+            }
+        }
+    }
+
+    /// Check all known peers and sync with any that are ahead.
+    fn sync_with_all_peers(&self) {
+        let sync_layer = Arc::clone(&self.sync_layer);
+        let self_clone = self.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create sync tokio runtime");
+            rt.block_on(async move {
+                let peers = match sync_layer.discover_peers().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                if peers.is_empty() {
+                    return;
+                }
+                let chain_state = self_clone.chain_state.lock().unwrap().clone();
+                for peer in &peers {
+                    match sync_layer.sync_with_peer(peer, &chain_state).await {
+                        Ok(_block) => {
+                            debug!("[SYNC] Synced with peer {}", peer.address);
+                            self_clone.apply_received_blocks();
+                        }
+                        Err(e) => {
+                            if !matches!(e, crate::sync::SyncError::SynchronizationError(_)) {
+                                debug!("[SYNC] Sync with {} failed: {}", peer.address, e);
+                            }
+                        }
+                    }
+                }
+            });
+        });
     }
 
     pub fn get_metrics(&self) -> Result<HashMap<String, f64>, RuntimeError> {
@@ -920,7 +1012,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         // Use the contract engine to call the contract
         let result = self
             .contract_engine_arc
-            .call_contract(caller, contract_id, method_name, args, value, &*self.storage)
+            .call_contract(caller, contract_id, method_name, args, value, &*self.storage, 0, 0)
             .map_err(|e| {
                 RuntimeError::InvalidTransaction(format!("Contract call failed: {}", e))
             })?;
@@ -945,7 +1037,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         // Use the contract engine to query the contract
         let result = self
             .contract_engine_arc
-            .query_contract(contract_id, method_name, payload, &*self.storage)
+            .query_contract(contract_id, method_name, payload, &*self.storage, 0, 0)
             .map_err(|e| {
                 RuntimeError::InvalidTransaction(format!("Contract query failed: {}", e))
             })?;

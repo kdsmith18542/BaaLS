@@ -266,6 +266,31 @@ impl Config {
                 self.validate()?;
             }
             "logging.file" => self.logging.file = value.to_string(),
+            "storage.cache_size_mb" => {
+                self.storage.cache_size_mb = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid cache_size_mb".into()))?
+            }
+            "storage.compression" => {
+                self.storage.compression = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid compression (true/false)".into()))?
+            }
+            "storage.backend" => {
+                self.storage.backend = match value.to_lowercase().as_str() {
+                    "sled" => StorageBackend::Sled,
+                    "redb" => StorageBackend::Redb,
+                    _ => return Err(ConfigError::Invalid(format!("Unknown backend: {}", value))),
+                }
+            }
+            "network.tls_enabled" => {
+                self.network.tls_enabled = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid tls_enabled (true/false)".into()))?
+            }
+            "network.tls_cert_path" => self.network.tls_cert_path = value.to_string(),
+            "network.tls_key_path" => self.network.tls_key_path = value.to_string(),
+            "network.tls_ca_cert_path" => self.network.tls_ca_cert_path = value.to_string(),
             _ => return Err(ConfigError::Invalid(format!("Unknown config key: {}", key))),
         }
         Ok(())

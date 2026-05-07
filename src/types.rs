@@ -512,7 +512,9 @@ impl Transaction {
     pub fn payload_size_estimate(&self) -> usize {
         match &self.payload {
             TransactionPayload::Transfer { .. } => 40,
-            TransactionPayload::ContractDeploy { wasm_bytes } => wasm_bytes.len() + 100,
+            TransactionPayload::ContractDeploy { wasm_bytes, init_payload } => {
+                wasm_bytes.len() + init_payload.as_ref().map(|p| p.len()).unwrap_or(0) + 100
+            }
             TransactionPayload::ContractCall { method, args, .. } => method.len() + args.len() + 50,
             TransactionPayload::Data { data } => data.len() + 10,
         }
@@ -564,7 +566,7 @@ impl std::fmt::Display for Address {
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub enum TransactionPayload {
     Transfer { amount: u64 },
-    ContractDeploy { wasm_bytes: Vec<u8> },
+    ContractDeploy { wasm_bytes: Vec<u8>, init_payload: Option<Vec<u8>> },
     ContractCall { method: String, args: Vec<u8>, value: Option<u64> },
     Data { data: Vec<u8> },
 }
@@ -621,10 +623,14 @@ impl Block {
         hasher.update(self.prev_hash);
         hasher.update(self.nonce.to_le_bytes());
 
-        // Serialize transactions deterministically
-        let serialized_txns =
-            bincode::serialize(&self.transactions).map_err(|_| CryptoError::HashConversionError)?;
-        hasher.update(serialized_txns);
+        // Compute Merkle root of transaction hashes
+        let mut merkle = MerkleTree::new();
+        for tx in &self.transactions {
+            merkle.add_leaf_hash(tx.hash);
+        }
+        let tx_root =
+            if merkle.is_empty() { [0u8; 32] } else { merkle.root().unwrap_or([0u8; 32]) };
+        hasher.update(tx_root);
 
         Ok(hasher.finalize().into())
     }

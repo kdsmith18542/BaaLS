@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::contracts::ContractEngine;
 use crate::storage::{Storage, StorageBatch, StorageError, StorageOperation};
 use crate::types::{
-    Account, Block, ChainState, ContractId, CryptoError, MerkleTree, PublicKey, SparseMerkleTree,
+    Account, Block, ChainState, ContractId, CryptoError, PublicKey, SparseMerkleTree,
     TransactionPayload,
 };
 
@@ -248,22 +248,19 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         keys.sort();
         keys.dedup();
 
-        let mut merkle = MerkleTree::new();
+        let mut smt = SparseMerkleTree::new();
         for key in keys {
             if let Some(value) = self.storage.contract_storage_read(contract_id, &key)? {
-                let mut leaf = Vec::with_capacity(16 + key.len() + value.len());
-                leaf.extend_from_slice(&(key.len() as u64).to_le_bytes());
-                leaf.extend_from_slice(&key);
-                leaf.extend_from_slice(&(value.len() as u64).to_le_bytes());
-                leaf.extend_from_slice(&value);
-                merkle.add_leaf(&leaf);
+                // Hash the storage key to get a 32-byte SMT key
+                let smt_key = sha2::Sha256::digest(&key).into();
+                smt.insert(smt_key, value);
             }
         }
 
-        if merkle.is_empty() {
+        if smt.is_empty() {
             Ok([0; 32])
         } else {
-            Ok(merkle.root().unwrap_or([0; 32]))
+            Ok(smt.root())
         }
     }
 
@@ -384,7 +381,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                         }
                     }
                 }
-                TransactionPayload::ContractDeploy { wasm_bytes } => {
+                TransactionPayload::ContractDeploy { wasm_bytes, init_payload } => {
                     gas_used += 100_000;
                     if gas_used > tx.gas_limit {
                         tx_success = false;
@@ -400,7 +397,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                             &deployer,
                             deployer_nonce,
                             wasm_bytes,
-                            None,
+                            init_payload.as_deref(),
                             &*self.storage,
                             tx.gas_limit.saturating_sub(gas_used),
                         ) {
@@ -493,6 +490,8 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                             args,
                             *value,
                             &*self.storage,
+                            block.index,
+                            block.timestamp,
                         ) {
                             Ok(result) => {
                                 info!(

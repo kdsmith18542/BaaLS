@@ -193,10 +193,6 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
             total_size += tx.payload_size_estimate();
 
             if total_gas > self.block_gas_limit || total_size > self.block_size_limit {
-                if transactions.is_empty() {
-                    // At least one transaction allowed even if it exceeds limits
-                    transactions.push(tx.clone());
-                }
                 break;
             }
             transactions.push(tx.clone());

@@ -46,6 +46,9 @@ impl Storage for AnyStorage {
     fn get_pending_transactions(&self) -> Result<Vec<Transaction>, StorageError> {
         dispatch!(self, get_pending_transactions)
     }
+    fn put_pending_transaction(&self, tx: &Transaction) -> Result<(), StorageError> {
+        dispatch!(self, put_pending_transaction, tx)
+    }
     fn remove_pending_transaction(&self, tx_hash: &[u8; 32]) -> Result<(), StorageError> {
         dispatch!(self, remove_pending_transaction, tx_hash)
     }

@@ -2,6 +2,20 @@
 
 Intentional design deviations from the spec documents in `docs/`, with rationale.
 
+## Resolved Gaps (2026-05-06 update)
+
+| Gap | Status | Notes |
+|-----|--------|-------|
+| Block hash uses tx Merkle root | Resolved | `Block::calculate_hash()` now computes MerkleTree from tx hashes instead of serializing raw transactions. |
+| ContractDeploy missing init_payload | Resolved | Added `init_payload: Option<Vec<u8>>` to `TransactionPayload::ContractDeploy`. |
+| WASI block context always zero | Resolved | Added `block_index` and `block_timestamp` params to `ContractEngine::call_contract()` and `query_contract()`. Ledger passes real block context; runtime/CLI pass (0,0). |
+| baals_call_contract missing value param | Resolved | Added `value: i64` (7th parameter) to WASI `baals_call_contract` host function. Inter-contract call tuples now include value. |
+| Config not wired to consensus | Resolved | `build_runtime()` now accepts `block_time_ms` parameter passed from config; `block_time_ms` applied to `PoAConsensus::new()` and auto-block interval. |
+| Block overflow tx allowed | Resolved | Removed "allow at least one" override; tx exceeding block gas/size limits is now properly rejected. |
+| Auto-block threshold bypass | Resolved | Removed `|| !is_empty()` fallback; blocks only auto-produce when mempool reaches configured threshold. |
+| Missing wallet delete CLI | Resolved | Added `WalletCommands::Delete` variant and handler using `Keystore::delete_key()`. |
+| Config::set() missing keys | Resolved | Added `storage.cache_size_mb`, `storage.compression`, `storage.backend`, `network.tls_enabled`, `network.tls_cert_path`, `network.tls_key_path`, `network.tls_ca_cert_path`. |
+
 ## Type Deviations
 
 ### L1: Crate named `baals` not `libchain`
@@ -73,16 +87,30 @@ Intentional design deviations from the spec documents in `docs/`, with rationale
 
 ## Remaining Known Gaps
 
-All gaps below are **documented/architectural deferrals** — they represent intentional scope decisions or infrastructure prerequisites rather than missing functionality.
+All gaps below are tracked in `plan.md` with specific phases for resolution.
 
-| Gap | Status | Notes |
-|-----|--------|-------|
-| M2: ContractEngine trait diffs | Documented | Extra params (deployer_nonce, gas_limit, value) are functional improvements. See §Contract Engine Deviations above. |
-| M3: No WasmRuntime sub-trait | Documented | WASM execution inline in BaaLSContractEngine. See §Contract Engine Deviations above. |
-| M5: Storage key prefixes | Deferred | Raw keys used; migration risk if adding `"acc:"`, `"code:"` prefixes. |
-| M6: get_transaction_by_id return type | Deferred | Returns Transaction only; returning (Block, Transaction) requires reverse tx-to-block index. |
-| M7: Real storage compaction | Deferred | Sled lacks compaction API; migration to redb/rocksdb would provide this. |
-| L5: NodeJS native addon | Deferred | TypeScript types only. Requires napi-rs or neon implementation. |
+| Gap | Phase | Difficulty | Notes |
+|-----|-------|------------|-------|
+| M3: No WasmRuntime sub-trait | 23.4 | Easy | WASM execution inline in BaaLSContractEngine. Extract trait. |
+| M5: Storage key prefixes | 22.1 | Medium | Raw keys used; add `"block:"`, `"acc:"`, `"code:"` prefixes with migration. |
+| M6: get_transaction_by_id return type | 22.2 | Medium | Returns Transaction only; needs reverse tx-to-block index for (Block, Transaction). |
+| M7: Real storage compaction | Deferred | Hard | Sled lacks compaction API; migration to redb/rocksdb would provide this. |
+| M10: Persist inter-contract results | 23.1 | Medium | Results lost between separate contexts; engine-level result cache needed. |
+| L5: NodeJS native addon | 26.1 | Hard | TypeScript types only. Requires napi-rs. |
+| L8: Multi-validator PoA | Deferred | Medium | Only single authority. Extend PoAConsensus to accept validator set. |
+| Sync layer never active | 24.1 | Hard | NoopSync always used; activate CustomSync behind --peer flag. |
+| Fork resolution not wired | 24.2 | Medium | `resolve_fork()` exists but never called by runtime. |
+| No peer discovery | 24.3 | Medium | mDNS/manual peer list; add `mdns-sd` crate. |
+| No mempool persistence | 25.1 | Easy | Save/reload pending txs via storage trait. |
+| No backup/restore CLI | 25.2 | Easy | Wrap existing `backup_to()`/`restore_from()` storage methods. |
+| ContractCall.args is Vec<u8> | 23.2 | Medium | Spec says Vec<Vec<u8>> for structured ABI args. |
+| Reentrancy bypass (inter-contract) | 23.3 | Medium | Fresh HostState per call; share executing_contracts guard. |
+| MerkleTree vs SparseMerkleTree | 22.5 | Medium | Contract storage root uses MerkleTree; spec says SMT. |
+| RedbStorage missing indexes | 22.4 | Medium | Height/address/contract/tx-count indexes missing in redb backend. |
+| get_transactions_by_block unsorted | 22.3 | Easy | Return order not guaranteed; add explicit sort. |
+| ContractDeployerAddress not validated | 23.6 | Easy | No reserved deployer addr convention enforced. |
+| BaaLSContractEngine::new() dead param | 23.5 | Easy | Takes _storage but stores PhantomData only. |
+| Go SDK (pure Go, not CGo) | 26.2 | Hard | Current Go bindings are CGo; need idiomatic Go SDK. |
 
 ### Resolved Gaps (previously in this section)
 

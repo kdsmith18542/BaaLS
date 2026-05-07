@@ -38,6 +38,7 @@ pub trait Storage: Send + Sync {
     fn put_transaction(&self, tx: &Transaction) -> Result<(), StorageError>;
     fn get_transaction(&self, tx_hash: &[u8; 32]) -> Result<Option<Transaction>, StorageError>;
     fn get_pending_transactions(&self) -> Result<Vec<Transaction>, StorageError>;
+    fn put_pending_transaction(&self, tx: &Transaction) -> Result<(), StorageError>;
     fn remove_pending_transaction(&self, tx_hash: &[u8; 32]) -> Result<(), StorageError>;
 
     // Enhanced Transaction indexing for fast lookup
@@ -418,8 +419,16 @@ impl Storage for SledStorage {
         Ok(transactions)
     }
 
+    fn put_pending_transaction(&self, tx: &Transaction) -> Result<(), StorageError> {
+        let key = format!("pending:{}", hex::encode(tx.hash));
+        let encoded = bincode::serialize(tx)?;
+        self.mempool_tree.insert(key.as_bytes(), encoded)?;
+        Ok(())
+    }
+
     fn remove_pending_transaction(&self, tx_hash: &[u8; 32]) -> Result<(), StorageError> {
-        self.mempool_tree.remove(tx_hash)?;
+        let key = format!("pending:{}", hex::encode(tx_hash));
+        self.mempool_tree.remove(key.as_bytes())?;
         Ok(())
     }
 
@@ -452,19 +461,24 @@ impl Storage for SledStorage {
         &self,
         block_hash: &[u8; 32],
     ) -> Result<Vec<Transaction>, StorageError> {
-        let mut transactions = Vec::new();
+        let mut indexed: Vec<(u32, Transaction)> = Vec::new();
         let prefix_string = format!("block_tx:{}:", hex::encode(block_hash));
         for item in self.tx_by_block_tree.scan_prefix(prefix_string.as_bytes()) {
-            let (_key, tx_hash_bytes) = item?;
+            let (key, tx_hash_bytes) = item?;
             let tx_hash_array: [u8; 32] =
                 tx_hash_bytes.as_ref().try_into().map_err(|_| CryptoError::HashConversionError)?;
             if let Some(tx) = self.get_transaction(&tx_hash_array)? {
-                transactions.push(tx);
+                // Extract index from key: "block_tx:{hash}:{tx_hash}:{index}"
+                let idx = std::str::from_utf8(&key)
+                    .ok()
+                    .and_then(|s| s.rsplit(':').next())
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(u32::MAX);
+                indexed.push((idx, tx));
             }
         }
-        // Transactions might not be in exact order if we don't sort after retrieval,
-        // but for now, simple retrieval by block is the goal.
-        Ok(transactions)
+        indexed.sort_by_key(|(idx, _)| *idx);
+        Ok(indexed.into_iter().map(|(_, tx)| tx).collect())
     }
 
     // New: Advanced indexing methods for Phase 3

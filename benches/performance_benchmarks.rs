@@ -235,7 +235,7 @@ fn benchmark_contract_operations(c: &mut Criterion) {
 
         b.iter(|| {
             let result = contract_engine
-                .call_contract(&caller, &contract_id, "test_method", &[], None, &storage)
+                .call_contract(&caller, &contract_id, "test_method", &[], None, &storage, 0, 0)
                 .unwrap();
             black_box(result);
         });

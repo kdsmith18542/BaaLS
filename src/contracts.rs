@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use wasmtime::{Caller, Config, Engine, Linker, Module, Store};
 
+type InterContractCall = (Vec<u8>, Vec<u8>, Vec<u8>, u64);
+
 #[derive(Debug, Error)]
 pub enum ContractError {
     #[error("Storage error: {0}")]
@@ -54,6 +56,7 @@ pub trait ContractEngine: Send + Sync {
         gas_limit: u64,
     ) -> Result<ContractId, ContractError>;
 
+    #[allow(clippy::too_many_arguments)]
     fn call_contract(
         &self,
         caller: &PublicKey,
@@ -62,6 +65,8 @@ pub trait ContractEngine: Send + Sync {
         args: &[u8],
         value: Option<u64>,
         storage: &dyn Storage,
+        block_index: u64,
+        block_timestamp: u64,
     ) -> Result<Vec<u8>, ContractError>;
 
     fn query_contract(
@@ -70,6 +75,8 @@ pub trait ContractEngine: Send + Sync {
         method_name: &str,
         payload: &[u8],
         storage: &dyn Storage,
+        block_index: u64,
+        block_timestamp: u64,
     ) -> Result<Vec<u8>, ContractError>;
 
     fn verify_contract(
@@ -221,7 +228,7 @@ struct HostState {
     reverted: bool,
     events: Vec<(Vec<u8>, Vec<u8>)>,
     last_memory_size: usize,
-    inter_contract_calls: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    inter_contract_calls: Vec<InterContractCall>,
     inter_contract_results: Vec<Vec<u8>>,
     deleted_keys: Vec<Vec<u8>>,
     permissions: ContractPermissions,
@@ -470,7 +477,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
 
                 // Process inter-contract calls after initial execution
                 let mut call_results = Vec::new();
-                for (callee_id_bytes, method_bytes, call_args) in &pending_calls {
+                for (callee_id_bytes, method_bytes, call_args, _call_value) in &pending_calls {
                     let callee_method = String::from_utf8_lossy(method_bytes).to_string();
                     // Look up callee contract code
                     let callee_id = if callee_id_bytes.len() == 32 {
@@ -904,7 +911,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
             })
             .map_err(|e| ContractError::HostFunctionError(e.to_string()))?;
 
-        // baals_call_contract(callee_ptr, callee_len, method_ptr, method_len, args_ptr, args_len) -> i32
+        // baals_call_contract(callee_ptr, callee_len, method_ptr, method_len, args_ptr, args_len, value: i64) -> i32
         linker
             .func_wrap(
                 "env",
@@ -915,7 +922,8 @@ impl<S: Storage> BaaLSContractEngine<S> {
                  method_ptr: i32,
                  method_len: i32,
                  args_ptr: i32,
-                 args_len: i32|
+                 args_len: i32,
+                 value: i64|
                  -> i32 {
                     let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
 
@@ -949,7 +957,8 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     if !state.permissions.call_contracts {
                         return -1;
                     }
-                    state.inter_contract_calls.push((callee, method, args));
+                    let native_value = if value < 0 { 0 } else { value as u64 };
+                    state.inter_contract_calls.push((callee, method, args, native_value));
                     state.inter_contract_calls.len() as i32 - 1
                 },
             )
@@ -1201,6 +1210,8 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         args: &[u8],
         value: Option<u64>,
         storage: &dyn Storage,
+        block_index: u64,
+        block_timestamp: u64,
     ) -> Result<Vec<u8>, ContractError> {
         // Reentrancy guard: check if this contract is already executing
         {
@@ -1248,8 +1259,8 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
             storage,
             false,
             self.resource_limits.gas_limit,
-            0,
-            0,
+            block_index,
+            block_timestamp,
         )?;
 
         let execution_result = ContractExecutionResult {
@@ -1281,6 +1292,8 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         method_name: &str,
         payload: &[u8],
         storage: &dyn Storage,
+        block_index: u64,
+        block_timestamp: u64,
     ) -> Result<Vec<u8>, ContractError> {
         let wasm_bytes = storage
             .get_contract_code(contract_id)
@@ -1304,8 +1317,8 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
             storage,
             true,
             self.resource_limits.gas_limit,
-            0,
-            0,
+            block_index,
+            block_timestamp,
         )?;
         Ok(result)
     }

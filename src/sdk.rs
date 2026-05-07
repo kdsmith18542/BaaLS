@@ -194,6 +194,8 @@ impl BaaLSSdk {
             args,
             value,
             self.runtime.storage(),
+            0,
+            0,
         )?;
         Ok(result)
     }
@@ -210,6 +212,8 @@ impl BaaLSSdk {
             method_name,
             payload,
             self.runtime.storage(),
+            0,
+            0,
         )?;
         Ok(result)
     }
