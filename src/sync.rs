@@ -680,29 +680,6 @@ impl CustomSync {
         Ok(message)
     }
 
-    // Send peer list to a peer
-    #[allow(dead_code)]
-    async fn send_peer_list<S>(&self, stream: &mut S) -> Result<(), SyncError>
-    where
-        S: AsyncWrite + Unpin + Send,
-    {
-        let peers = self.known_peers.lock().await;
-        let peer_list: Vec<(PublicKey, String)> =
-            peers.iter().map(|(id, addr)| (*id, addr.to_string())).collect();
-        Self::send_message(stream, NetworkMessage::PeerList { peers: peer_list }).await
-    }
-
-    // Handle incoming peer list
-    #[allow(dead_code)]
-    async fn handle_peer_list(&self, peers: Vec<(PublicKey, String)>) {
-        let mut known = self.known_peers.lock().await;
-        for (id, addr) in peers {
-            if let Ok(sock_addr) = addr.parse() {
-                known.entry(id).or_insert(sock_addr);
-            }
-        }
-    }
-
     // Handle block request with storage fallback
     async fn handle_block_request_full<S>(
         stream: &mut S,
@@ -909,7 +886,21 @@ impl SyncLayer for CustomSync {
                         .await;
                 }
 
-                if height <= local_chain_state.latest_block_index {
+                if height < local_chain_state.latest_block_index {
+                    // Peer is behind — try resolving fork in case our chain is stale
+                    let peer_state = ChainState {
+                        latest_block_hash,
+                        latest_block_index: height,
+                        accounts_root_hash: [0u8; 32],
+                        total_supply: 0,
+                    };
+                    self.resolve_fork(&peer_state, local_chain_state, peer).await?;
+                    return Err(SyncError::SynchronizationError(
+                        "Peer is not ahead of local chain".to_string(),
+                    ));
+                }
+
+                if height == local_chain_state.latest_block_index {
                     return Err(SyncError::SynchronizationError(
                         "Peer is not ahead of local chain".to_string(),
                     ));

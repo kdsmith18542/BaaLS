@@ -47,7 +47,6 @@ pub trait ConsensusEngine: Send + Sync {
 pub struct PoAConsensus {
     authorized_signer_key: PublicKey,
     authorized_signers: Vec<PublicKey>,
-    #[allow(dead_code)]
     block_time_interval_ms: u64,
     signing_key: Option<SigningKey>,
     pub block_gas_limit: u64,

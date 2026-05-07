@@ -436,14 +436,6 @@ impl std::io::Write for RotatingFileWriter {
     }
 }
 
-pub fn format_for_logging(config: &LoggingConfig) -> LogFormat {
-    if config.json_format {
-        LogFormat::Json
-    } else {
-        LogFormat::Text
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeStatus {
     pub running: bool,

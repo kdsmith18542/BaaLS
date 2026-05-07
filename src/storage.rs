@@ -17,8 +17,6 @@ pub enum StorageError {
     Bincode(#[from] Box<bincode::ErrorKind>),
     #[error("Crypto error: {0}")]
     Crypto(#[from] CryptoError),
-    #[error("Postcard error: {0}")]
-    Postcard(#[from] postcard::Error),
     #[error("Data not found")]
     NotFound,
     #[error("Transaction error: {0}")]

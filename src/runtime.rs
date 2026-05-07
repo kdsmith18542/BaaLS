@@ -968,6 +968,28 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             return;
         }
         info!("[SYNC] Processing {} blocks received from peers", blocks.len());
+
+        // Check if the first block's prev_hash matches our latest block
+        let latest_hash = self.chain_state.lock().unwrap().latest_block_hash;
+        if let Some(first_block) = blocks.first() {
+            if first_block.prev_hash != latest_hash {
+                log::info!(
+                    "[RUNTIME] Fork detected — reorganizing chain with {} fork blocks",
+                    blocks.len()
+                );
+                match self.reorganize_chain(&blocks) {
+                    Ok(new_height) => {
+                        info!("[RUNTIME] Chain reorganized to height {}", new_height);
+                    }
+                    Err(e) => {
+                        warn!("[RUNTIME] Chain reorganization failed: {}", e);
+                    }
+                }
+                return;
+            }
+        }
+
+        // Normal sequential block application
         for block in blocks {
             match self.ledger.validate_block(&block, &self.chain_state.lock().unwrap()) {
                 Ok(()) => {

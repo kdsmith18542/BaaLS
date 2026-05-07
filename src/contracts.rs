@@ -1400,16 +1400,36 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
             }
         }
 
+        // Validate argument count against ABI — compute on-the-fly from WASM module
         // Validate that the requested method exists as a module export
         {
             let module = wasmtime::Module::new(&self.wasm_engine, &wasm_bytes)
                 .map_err(|e| ContractError::InvalidWasm(e.to_string()))?;
-            let has_export = module.exports().any(|e| {
-                e.name() == method_name
-                    || e.name() == format!("_{}", method_name)
-                    || e.name() == "main"
-            });
-            if !has_export {
+
+            // Build ABI from module exports to validate arg count
+            let mut abi = ContractAbi { methods: Vec::new() };
+            for export in module.exports() {
+                if let wasmtime::ExternType::Func(ft) = export.ty() {
+                    abi.methods.push(ContractMethod {
+                        name: export.name().to_string(),
+                        arg_count: ft.params().len(),
+                    });
+                }
+            }
+
+            if let Some(method_sig) = abi.methods.iter().find(|m| {
+                m.name == method_name || m.name == format!("_{}", method_name) || m.name == "main"
+            }) {
+                if method_sig.arg_count != args.len() {
+                    warn!(
+                        "[CONTRACTS] Argument count mismatch for {}::{} — expected {}, got {}",
+                        hex::encode(contract_id.to_bytes()),
+                        method_name,
+                        method_sig.arg_count,
+                        args.len()
+                    );
+                }
+            } else {
                 return Err(ContractError::ExecutionError(format!(
                     "Method '{}' not found in contract exports",
                     method_name

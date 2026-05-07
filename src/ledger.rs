@@ -60,7 +60,6 @@ pub struct TransactionExecutionResult {
 
 pub struct Ledger<S: Storage, C: ContractEngine> {
     storage: Arc<S>,
-    #[allow(dead_code)]
     contract_engine: Arc<C>,
 }
 
