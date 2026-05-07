@@ -13,7 +13,7 @@ use baals::{
     Account, Address, AnyStorage, BaaLSContractEngine, ContractId, CustomSync, Keystore,
     MetricsCollector, NoopSync, PoAConsensus, PublicKey, RedbStorage, Runtime, SledStorage,
     Storage, SyncLayer, SyncWrapper, Transaction, TransactionPayload, TransactionSignature,
-    WasmRuntime,
+    WasmRuntime, CURRENT_SCHEMA_VERSION, CURRENT_STORAGE_FORMAT_VERSION,
 };
 
 #[derive(Parser)]
@@ -55,6 +55,11 @@ enum Commands {
     Dev {
         #[command(subcommand)]
         action: DevCommands,
+    },
+    /// Database management commands
+    Db {
+        #[command(subcommand)]
+        command: DbCommands,
     },
 }
 
@@ -279,6 +284,27 @@ enum DevCommands {
         data_dir: PathBuf,
         #[arg(short, long, default_value_t = false)]
         detailed: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DbCommands {
+    /// Show database version info
+    Version {
+        #[arg(long)]
+        data_dir: Option<String>,
+    },
+    /// Run database migration
+    Migrate {
+        #[arg(long)]
+        data_dir: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Verify database integrity
+    Verify {
+        #[arg(long)]
+        data_dir: Option<String>,
     },
 }
 
@@ -816,6 +842,176 @@ fn spawn_health_server(
     Ok(())
 }
 
+// ─── Db commands ───
+
+fn handle_db(
+    action: DbCommands,
+    json: bool,
+    backend: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let default_data = std::path::PathBuf::from("./data");
+    let data_dir = match &action {
+        DbCommands::Version { data_dir } => data_dir.as_deref().map(std::path::PathBuf::from),
+        DbCommands::Migrate { data_dir, .. } => data_dir.as_deref().map(std::path::PathBuf::from),
+        DbCommands::Verify { data_dir } => data_dir.as_deref().map(std::path::PathBuf::from),
+    }
+    .unwrap_or(default_data);
+
+    let storage: AnyStorage = match backend {
+        "redb" => AnyStorage::Redb(RedbStorage::new(&data_dir).map_err(|e| e.to_string())?),
+        _ => AnyStorage::Sled(SledStorage::new(&data_dir)?),
+    };
+
+    match action {
+        DbCommands::Version { .. } => {
+            let format_version = storage.storage_format_version()?;
+            let schema_version = storage.schema_version()?;
+            let created_with = storage
+                .get_storage_metadata("created_with_baals_version")?
+                .unwrap_or_else(|| "unknown".to_string());
+            let last_migration = storage
+                .get_storage_metadata("last_migration")?
+                .unwrap_or_else(|| "never".to_string());
+            let info = serde_json::json!({
+                "storage_format_version": format_version,
+                "schema_version": schema_version,
+                "created_with_baals_version": created_with,
+                "last_migration": last_migration,
+                "data_dir": data_dir,
+            });
+            Ok(text_or_json(
+                json,
+                &format!(
+                    "Storage format: v{}\nSchema: v{}\nCreated with BaaLS: {}\nLast migration: {}\nData dir: {:?}",
+                    format_version, schema_version, created_with, last_migration, data_dir
+                ),
+                info,
+            ))
+        }
+        DbCommands::Migrate { dry_run, .. } => {
+            let current_format = storage.storage_format_version()?;
+            let current_schema = storage.schema_version()?;
+            let needs_migration = current_format != CURRENT_STORAGE_FORMAT_VERSION
+                || current_schema != CURRENT_SCHEMA_VERSION;
+
+            if dry_run {
+                let report = serde_json::json!({
+                    "dry_run": true,
+                    "current_format_version": current_format,
+                    "target_format_version": CURRENT_STORAGE_FORMAT_VERSION,
+                    "current_schema_version": current_schema,
+                    "target_schema_version": CURRENT_SCHEMA_VERSION,
+                    "needs_migration": needs_migration,
+                });
+                if needs_migration {
+                    return Ok(text_or_json(
+                        json,
+                        "Dry run: migration would upgrade storage format version",
+                        report,
+                    ));
+                }
+                return Ok(text_or_json(
+                    json,
+                    "Dry run: storage is up to date, no migration needed",
+                    report,
+                ));
+            }
+
+            if !needs_migration {
+                return Ok(text_or_json(
+                    json,
+                    "Storage is already at the latest version, no migration needed",
+                    serde_json::json!({"status": "already_current"}),
+                ));
+            }
+
+            storage.backup_to(&data_dir.join("pre_migrate_backup"))?;
+
+            storage.set_storage_metadata(
+                "storage_format_version",
+                &CURRENT_STORAGE_FORMAT_VERSION.to_string(),
+            )?;
+            storage.set_storage_metadata("schema_version", &CURRENT_SCHEMA_VERSION.to_string())?;
+            storage.set_storage_metadata(
+                "last_migration",
+                &std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs().to_string())
+                    .unwrap_or_else(|_| "unknown".to_string()),
+            )?;
+
+            Ok(text_or_json(
+                json,
+                "Migration completed successfully",
+                serde_json::json!({
+                    "status": "migrated",
+                    "from_format": current_format,
+                    "to_format": CURRENT_STORAGE_FORMAT_VERSION,
+                    "from_schema": current_schema,
+                    "to_schema": CURRENT_SCHEMA_VERSION,
+                }),
+            ))
+        }
+        DbCommands::Verify { .. } => {
+            let stats = storage.get_storage_stats()?;
+            let height = storage.get_chain_height()?;
+            let chain_state = storage.get_chain_state()?;
+            let format_version = storage.storage_format_version()?;
+            let schema_version = storage.schema_version()?;
+
+            let mut issues = Vec::new();
+
+            if format_version != CURRENT_STORAGE_FORMAT_VERSION {
+                issues.push(format!(
+                    "Storage format version mismatch: {} (expected {})",
+                    format_version, CURRENT_STORAGE_FORMAT_VERSION
+                ));
+            }
+            if schema_version != CURRENT_SCHEMA_VERSION {
+                issues.push(format!(
+                    "Schema version mismatch: {} (expected {})",
+                    schema_version, CURRENT_SCHEMA_VERSION
+                ));
+            }
+
+            let total_accounts = storage.get_all_accounts()?.len() as u64;
+
+            let result = serde_json::json!({
+                "ok": issues.is_empty(),
+                "chain_height": height,
+                "latest_block_hash": chain_state.as_ref().map(|cs| hex::encode(cs.latest_block_hash)).unwrap_or_default(),
+                "block_count": stats.total_blocks,
+                "account_count": total_accounts,
+                "tx_count": stats.total_transactions,
+                "storage_format_version": format_version,
+                "schema_version": schema_version,
+                "issues": issues,
+            });
+
+            if issues.is_empty() {
+                Ok(text_or_json(
+                    json,
+                    &format!(
+                        "Database integrity check passed.\n  Height: {}\n  Blocks: {}\n  Accounts: {}\n  Txs: {}",
+                        height, stats.total_blocks, total_accounts, stats.total_transactions
+                    ),
+                    result,
+                ))
+            } else {
+                Ok(text_or_json(
+                    json,
+                    &format!(
+                        "Database verification found {} issue(s):\n{}",
+                        issues.len(),
+                        issues.join("\n")
+                    ),
+                    result,
+                ))
+            }
+        }
+    }
+}
+
 fn prompt_password(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
     let mut stdout = io::stdout();
     write!(stdout, "{}", prompt)?;
@@ -849,6 +1045,7 @@ fn main() {
         Commands::Tx { action } => handle_tx(action, cli.json, &cli.storage_backend),
         Commands::Query { action } => handle_query(action, cli.json, &cli.storage_backend),
         Commands::Dev { action } => handle_dev(action, cli.json, &cli.storage_backend),
+        Commands::Db { command } => handle_db(command, cli.json, &cli.storage_backend),
     };
 
     match result {

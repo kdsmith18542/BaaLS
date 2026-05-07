@@ -23,7 +23,12 @@ pub enum StorageError {
     Transaction(#[from] sled::transaction::TransactionError),
     #[error("Index error: {0}")]
     IndexError(String),
+    #[error("Migration error: {0}")]
+    MigrationError(String),
 }
+
+pub const CURRENT_STORAGE_FORMAT_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 pub trait Storage: Send + Sync {
     fn put_block(&self, block: &Block) -> Result<(), StorageError>;
@@ -150,6 +155,35 @@ pub trait Storage: Send + Sync {
     // Backup and restore
     fn backup_to(&self, path: &std::path::Path) -> Result<(), StorageError>;
     fn restore_from(&self, path: &std::path::Path) -> Result<(), StorageError>;
+
+    // Storage metadata
+    fn get_storage_metadata(&self, key: &str) -> Result<Option<String>, StorageError>;
+    fn set_storage_metadata(&self, key: &str, value: &str) -> Result<(), StorageError>;
+
+    fn storage_format_version(&self) -> Result<u32, StorageError> {
+        Ok(self
+            .get_storage_metadata("storage_format_version")?
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1))
+    }
+
+    fn schema_version(&self) -> Result<u32, StorageError> {
+        Ok(self
+            .get_storage_metadata("schema_version")?
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1))
+    }
+
+    fn validate_storage_version(&self, expected_format: u32) -> Result<(), StorageError> {
+        let version = self.storage_format_version()?;
+        if version != expected_format {
+            return Err(StorageError::MigrationError(format!(
+                "Storage format version mismatch: expected {}, found {}. Run migration.",
+                expected_format, version
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -184,6 +218,7 @@ pub struct StorageStats {
 
 pub struct SledStorage {
     db: Db,
+    meta_tree: Tree,
     blocks_tree: Tree,
     transactions_tree: Tree,
     mempool_tree: Tree,
@@ -213,6 +248,7 @@ impl SledStorage {
             sled::Config::default().path(path).cache_capacity(cache_capacity_mb * 1024 * 1024);
         let db = config.open()?;
         let storage = Self {
+            meta_tree: db.open_tree("meta")?,
             blocks_tree: db.open_tree("blocks")?,
             transactions_tree: db.open_tree("transactions")?,
             mempool_tree: db.open_tree("mempool")?,
@@ -229,6 +265,8 @@ impl SledStorage {
             tx_count_tree: db.open_tree("tx_count")?,
             db,
         };
+
+        storage.initialize_metadata()?;
 
         // Recover any pending batches from previous crash
         storage.recover_pending_batches()?;
@@ -433,6 +471,25 @@ impl SledStorage {
         Ok(())
     }
 
+    fn initialize_metadata(&self) -> Result<(), StorageError> {
+        if self.meta_tree.get("storage_format_version")?.is_none() {
+            self.meta_tree.insert(
+                "storage_format_version",
+                CURRENT_STORAGE_FORMAT_VERSION.to_string().as_bytes(),
+            )?;
+        }
+        if self.meta_tree.get("schema_version")?.is_none() {
+            self.meta_tree
+                .insert("schema_version", CURRENT_SCHEMA_VERSION.to_string().as_bytes())?;
+        }
+        if self.meta_tree.get("created_with_baals_version")?.is_none() {
+            self.meta_tree
+                .insert("created_with_baals_version", env!("CARGO_PKG_VERSION").as_bytes())?;
+        }
+        self.meta_tree.flush()?;
+        Ok(())
+    }
+
     fn recover_compaction(&self) -> Result<(), StorageError> {
         if self.db.get("compaction_in_progress")?.is_none() {
             return Ok(());
@@ -466,6 +523,7 @@ impl Clone for SledStorage {
     fn clone(&self) -> Self {
         Self {
             db: self.db.clone(),
+            meta_tree: self.meta_tree.clone(),
             blocks_tree: self.blocks_tree.clone(),
             transactions_tree: self.transactions_tree.clone(),
             mempool_tree: self.mempool_tree.clone(),
@@ -1076,6 +1134,44 @@ impl Storage for SledStorage {
         for item in self.mempool_tree.scan_prefix("pending:") {
             let (_key, _value) = item?;
             self.mempool_tree.remove(_key)?;
+        }
+        Ok(())
+    }
+
+    fn get_storage_metadata(&self, key: &str) -> Result<Option<String>, StorageError> {
+        match self.meta_tree.get(key)? {
+            Some(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).to_string())),
+            None => Ok(None),
+        }
+    }
+
+    fn set_storage_metadata(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        self.meta_tree.insert(key, value.as_bytes())?;
+        self.meta_tree.flush()?;
+        Ok(())
+    }
+
+    fn storage_format_version(&self) -> Result<u32, StorageError> {
+        Ok(self
+            .get_storage_metadata("storage_format_version")?
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1))
+    }
+
+    fn schema_version(&self) -> Result<u32, StorageError> {
+        Ok(self
+            .get_storage_metadata("schema_version")?
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1))
+    }
+
+    fn validate_storage_version(&self, expected_format: u32) -> Result<(), StorageError> {
+        let version = self.storage_format_version()?;
+        if version != expected_format {
+            return Err(StorageError::MigrationError(format!(
+                "Storage format version mismatch: expected {}, found {}. Run migration.",
+                expected_format, version
+            )));
         }
         Ok(())
     }

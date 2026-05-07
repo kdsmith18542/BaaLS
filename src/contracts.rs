@@ -562,6 +562,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         let entry = executing.entry(callee_id.clone()).or_insert(0);
                         *entry += 1;
                         if *entry > 1 {
+                            *entry -= 1; // revert increment before continuing
                             warn!(
                                 "[CONTRACTS] Reentrancy blocked on inter-contract call to {}",
                                 hex::encode(callee_id.to_bytes())
@@ -1279,8 +1280,24 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         Self::validate_wasm_module(&module)?;
 
         // Validate that contract exports at least one function
-        let has_exports = module.exports().any(|e| matches!(e.ty(), wasmtime::ExternType::Func(_)));
-        if !has_exports {
+        let mut has_func_export = false;
+        for export in module.exports() {
+            if let wasmtime::ExternType::Func(ft) = export.ty() {
+                has_func_export = true;
+                if ft.params().len() != 2
+                    || ft.results().len() != 1
+                    || !ft.params().all(|p| matches!(p, wasmtime::ValType::I32))
+                    || !ft.results().all(|r| matches!(r, wasmtime::ValType::I32))
+                {
+                    return Err(ContractError::BytecodeValidationFailed(format!(
+                        "Function '{}' has invalid signature {:?} — expected (i32,i32)->i32 per v1 ABI",
+                        export.name(),
+                        ft
+                    )));
+                }
+            }
+        }
+        if !has_func_export {
             return Err(ContractError::BytecodeValidationFailed(
                 "Contract must export at least one function".to_string(),
             ));
@@ -1360,6 +1377,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
             let entry = executing.entry(contract_id.clone()).or_insert(0);
             *entry += 1;
             if *entry > 1 {
+                *entry -= 1; // revert increment before returning error
                 return Err(ContractError::ReentrancyDetected(hex::encode(contract_id.to_bytes())));
             }
         }
@@ -1400,40 +1418,46 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
             }
         }
 
-        // Validate argument count against ABI — compute on-the-fly from WASM module
-        // Validate that the requested method exists as a module export
+        // Validate WASM ABI: method must export (i32, i32) -> i32 convention.
+        // All arguments are serialized into a flat buffer (ptr, len) via bincode.
+        // The return value is the byte length written back to WASM memory at offset 0.
         {
             let module = wasmtime::Module::new(&self.wasm_engine, &wasm_bytes)
                 .map_err(|e| ContractError::InvalidWasm(e.to_string()))?;
 
-            // Build ABI from module exports to validate arg count
-            let mut abi = ContractAbi { methods: Vec::new() };
-            for export in module.exports() {
-                if let wasmtime::ExternType::Func(ft) = export.ty() {
-                    abi.methods.push(ContractMethod {
-                        name: export.name().to_string(),
-                        arg_count: ft.params().len(),
-                    });
-                }
-            }
+            let export = module
+                .exports()
+                .find(|e| {
+                    e.name() == method_name
+                        || e.name() == format!("_{}", method_name)
+                        || e.name() == "main"
+                })
+                .ok_or_else(|| {
+                    ContractError::ExecutionError(format!(
+                        "Method '{}' not found in contract exports",
+                        method_name
+                    ))
+                })?;
 
-            if let Some(method_sig) = abi.methods.iter().find(|m| {
-                m.name == method_name || m.name == format!("_{}", method_name) || m.name == "main"
-            }) {
-                if method_sig.arg_count != args.len() {
-                    warn!(
-                        "[CONTRACTS] Argument count mismatch for {}::{} — expected {}, got {}",
-                        hex::encode(contract_id.to_bytes()),
-                        method_name,
-                        method_sig.arg_count,
-                        args.len()
-                    );
+            match export.ty() {
+                wasmtime::ExternType::Func(ft) => {
+                    if ft.params().len() != 2
+                        || ft.results().len() != 1
+                        || !ft.params().all(|p| matches!(p, wasmtime::ValType::I32))
+                        || !ft.results().all(|r| matches!(r, wasmtime::ValType::I32))
+                    {
+                        return Err(ContractError::ExecutionError(format!(
+                            "Method '{}' has invalid signature — expected (i32,i32)->i32",
+                            method_name
+                        )));
+                    }
                 }
-            } else {
-                return Err(ContractError::ExecutionError(format!(
-                    "Method '{}' not found in contract exports",
-                    method_name
-                )));
+                _ => {
+                    return Err(ContractError::ExecutionError(format!(
+                        "Export '{}' is not a function",
+                        method_name
+                    )));
+                }
             }
         }
 

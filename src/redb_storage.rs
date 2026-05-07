@@ -19,6 +19,7 @@ const HEIGHT_TO_BLOCK_TABLE: TableDefinition<&[u8], &[u8]> =
 const ADDR_TO_TX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("addr_to_tx");
 const CONTRACT_TO_TX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("contract_to_tx");
 const TX_COUNT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tx_count");
+const META_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("meta");
 
 fn map_err(e: impl std::fmt::Display) -> StorageError {
     StorageError::IndexError(e.to_string())
@@ -57,7 +58,7 @@ impl RedbStorage {
     fn read_all_tables(db: &Database) -> Result<Vec<(String, Vec<u8>, Vec<u8>)>, StorageError> {
         let txn = db.begin_read().map_err(map_err)?;
         #[allow(clippy::type_complexity)]
-        let tables: [(&str, TableDefinition<&[u8], &[u8]>); 10] = [
+        let tables: [(&str, TableDefinition<&[u8], &[u8]>); 11] = [
             ("blocks", BLOCKS_TABLE),
             ("txs", TXS_TABLE),
             ("pending", PENDING_TABLE),
@@ -68,6 +69,7 @@ impl RedbStorage {
             ("addr_to_tx", ADDR_TO_TX_TABLE),
             ("contract_to_tx", CONTRACT_TO_TX_TABLE),
             ("tx_count", TX_COUNT_TABLE),
+            ("meta", META_TABLE),
         ];
         let mut data = Vec::new();
         for (name, def) in &tables {
@@ -97,6 +99,7 @@ impl RedbStorage {
             let mut addr_to_tx = txn.open_table(ADDR_TO_TX_TABLE).map_err(map_err)?;
             let mut contract_to_tx = txn.open_table(CONTRACT_TO_TX_TABLE).map_err(map_err)?;
             let mut tx_count = txn.open_table(TX_COUNT_TABLE).map_err(map_err)?;
+            let mut meta = txn.open_table(META_TABLE).map_err(map_err)?;
 
             for (table_name, key, value) in data {
                 match table_name.as_str() {
@@ -132,6 +135,9 @@ impl RedbStorage {
                     "tx_count" => {
                         tx_count.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
                     }
+                    "meta" => {
+                        meta.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
+                    }
                     _ => {}
                 }
             }
@@ -153,6 +159,7 @@ impl RedbStorage {
             txn.open_table(ADDR_TO_TX_TABLE).map_err(map_err)?;
             txn.open_table(CONTRACT_TO_TX_TABLE).map_err(map_err)?;
             txn.open_table(TX_COUNT_TABLE).map_err(map_err)?;
+            txn.open_table(META_TABLE).map_err(map_err)?;
         }
         txn.commit().map_err(map_err)?;
         Ok(())
@@ -860,6 +867,50 @@ impl Storage for RedbStorage {
         Ok(())
     }
 
+    fn get_storage_metadata(&self, key: &str) -> Result<Option<String>, StorageError> {
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
+        let table = txn.open_table(META_TABLE).map_err(map_err)?;
+        match table.get(key.as_bytes()).map_err(map_err)? {
+            Some(v) => Ok(Some(String::from_utf8_lossy(v.value()).to_string())),
+            None => Ok(None),
+        }
+    }
+
+    fn set_storage_metadata(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
+        {
+            let mut table = txn.open_table(META_TABLE).map_err(map_err)?;
+            table.insert(key.as_bytes(), value.as_bytes()).map_err(map_err)?;
+        }
+        txn.commit().map_err(map_err)?;
+        Ok(())
+    }
+
+    fn storage_format_version(&self) -> Result<u32, StorageError> {
+        Ok(self
+            .get_storage_metadata("storage_format_version")?
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1))
+    }
+
+    fn schema_version(&self) -> Result<u32, StorageError> {
+        Ok(self
+            .get_storage_metadata("schema_version")?
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1))
+    }
+
+    fn validate_storage_version(&self, expected_format: u32) -> Result<(), StorageError> {
+        let version = self.storage_format_version()?;
+        if version != expected_format {
+            return Err(StorageError::MigrationError(format!(
+                "Storage format version mismatch: expected {}, found {}. Run migration.",
+                expected_format, version
+            )));
+        }
+        Ok(())
+    }
+
     fn clone_storage(&self) -> Box<dyn Storage> {
         Box::new(Self { db: Arc::clone(&self.db), db_path: self.db_path.clone() })
     }
@@ -879,6 +930,7 @@ impl Storage for RedbStorage {
             ("addr_to_tx", ADDR_TO_TX_TABLE),
             ("contract_to_tx", CONTRACT_TO_TX_TABLE),
             ("tx_count", TX_COUNT_TABLE),
+            ("meta", META_TABLE),
         ];
         for (name, def) in &tables {
             let table = txn.open_table(*def).map_err(map_err)?;
@@ -913,6 +965,7 @@ impl Storage for RedbStorage {
                 "addr_to_tx" => ADDR_TO_TX_TABLE,
                 "contract_to_tx" => CONTRACT_TO_TX_TABLE,
                 "tx_count" => TX_COUNT_TABLE,
+                "meta" => META_TABLE,
                 _ => continue,
             };
             let mut table = txn.open_table(table_def).map_err(map_err)?;

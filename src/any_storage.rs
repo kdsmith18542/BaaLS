@@ -208,4 +208,10 @@ impl Storage for AnyStorage {
     fn restore_from(&self, path: &std::path::Path) -> Result<(), StorageError> {
         dispatch!(self, restore_from, path)
     }
+    fn get_storage_metadata(&self, key: &str) -> Result<Option<String>, StorageError> {
+        dispatch!(self, get_storage_metadata, key)
+    }
+    fn set_storage_metadata(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        dispatch!(self, set_storage_metadata, key, value)
+    }
 }
