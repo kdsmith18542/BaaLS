@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::{Arc, Mutex as StdMutex};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -149,7 +149,7 @@ pub trait SyncLayer: Send + Sync {
 /// Minimal custom P2P sync implementation
 pub struct CustomSync {
     peer_id: PublicKey,
-    known_peers: Arc<Mutex<HashMap<PublicKey, SocketAddr>>>,
+    known_peers: Arc<StdMutex<HashMap<PublicKey, SocketAddr>>>,
     block_cache: Arc<Mutex<HashMap<[u8; 32], Block>>>,
     listen_addr: SocketAddr,
     is_running: Arc<Mutex<bool>>,
@@ -378,7 +378,7 @@ impl CustomSync {
     pub fn new(peer_id: PublicKey, listen_addr: SocketAddr) -> Self {
         Self {
             peer_id,
-            known_peers: Arc::new(Mutex::new(HashMap::new())),
+            known_peers: Arc::new(StdMutex::new(HashMap::new())),
             block_cache: Arc::new(Mutex::new(HashMap::new())),
             listen_addr,
             is_running: Arc::new(Mutex::new(false)),
@@ -411,7 +411,7 @@ impl CustomSync {
     }
 
     pub async fn add_peer(&self, peer: Peer) {
-        let mut peers = self.known_peers.lock().await;
+        let mut peers = self.known_peers.lock().unwrap();
         peers.insert(peer.id, peer.address);
     }
 
@@ -556,7 +556,7 @@ impl CustomSync {
         mut socket: S,
         addr: SocketAddr,
         peer_id: PublicKey,
-        peers: Arc<Mutex<HashMap<PublicKey, SocketAddr>>>,
+        peers: Arc<StdMutex<HashMap<PublicKey, SocketAddr>>>,
         block_cache: Arc<Mutex<HashMap<[u8; 32], Block>>>,
         storage: Arc<Mutex<Option<Box<dyn Storage>>>>,
         received_blocks: Arc<Mutex<Vec<Block>>>,
@@ -572,9 +572,10 @@ impl CustomSync {
                     return Err(SyncError::NetworkError("Version mismatch".to_string()));
                 }
                 // Add to known peers
-                let mut peers_guard = peers.lock().await;
-                peers_guard.insert(remote_peer_id, addr);
-                drop(peers_guard);
+                {
+                    let mut peers_guard = peers.lock().unwrap();
+                    peers_guard.insert(remote_peer_id, addr);
+                }
 
                 Self::send_message(
                     &mut socket,
@@ -600,7 +601,7 @@ impl CustomSync {
             };
             match msg {
                 NetworkMessage::PeerList { peers: peer_list } => {
-                    let mut peers_guard = peers.lock().await;
+                    let mut peers_guard = peers.lock().unwrap();
                     for (id, addr_str) in peer_list {
                         if let Ok(addr) = addr_str.parse() {
                             peers_guard.insert(id, addr);
@@ -1014,7 +1015,7 @@ impl SyncLayer for CustomSync {
     }
 
     async fn discover_peers(&self) -> Result<Vec<Peer>, SyncError> {
-        let peers = self.known_peers.lock().await;
+        let peers = self.known_peers.lock().unwrap();
         Ok(peers.iter().map(|(id, addr)| Peer { id: *id, address: *addr }).collect())
     }
 
@@ -1027,12 +1028,32 @@ impl SyncLayer for CustomSync {
             if let Ok(Ok(mut stream)) =
                 timeout(Duration::from_secs(2), TcpStream::connect(peer.address)).await
             {
-                if let Err(e) = Self::send_message(&mut stream, announcement.clone()).await {
-                    log::error!(
-                        "Failed to broadcast to {}: {}",
-                        hex::encode(peer.id.to_bytes()),
-                        e
-                    );
+                // Perform handshake before sending the announcement
+                if Self::send_message(
+                    &mut stream,
+                    NetworkMessage::Handshake { peer_id: self.peer_id, version: 1 },
+                )
+                .await
+                .is_ok()
+                {
+                    if let Ok(NetworkMessage::HandshakeAck { .. }) =
+                        Self::receive_message(&mut stream).await
+                    {
+                        let _ = Self::send_message(&mut stream, announcement.clone()).await;
+                        // Handle the peer's block request as a response to our announcement
+                        if let Ok(NetworkMessage::RequestBlock { hash }) =
+                            Self::receive_message(&mut stream).await
+                        {
+                            Self::handle_block_request_full(
+                                &mut stream,
+                                hash,
+                                &self.block_cache,
+                                &self.storage,
+                            )
+                            .await
+                            .ok();
+                        }
+                    }
                 }
             }
         }
@@ -1041,7 +1062,7 @@ impl SyncLayer for CustomSync {
     }
 
     fn peer_count(&self) -> usize {
-        match self.known_peers.try_lock() {
+        match self.known_peers.lock() {
             Ok(peers) => peers.len(),
             Err(_) => 0,
         }
@@ -1059,12 +1080,12 @@ impl SyncLayer for CustomSync {
         let id_bytes: [u8; 32] = Sha256::digest(addr.as_bytes()).into();
         let peer_id = PublicKey::from_bytes(&id_bytes)
             .map_err(|_| SyncError::NetworkError("bad key".into()))?;
-        match self.known_peers.try_lock() {
+        match self.known_peers.lock() {
             Ok(mut peers) => {
                 peers.insert(peer_id, sock_addr);
             }
             Err(_) => {
-                return Err(SyncError::NetworkError("Peer list locked".to_string()));
+                return Err(SyncError::NetworkError("Peer list poisoned".to_string()));
             }
         }
         log::info!("Added peer: {}", addr);
