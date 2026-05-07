@@ -140,6 +140,9 @@ pub trait SyncLayer: Send + Sync {
     fn poll_received_blocks(&self) -> Vec<Block> {
         vec![]
     }
+
+    /// Stop the P2P listener server. Default no-op for NoopSync.
+    fn stop_listener(&self) {}
 }
 
 /// Minimal custom P2P sync implementation
@@ -150,8 +153,10 @@ pub struct CustomSync {
     listen_addr: SocketAddr,
     is_running: Arc<Mutex<bool>>,
     tls_config: Option<Arc<TlsConfig>>,
+    tls_insecure: bool,
     storage: Arc<Mutex<Option<Box<dyn Storage>>>>,
     received_blocks: Arc<Mutex<Vec<Block>>>,
+    shutdown_tx: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
 }
 
 impl std::fmt::Debug for CustomSync {
@@ -334,15 +339,21 @@ impl CustomSync {
             listen_addr,
             is_running: Arc::new(Mutex::new(false)),
             tls_config: None,
+            tls_insecure: false,
             storage: Arc::new(Mutex::new(None)),
             received_blocks: Arc::new(Mutex::new(Vec::new())),
+            shutdown_tx: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn with_storage(self, storage: Box<dyn Storage>) -> Self {
-        // storage lock is always uncontended during initialization
         *self.storage.try_lock().expect("storage lock during init") = Some(storage);
         self
+    }
+
+    pub fn with_tls_insecure(self) -> Self {
+        log::warn!("TLS running in insecure mode: accepting all peer certificates. Set tls_insecure=false in production.");
+        Self { tls_insecure: true, ..self }
     }
 
     pub fn with_tls(mut self, tls_config: TlsConfig) -> Self {
@@ -431,6 +442,10 @@ impl CustomSync {
         *running = true;
         drop(running);
 
+        // Create shutdown channel
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        *self.shutdown_tx.lock().await = Some(shutdown_tx);
+
         let listener = TcpListener::bind(self.listen_addr)
             .await
             .map_err(|e| SyncError::NetworkError(e.to_string()))?;
@@ -443,55 +458,54 @@ impl CustomSync {
             .map(|tc| tokio_rustls::TlsAcceptor::from(Arc::new(tc.server_config.clone())));
 
         loop {
-            let (socket, addr) =
-                listener.accept().await.map_err(|e| SyncError::NetworkError(e.to_string()))?;
+            tokio::select! {
+                accept_result = listener.accept() => {
+                    let (socket, addr) = accept_result
+                        .map_err(|e| SyncError::NetworkError(e.to_string()))?;
 
-            let peer_id = self.peer_id;
-            let peers = Arc::clone(&self.known_peers);
-            let block_cache = Arc::clone(&self.block_cache);
-            let tls_acceptor = tls_acceptor.clone();
-            let storage = Arc::clone(&self.storage);
-            let received_blocks = Arc::clone(&self.received_blocks);
+                    let peer_id = self.peer_id;
+                    let peers = Arc::clone(&self.known_peers);
+                    let block_cache = Arc::clone(&self.block_cache);
+                    let tls_acceptor = tls_acceptor.clone();
+                    let storage = Arc::clone(&self.storage);
+                    let received_blocks = Arc::clone(&self.received_blocks);
 
-            tokio::spawn(async move {
-                if let Some(acceptor) = tls_acceptor {
-                    match acceptor.accept(socket).await {
-                        Ok(tls_stream) => {
-                            if let Err(e) = Self::handle_connection(
-                                tls_stream,
-                                addr,
-                                peer_id,
-                                peers,
-                                block_cache,
-                                storage,
-                                received_blocks,
-                            )
-                            .await
-                            {
-                                log::error!("TLS connection error: {}", e);
+                    tokio::spawn(async move {
+                        if let Some(acceptor) = tls_acceptor {
+                            match acceptor.accept(socket).await {
+                                Ok(tls_stream) => {
+                                    if let Err(e) = Self::handle_connection(
+                                        tls_stream, addr, peer_id, peers, block_cache, storage, received_blocks,
+                                    ).await {
+                                        log::error!("TLS connection error: {}", e);
+                                    }
+                                }
+                                Err(e) => log::error!("TLS handshake error from {}: {}", addr, e),
                             }
+                        } else if let Err(e) = Self::handle_connection(
+                            socket, addr, peer_id, peers, block_cache, storage, received_blocks,
+                        ).await {
+                            log::error!("Connection error: {}", e);
                         }
-                        Err(e) => {
-                            log::error!("TLS handshake error from {}: {}", addr, e);
-                        }
-                    }
-                } else {
-                    if let Err(e) = Self::handle_connection(
-                        socket,
-                        addr,
-                        peer_id,
-                        peers,
-                        block_cache,
-                        storage,
-                        received_blocks,
-                    )
-                    .await
-                    {
-                        log::error!("Connection error: {}", e);
+                    });
+                }
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        log::info!("P2P server shutting down");
+                        break;
                     }
                 }
-            });
+            }
         }
+        Ok(())
+    }
+
+    pub async fn stop_server(&self) {
+        if let Some(tx) = self.shutdown_tx.lock().await.take() {
+            let _ = tx.send(true);
+        }
+        let mut running = self.is_running.lock().await;
+        *running = false;
     }
 
     async fn handle_connection<S>(
@@ -556,8 +570,28 @@ impl CustomSync {
                 NetworkMessage::BlockResponse { block } => {
                     Self::handle_block_response_full(block, &block_cache, &received_blocks).await;
                 }
-                NetworkMessage::NewBlockAnnouncement { block_hash: _, height: _ } => {
-                    // Peer announced a new block; could request it proactively
+                NetworkMessage::NewBlockAnnouncement { block_hash, height: _ } => {
+                    // Check if we already have this block
+                    let have_it = {
+                        let cache = block_cache.lock().await;
+                        cache.contains_key(&block_hash)
+                    } || {
+                        let storage_guard = storage.lock().await;
+                        storage_guard
+                            .as_ref()
+                            .is_some_and(|s| s.get_block(&block_hash).ok().flatten().is_some())
+                    };
+                    if !have_it {
+                        log::info!(
+                            "Received announcement for unknown block {}, requesting it",
+                            hex::encode(block_hash)
+                        );
+                        let _ = Self::send_message(
+                            &mut socket,
+                            NetworkMessage::RequestBlock { hash: block_hash },
+                        )
+                        .await;
+                    }
                 }
                 NetworkMessage::GetChainHead => {
                     let (latest_hash, latest_height) =
@@ -572,12 +606,14 @@ impl CustomSync {
                     .await?;
                 }
                 NetworkMessage::GetBlocks { from_height, to_height } => {
-                    let blocks = Self::blocks_in_range(&block_cache, from_height, to_height).await;
+                    let blocks =
+                        Self::blocks_in_range(&block_cache, &storage, from_height, to_height).await;
                     Self::send_message(&mut socket, NetworkMessage::BlocksResponse { blocks })
                         .await?;
                 }
                 NetworkMessage::GetForkBlocks { from_height, to_height } => {
-                    let blocks = Self::blocks_in_range(&block_cache, from_height, to_height).await;
+                    let blocks =
+                        Self::blocks_in_range(&block_cache, &storage, from_height, to_height).await;
                     Self::send_message(
                         &mut socket,
                         NetworkMessage::ForkBlocksResponse {
@@ -740,9 +776,27 @@ impl CustomSync {
 
     async fn blocks_in_range(
         block_cache: &Arc<Mutex<HashMap<[u8; 32], Block>>>,
+        storage: &Arc<Mutex<Option<Box<dyn Storage>>>>,
         from_height: u64,
         to_height: u64,
     ) -> Vec<Block> {
+        // Try storage first
+        let storage_guard = storage.lock().await;
+        if let Some(s) = storage_guard.as_ref() {
+            if let Ok(hashes) = s.get_block_hashes_by_height_range(from_height, to_height) {
+                let mut blocks = Vec::new();
+                for hash in &hashes {
+                    if let Ok(Some(block)) = s.get_block(hash) {
+                        blocks.push(block);
+                    }
+                }
+                if !blocks.is_empty() {
+                    return blocks;
+                }
+            }
+        }
+        drop(storage_guard);
+        // Fall back to cache
         let cache = block_cache.lock().await;
         let mut blocks: Vec<Block> = cache
             .values()
@@ -955,6 +1009,16 @@ impl SyncLayer for CustomSync {
         };
         std::mem::take(&mut *recv)
     }
+
+    fn stop_listener(&self) {
+        // Take the shutdown sender and signal
+        if let Ok(mut guard) = self.shutdown_tx.try_lock() {
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(true);
+                log::info!("P2P listener shutdown signal sent");
+            }
+        }
+    }
 }
 
 /// No-operation implementation for testing
@@ -1000,8 +1064,10 @@ impl Clone for SyncWrapper {
                 listen_addr: cs.listen_addr,
                 is_running: Arc::clone(&cs.is_running),
                 tls_config: cs.tls_config.clone(),
+                tls_insecure: cs.tls_insecure,
                 storage: Arc::clone(&cs.storage),
                 received_blocks: Arc::clone(&cs.received_blocks),
+                shutdown_tx: Arc::clone(&cs.shutdown_tx),
             })),
         }
     }
@@ -1059,6 +1125,13 @@ impl SyncLayer for SyncWrapper {
         match self {
             SyncWrapper::Noop(n) => n.poll_received_blocks(),
             SyncWrapper::Custom(c) => c.poll_received_blocks(),
+        }
+    }
+
+    fn stop_listener(&self) {
+        match self {
+            SyncWrapper::Noop(n) => n.stop_listener(),
+            SyncWrapper::Custom(c) => c.stop_listener(),
         }
     }
 }

@@ -300,6 +300,27 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             });
         });
 
+        // Spawn dedicated sync import loop (runs regardless of auto-block setting)
+        let self_clone = self.clone();
+        std::thread::spawn(move || {
+            let rt =
+                tokio::runtime::Runtime::new().expect("Failed to create sync import tokio runtime");
+            rt.block_on(async move {
+                let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(1));
+                loop {
+                    ticker.tick().await;
+                    {
+                        let running = self_clone.is_running.lock().unwrap();
+                        if !*running {
+                            break;
+                        }
+                    }
+                    self_clone.apply_received_blocks();
+                    self_clone.sync_with_all_peers();
+                }
+            });
+        });
+
         // Spawn automatic block production if configured
         if self.auto_block_interval_ms > 0 && self.auto_block_mempool_threshold > 0 {
             self.spawn_block_production();
@@ -394,6 +415,9 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         if let Some(shutdown_tx) = self.block_production_shutdown.lock().unwrap().take() {
             let _ = shutdown_tx.send(true);
         }
+
+        // Signal P2P listener to stop
+        self.sync_layer.stop_listener();
 
         *self.started_at.lock().unwrap() = None;
         info!("BaaLS Runtime stopped");
@@ -534,42 +558,44 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         let mut mempool = self.mempool.lock().unwrap();
         mempool.insert(transaction)?;
         // Persist to storage for crash recovery
-        let _ = self.storage.put_pending_transaction(mempool.get(&hash).unwrap());
+        if let Err(e) = self.storage.put_pending_transaction(mempool.get(&hash).unwrap()) {
+            warn!("Failed to persist pending tx {}: {}", crate::types::format_hex(&hash), e);
+        }
         self.metrics.record_mempool_operation();
         info!("Transaction submitted: {}", crate::types::format_hex(&hash));
         Ok(())
     }
 
     fn produce_block_sync(&self) -> Result<Block, RuntimeError> {
-        info!("[PRODUCE_BLOCK] Starting block production");
+        debug!("[PRODUCE_BLOCK] Starting block production");
 
-        info!("[PRODUCE_BLOCK] Acquiring mempool lock");
+        debug!("[PRODUCE_BLOCK] Acquiring mempool lock");
         let mut mempool = self.mempool.lock().unwrap();
-        info!("[PRODUCE_BLOCK] Mempool lock acquired, checking if empty");
+        debug!("[PRODUCE_BLOCK] Mempool lock acquired, checking if empty");
 
         if mempool.is_empty() {
-            info!("[PRODUCE_BLOCK] Mempool is empty, returning error");
+            debug!("[PRODUCE_BLOCK] Mempool is empty, returning error");
             return Err(ConsensusError::NoPendingTransactions.into());
         }
 
-        info!("[PRODUCE_BLOCK] Mempool has {} transactions", mempool.len());
+        debug!("[PRODUCE_BLOCK] Mempool has {} transactions", mempool.len());
 
-        info!("[PRODUCE_BLOCK] Acquiring mutable chain state lock");
+        debug!("[PRODUCE_BLOCK] Acquiring mutable chain state lock");
         let mut current_chain_state = self.chain_state.lock().unwrap();
-        info!("[PRODUCE_BLOCK] Mutable chain state lock acquired");
+        debug!("[PRODUCE_BLOCK] Mutable chain state lock acquired");
 
-        info!("[PRODUCE_BLOCK] Getting previous block from storage");
+        debug!("[PRODUCE_BLOCK] Getting previous block from storage");
         let prev_block = self
             .storage
             .get_block(&current_chain_state.latest_block_hash)?
             .ok_or(StorageError::NotFound)?;
-        info!(
+        debug!(
             "[PRODUCE_BLOCK] Previous block retrieved: index={}, hash={}",
             prev_block.index,
             crate::types::format_hex(&prev_block.hash)
         );
 
-        info!("[PRODUCE_BLOCK] Collecting transactions from mempool (priority-ordered)");
+        debug!("[PRODUCE_BLOCK] Collecting transactions from mempool (priority-ordered)");
         mempool.evict_expired();
         let mut transactions: Vec<Transaction> =
             mempool.sorted_by_priority().iter().map(|tx| (*tx).clone()).collect();
@@ -599,104 +625,113 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             }
         });
 
-        info!("[PRODUCE_BLOCK] Collected {} transactions", transactions.len());
+        debug!("[PRODUCE_BLOCK] Collected {} transactions", transactions.len());
 
-        info!("[PRODUCE_BLOCK] Calling consensus.generate_block");
+        debug!("[PRODUCE_BLOCK] Calling consensus.generate_block");
         let new_block =
             self.consensus.generate_block(&transactions, &prev_block, &current_chain_state)?;
-        info!(
+        debug!(
             "[PRODUCE_BLOCK] Block generated: index={}, hash={}",
             new_block.index,
             crate::types::format_hex(&new_block.hash)
         );
 
         // Release mempool lock before processing block
-        info!("[PRODUCE_BLOCK] Releasing mempool lock");
+        debug!("[PRODUCE_BLOCK] Releasing mempool lock");
         drop(mempool);
 
-        info!("[PRODUCE_BLOCK] Starting block processing with ledger");
+        debug!("[PRODUCE_BLOCK] Starting block processing with ledger");
         let processing_result: Result<(), RuntimeError> = time_operation_fn(
             &self.metrics,
             || {
-                info!("[PRODUCE_BLOCK] Validating block with ledger");
+                debug!("[PRODUCE_BLOCK] Validating block with ledger");
                 // Validate and apply block to ledger
                 self.ledger.validate_block(&new_block, &current_chain_state)?;
-                info!("[PRODUCE_BLOCK] Block validation successful");
+                debug!("[PRODUCE_BLOCK] Block validation successful");
 
-                info!("[PRODUCE_BLOCK] Applying block to ledger");
+                debug!("[PRODUCE_BLOCK] Applying block to ledger");
                 // Pass contract_engine to apply_block
                 self.ledger.apply_block(new_block.clone(), &mut current_chain_state)?;
-                info!("[PRODUCE_BLOCK] Block application successful");
+                debug!("[PRODUCE_BLOCK] Block application successful");
                 Ok(())
             },
             MetricsCollector::record_block_processing,
         );
 
-        info!("[PRODUCE_BLOCK] Block processing completed, checking result");
         processing_result?;
-        info!("[PRODUCE_BLOCK] Block processing successful");
+        info!(
+            "Block #{} produced ({} txns, {} gas)",
+            new_block.index,
+            new_block.transactions.len(),
+            new_block.transactions.iter().map(|t| t.gas_limit).sum::<u64>()
+        );
 
         // Update metrics
-        info!("[PRODUCE_BLOCK] Updating metrics");
         self.metrics.update_average_block_size(std::mem::size_of_val(&new_block));
 
         println!("Block produced and applied: {}", crate::types::format_hex(&new_block.hash));
-        info!("[PRODUCE_BLOCK] Block production completed successfully");
+        debug!("[PRODUCE_BLOCK] Block production completed successfully");
 
         // Optionally broadcast the new block
-        info!("[PRODUCE_BLOCK] Starting async broadcast task");
+        debug!("[PRODUCE_BLOCK] Starting async broadcast task");
         let sync_layer_clone = Arc::clone(&self.sync_layer);
         let new_block_clone = new_block.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                info!("[BROADCAST] Starting broadcast in spawned task");
+                debug!("[BROADCAST] Starting broadcast in spawned task");
                 let peers = sync_layer_clone.discover_peers().await.unwrap_or_else(|e| {
                     error!("[BROADCAST] Error discovering peers: {}", e);
                     Vec::new()
                 });
-                info!("[BROADCAST] Discovered {} peers", peers.len());
+                debug!("[BROADCAST] Discovered {} peers", peers.len());
                 if let Err(e) = sync_layer_clone.broadcast_block(&new_block_clone, &peers).await {
                     error!("[BROADCAST] Error broadcasting block: {}", e);
                 } else {
-                    info!("[BROADCAST] Block broadcast completed successfully");
+                    debug!("[BROADCAST] Block broadcast completed successfully");
                 }
             });
         } else {
             std::thread::spawn(move || {
                 if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
                     rt.block_on(async move {
-                        info!("[BROADCAST] Starting broadcast in fallback task");
+                        debug!("[BROADCAST] Starting broadcast in fallback task");
                         let peers = sync_layer_clone.discover_peers().await.unwrap_or_else(|e| {
                             error!("[BROADCAST] Error discovering peers: {}", e);
                             Vec::new()
                         });
-                        info!("[BROADCAST] Discovered {} peers", peers.len());
+                        debug!("[BROADCAST] Discovered {} peers", peers.len());
                         if let Err(e) =
                             sync_layer_clone.broadcast_block(&new_block_clone, &peers).await
                         {
                             error!("[BROADCAST] Error broadcasting block: {}", e);
                         } else {
-                            info!("[BROADCAST] Block broadcast completed successfully");
+                            debug!("[BROADCAST] Block broadcast completed successfully");
                         }
                     });
                 }
             });
         }
-        info!("[PRODUCE_BLOCK] Broadcast task spawned");
+        debug!("[PRODUCE_BLOCK] Broadcast task spawned");
 
         // Remove only the transactions that were included in the block
-        info!("[PRODUCE_BLOCK] Removing included transactions from mempool");
+        debug!("[PRODUCE_BLOCK] Removing included transactions from mempool");
         let mut mempool = self.mempool.lock().unwrap();
         for tx in &new_block.transactions {
             mempool.remove(&tx.hash);
-            let _ = self.storage.remove_pending_transaction(&tx.hash);
+            if let Err(e) = self.storage.remove_pending_transaction(&tx.hash) {
+                warn!(
+                    "Failed to remove persisted pending tx {}: {}",
+                    crate::types::format_hex(&tx.hash),
+                    e
+                );
+            }
         }
-        info!(
+        debug!(
             "[PRODUCE_BLOCK] Removed {} transactions from mempool",
             new_block.transactions.len()
         );
 
-        info!("[PRODUCE_BLOCK] Returning produced block");
+        debug!("[PRODUCE_BLOCK] Returning produced block");
         Ok(new_block)
     }
 

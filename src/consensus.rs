@@ -1,6 +1,6 @@
 use ed25519_dalek::{Signer, SigningKey};
 use hex;
-use log::info;
+use log::{debug, info};
 use thiserror::Error;
 
 use crate::types::{Block, ChainState, CryptoError, PublicKey, Transaction};
@@ -173,14 +173,14 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
             prev_block.index,
             hex::encode(prev_block.hash)
         );
-        info!("[CONSENSUS] Pending transactions: {}", pending_transactions.len());
+        debug!("[CONSENSUS] Pending transactions: {}", pending_transactions.len());
 
         let index = prev_block.index + 1;
         let timestamp =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         let prev_hash = prev_block.hash;
 
-        info!("[CONSENSUS] New block parameters: index={}, timestamp={}", index, timestamp);
+        debug!("[CONSENSUS] New block parameters: index={}, timestamp={}", index, timestamp);
 
         // Select transactions with gas and size limits
         let mut transactions = Vec::new();
@@ -215,18 +215,18 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
             metadata: None,
         };
 
-        info!("[CONSENSUS] Created block structure, calculating hash");
+        debug!("[CONSENSUS] Created block structure, calculating hash");
         // Calculate block hash
         block.hash = block
             .calculate_hash()
             .map_err(|e| ConsensusError::ValidationFailed(format!("Hash error: {:?}", e)))?;
-        info!("[CONSENSUS] Block hash calculated: {}", hex::encode(block.hash));
+        debug!("[CONSENSUS] Block hash calculated: {}", hex::encode(block.hash));
 
         // Sign the block — mandatory for PoA
         if let Some(ref _signing_key) = self.signing_key {
-            info!("[CONSENSUS] Signing block with authorized key");
+            debug!("[CONSENSUS] Signing block with authorized key");
             self.sign_block(&mut block)?;
-            info!("[CONSENSUS] Block signed successfully");
+            debug!("[CONSENSUS] Block signed successfully");
         } else {
             return Err(ConsensusError::BlockSigningFailed(
                 "No signing key available for block production".to_string(),

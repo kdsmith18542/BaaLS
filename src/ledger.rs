@@ -126,19 +126,19 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         current_chain_state: &ChainState,
     ) -> Result<(), LedgerError> {
         info!("[LEDGER] Starting block validation");
-        info!(
+        debug!(
             "[LEDGER] Block: index={}, hash={}",
             block.index,
             crate::types::format_hex(&block.hash)
         );
-        info!(
+        debug!(
             "[LEDGER] Current chain state: latest_index={}, latest_hash={}",
             current_chain_state.latest_block_index,
             crate::types::format_hex(&current_chain_state.latest_block_hash)
         );
 
         // Basic Block Header Validation
-        info!("[LEDGER] Validating block index");
+        debug!("[LEDGER] Validating block index");
         if block.index != current_chain_state.latest_block_index + 1 {
             return Err(LedgerError::BlockValidation(format!(
                 "Invalid block index: expected {}, got {}",
@@ -147,7 +147,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             )));
         }
 
-        info!("[LEDGER] Validating previous hash");
+        debug!("[LEDGER] Validating previous hash");
         if block.prev_hash != current_chain_state.latest_block_hash {
             return Err(LedgerError::BlockValidation(format!(
                 "Invalid previous hash: expected {:x?}, got {:x?}",
@@ -155,7 +155,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             )));
         }
 
-        info!("[LEDGER] Validating block hash");
+        debug!("[LEDGER] Validating block hash");
         let calculated_hash = block.calculate_hash()?;
         if calculated_hash != block.hash {
             return Err(LedgerError::BlockValidation(format!(
@@ -165,7 +165,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         }
 
         // Timestamp check (simplified for MVP, typically more robust logic needed)
-        info!("[LEDGER] Validating block timestamp");
+        debug!("[LEDGER] Validating block timestamp");
         if block.index > 0 {
             let prev_block =
                 self.storage.get_block(&block.prev_hash)?.ok_or(LedgerError::NotFound)?;
@@ -186,9 +186,9 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         }
 
         // Transaction Validation (within the block) - only basic checks for MVP
-        info!("[LEDGER] Validating {} transactions", block.transactions.len());
+        debug!("[LEDGER] Validating {} transactions", block.transactions.len());
         for (i, tx) in block.transactions.iter().enumerate() {
-            info!(
+            debug!(
                 "[LEDGER] Validating transaction {}: hash={}",
                 i,
                 crate::types::format_hex(&tx.hash)
@@ -281,11 +281,11 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         let mut accounts_to_update: BTreeMap<PublicKey, Account> = BTreeMap::new();
         let mut touched_contracts: BTreeSet<[u8; 32]> = BTreeSet::new();
 
-        info!("[LEDGER] Processing {} transactions", block.transactions.len());
+        debug!("[LEDGER] Processing {} transactions", block.transactions.len());
         // Sort transactions by (sender, nonce) to ensure sequential nonce processing
         block.transactions.sort_by_key(|tx| (tx.sender, tx.nonce));
         for (i, tx) in block.transactions.iter().enumerate() {
-            info!(
+            debug!(
                 "[LEDGER] Processing transaction {}: hash={}",
                 i,
                 crate::types::format_hex(&tx.hash)
@@ -302,7 +302,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                         ))
                     })?
                 };
-            info!("[LEDGER] Sender account found: nonce={}", sender_account.nonce());
+            debug!("[LEDGER] Sender account found: nonce={}", sender_account.nonce());
 
             // Nonce Check
             if sender_account.nonce() + 1 != tx.nonce {
@@ -313,14 +313,14 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             }
             sender_account.set_nonce(sender_account.nonce() + 1);
             accounts_to_update.insert(sender_pk, sender_account.clone());
-            info!("[LEDGER] Sender nonce updated to {}", sender_account.nonce());
+            debug!("[LEDGER] Sender nonce updated to {}", sender_account.nonce());
 
             let mut gas_used = 0u64;
             let mut tx_success = true;
 
             match &tx.payload {
                 TransactionPayload::Transfer { amount } => {
-                    info!("[LEDGER] Processing transfer transaction: amount={}", amount);
+                    debug!("[LEDGER] Processing transfer transaction: amount={}", amount);
                     // Fixed gas cost for native transfer
                     let transfer_gas_cost = 21000;
                     gas_used += transfer_gas_cost;
@@ -341,7 +341,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                                 ));
                             }
                             *balance -= *amount;
-                            info!("[LEDGER] Sender balance reduced to {}", *balance);
+                            debug!("[LEDGER] Sender balance reduced to {}", *balance);
                         } else {
                             return Err(LedgerError::StateTransition(
                                 StateTransitionError::InvalidPayload,
@@ -365,7 +365,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
 
                                 if let Account::Wallet { balance, .. } = &mut recipient_account {
                                     *balance += amount;
-                                    info!("[LEDGER] Recipient balance increased to {}", *balance);
+                                    debug!("[LEDGER] Recipient balance increased to {}", *balance);
                                 } else {
                                     return Err(LedgerError::StateTransition(
                                         StateTransitionError::InvalidPayload,
@@ -521,7 +521,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                         tx_success = false;
                         warn!("[LEDGER] Data transaction exceeded gas limit");
                     } else {
-                        info!("[LEDGER] Data transaction processed successfully");
+                        debug!("[LEDGER] Data transaction processed successfully");
                     }
                 }
             }
