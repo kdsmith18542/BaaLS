@@ -3,6 +3,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use ed25519_dalek::SigningKey;
+use sha2::Digest;
 
 use crate::consensus::PoAConsensus;
 use crate::contracts::{BaaLSContractEngine, ContractEngine};
@@ -187,6 +188,12 @@ impl BaaLSSdk {
         args: &[Vec<u8>],
         value: Option<u64>,
     ) -> Result<Vec<u8>, SdkError> {
+        let block_index =
+            self.runtime.get_chain_state().map(|cs| cs.latest_block_index).unwrap_or(0);
+        let block_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let result = self.runtime.contract_engine().call_contract(
             caller,
             contract_id,
@@ -194,8 +201,9 @@ impl BaaLSSdk {
             args,
             value,
             self.runtime.storage(),
-            0,
-            0,
+            block_index,
+            block_timestamp,
+            1_000_000,
         )?;
         Ok(result)
     }
@@ -207,20 +215,29 @@ impl BaaLSSdk {
         method_name: &str,
         payload: &[u8],
     ) -> Result<Vec<u8>, SdkError> {
+        let block_index =
+            self.runtime.get_chain_state().map(|cs| cs.latest_block_index).unwrap_or(0);
+        let block_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let result = self.runtime.contract_engine().query_contract(
             contract_id,
             method_name,
             payload,
             self.runtime.storage(),
-            0,
-            0,
+            block_index,
+            block_timestamp,
         )?;
         Ok(result)
     }
 
     /// Verify a smart contract
     pub fn verify_contract(&self, wasm_bytes: &[u8]) -> Result<(), SdkError> {
-        let contract_id = ContractId::from_bytes(&[0u8; 32]); // Placeholder
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(wasm_bytes);
+        let hash: [u8; 32] = hasher.finalize().into();
+        let contract_id = ContractId::from_bytes(&hash);
         self.runtime.contract_engine().verify_contract(wasm_bytes, &contract_id)?;
         Ok(())
     }

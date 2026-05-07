@@ -1391,7 +1391,6 @@ fn test_fork_reorg_with_common_ancestor() {
 // ─── P0-6: Automatic P2P announcement/import test ───
 
 #[test]
-#[ignore = "Broadcast+handshake fixed; BlockResponse not reaching B's import loop — further sync layer investigation needed"]
 fn test_p2p_auto_announcement_and_import() {
     init_logging();
     info!("[P0-6] Starting P2P auto announcement and import test");

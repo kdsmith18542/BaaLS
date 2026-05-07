@@ -6,13 +6,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::{Arc, Mutex as StdMutex};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
+
+pub trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncStream for T {}
 
 use crate::storage::Storage;
 use crate::types::{Block, ChainState, PublicKey};
@@ -149,7 +152,7 @@ pub trait SyncLayer: Send + Sync {
 /// Minimal custom P2P sync implementation
 pub struct CustomSync {
     peer_id: PublicKey,
-    known_peers: Arc<StdMutex<HashMap<PublicKey, SocketAddr>>>,
+    known_peers: Arc<tokio::sync::RwLock<HashMap<PublicKey, SocketAddr>>>,
     block_cache: Arc<Mutex<HashMap<[u8; 32], Block>>>,
     listen_addr: SocketAddr,
     is_running: Arc<Mutex<bool>>,
@@ -331,7 +334,9 @@ impl rustls::client::danger::ServerCertVerifier for CertificatePinner {
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
         let pins = self.cert_pins.read().map_err(|e| rustls::Error::General(e.to_string()))?;
         if pins.is_empty() {
-            return Ok(rustls::client::danger::ServerCertVerified::assertion());
+            return Err(rustls::Error::General(
+                "certificate pinning is enabled but no pins are configured".into(),
+            ));
         }
         let cert_hash = Sha256::digest(end_entity.as_ref()).to_vec();
         if pins.contains(&cert_hash) {
@@ -378,7 +383,7 @@ impl CustomSync {
     pub fn new(peer_id: PublicKey, listen_addr: SocketAddr) -> Self {
         Self {
             peer_id,
-            known_peers: Arc::new(StdMutex::new(HashMap::new())),
+            known_peers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             block_cache: Arc::new(Mutex::new(HashMap::new())),
             listen_addr,
             is_running: Arc::new(Mutex::new(false)),
@@ -411,7 +416,7 @@ impl CustomSync {
     }
 
     pub async fn add_peer(&self, peer: Peer) {
-        let mut peers = self.known_peers.lock().unwrap();
+        let mut peers = self.known_peers.write().await;
         peers.insert(peer.id, peer.address);
     }
 
@@ -425,10 +430,7 @@ impl CustomSync {
             return Ok(local_chain_state.latest_block_index);
         }
 
-        let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(peer.address))
-            .await
-            .map_err(|_| SyncError::ConnectionTimeout)?
-            .map_err(|e| SyncError::NetworkError(e.to_string()))?;
+        let mut stream = self.connect_to_peer(peer.address).await?;
 
         Self::send_message(
             &mut stream,
@@ -556,7 +558,7 @@ impl CustomSync {
         mut socket: S,
         addr: SocketAddr,
         peer_id: PublicKey,
-        peers: Arc<StdMutex<HashMap<PublicKey, SocketAddr>>>,
+        peers: Arc<tokio::sync::RwLock<HashMap<PublicKey, SocketAddr>>>,
         block_cache: Arc<Mutex<HashMap<[u8; 32], Block>>>,
         storage: Arc<Mutex<Option<Box<dyn Storage>>>>,
         received_blocks: Arc<Mutex<Vec<Block>>>,
@@ -571,10 +573,24 @@ impl CustomSync {
                 if version != 1 {
                     return Err(SyncError::NetworkError("Version mismatch".to_string()));
                 }
-                // Add to known peers
+                // Do not persist inbound source socket as peer listen address.
+                // Inbound source ports are typically ephemeral and poison outbound sync targets.
                 {
-                    let mut peers_guard = peers.lock().unwrap();
-                    peers_guard.insert(remote_peer_id, addr);
+                    let peers_guard = peers.read().await;
+                    if let Some(existing_addr) = peers_guard.get(&remote_peer_id) {
+                        log::debug!(
+                            "Peer {} connected from {} (known listen address: {})",
+                            hex::encode(remote_peer_id.to_bytes()),
+                            addr,
+                            existing_addr
+                        );
+                    } else {
+                        log::debug!(
+                            "Peer {} connected from {} with no advertised listen address; skipping peer-table insert",
+                            hex::encode(remote_peer_id.to_bytes()),
+                            addr
+                        );
+                    }
                 }
 
                 Self::send_message(
@@ -594,6 +610,14 @@ impl CustomSync {
         loop {
             let msg = match Self::receive_message(&mut socket).await {
                 Ok(m) => m,
+                Err(SyncError::NetworkError(err_msg))
+                    if err_msg.contains("early eof")
+                        || err_msg.contains("connection reset")
+                        || err_msg.contains("Connection reset") =>
+                {
+                    log::debug!("Peer {} closed connection: {}", addr, err_msg);
+                    break;
+                }
                 Err(e) => {
                     log::error!("Error receiving message from {}: {}", addr, e);
                     break;
@@ -601,7 +625,7 @@ impl CustomSync {
             };
             match msg {
                 NetworkMessage::PeerList { peers: peer_list } => {
-                    let mut peers_guard = peers.lock().unwrap();
+                    let mut peers_guard = peers.write().await;
                     for (id, addr_str) in peer_list {
                         if let Ok(addr) = addr_str.parse() {
                             peers_guard.insert(id, addr);
@@ -881,10 +905,7 @@ impl SyncLayer for CustomSync {
         peer: &Peer,
         local_chain_state: &ChainState,
     ) -> Result<Block, SyncError> {
-        let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(peer.address))
-            .await
-            .map_err(|_| SyncError::ConnectionTimeout)?
-            .map_err(|e| SyncError::NetworkError(e.to_string()))?;
+        let mut stream = self.connect_to_peer(peer.address).await?;
 
         // Perform handshake
         Self::send_message(
@@ -1015,7 +1036,7 @@ impl SyncLayer for CustomSync {
     }
 
     async fn discover_peers(&self) -> Result<Vec<Peer>, SyncError> {
-        let peers = self.known_peers.lock().unwrap();
+        let peers = self.known_peers.read().await;
         Ok(peers.iter().map(|(id, addr)| Peer { id: *id, address: *addr }).collect())
     }
 
@@ -1025,9 +1046,7 @@ impl SyncLayer for CustomSync {
             NetworkMessage::NewBlockAnnouncement { block_hash: block.hash, height: block.index };
 
         for peer in peers {
-            if let Ok(Ok(mut stream)) =
-                timeout(Duration::from_secs(2), TcpStream::connect(peer.address)).await
-            {
+            if let Ok(mut stream) = self.connect_to_peer(peer.address).await {
                 // Perform handshake before sending the announcement
                 if Self::send_message(
                     &mut stream,
@@ -1062,10 +1081,7 @@ impl SyncLayer for CustomSync {
     }
 
     fn peer_count(&self) -> usize {
-        match self.known_peers.lock() {
-            Ok(peers) => peers.len(),
-            Err(_) => 0,
-        }
+        self.known_peers.blocking_read().len()
     }
 
     async fn start_listener(&self) -> Result<(), SyncError> {
@@ -1080,14 +1096,7 @@ impl SyncLayer for CustomSync {
         let id_bytes: [u8; 32] = Sha256::digest(addr.as_bytes()).into();
         let peer_id = PublicKey::from_bytes(&id_bytes)
             .map_err(|_| SyncError::NetworkError("bad key".into()))?;
-        match self.known_peers.lock() {
-            Ok(mut peers) => {
-                peers.insert(peer_id, sock_addr);
-            }
-            Err(_) => {
-                return Err(SyncError::NetworkError("Peer list poisoned".to_string()));
-            }
-        }
+        self.known_peers.blocking_write().insert(peer_id, sock_addr);
         log::info!("Added peer: {}", addr);
         Ok(())
     }
@@ -1101,12 +1110,34 @@ impl SyncLayer for CustomSync {
     }
 
     fn stop_listener(&self) {
-        // Take the shutdown sender and signal
-        if let Ok(mut guard) = self.shutdown_tx.try_lock() {
-            if let Some(tx) = guard.take() {
-                let _ = tx.send(true);
-                log::info!("P2P listener shutdown signal sent");
-            }
+        let mut guard = self.shutdown_tx.blocking_lock();
+        if let Some(tx) = guard.take() {
+            let _ = tx.send(true);
+            log::info!("P2P listener shutdown signal sent");
+        }
+    }
+}
+
+impl CustomSync {
+    async fn connect_to_peer(
+        &self,
+        address: SocketAddr,
+    ) -> Result<Box<dyn AsyncStream>, SyncError> {
+        let stream = timeout(Duration::from_secs(5), TcpStream::connect(address))
+            .await
+            .map_err(|_| SyncError::ConnectionTimeout)?
+            .map_err(|e| SyncError::NetworkError(e.to_string()))?;
+
+        if let Some(tls) = &self.tls_config {
+            let connector = tokio_rustls::TlsConnector::from(Arc::new(tls.client_config.clone()));
+            let domain = rustls::pki_types::ServerName::try_from("baals-node")
+                .map_err(|e| SyncError::NetworkError(e.to_string()))?;
+            let tls_stream = connector.connect(domain, stream).await.map_err(|e| {
+                SyncError::NetworkError(format!("TLS connect to {}: {}", address, e))
+            })?;
+            Ok(Box::new(tls_stream))
+        } else {
+            Ok(Box::new(stream))
         }
     }
 }
@@ -1272,6 +1303,13 @@ impl SyncLayer for SyncWrapper {
         }
     }
 
+    fn stop_listener(&self) {
+        match self {
+            SyncWrapper::Noop(n) => n.stop_listener(),
+            SyncWrapper::Custom(c) => c.stop_listener(),
+        }
+    }
+
     fn add_peer_by_address(&self, addr: &str) -> Result<(), SyncError> {
         match self {
             SyncWrapper::Noop(n) => n.add_peer_by_address(addr),
@@ -1283,13 +1321,6 @@ impl SyncLayer for SyncWrapper {
         match self {
             SyncWrapper::Noop(n) => n.poll_received_blocks(),
             SyncWrapper::Custom(c) => c.poll_received_blocks(),
-        }
-    }
-
-    fn stop_listener(&self) {
-        match self {
-            SyncWrapper::Noop(n) => n.stop_listener(),
-            SyncWrapper::Custom(c) => c.stop_listener(),
         }
     }
 }

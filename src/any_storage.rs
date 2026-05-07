@@ -22,6 +22,9 @@ macro_rules! dispatch {
 }
 
 impl Storage for AnyStorage {
+    fn clone_storage(&self) -> Box<dyn Storage> {
+        Box::new(self.clone())
+    }
     fn put_block(&self, block: &Block) -> Result<(), StorageError> {
         dispatch!(self, put_block, block)
     }
@@ -138,6 +141,12 @@ impl Storage for AnyStorage {
     ) -> Result<Option<Vec<u8>>, StorageError> {
         dispatch!(self, contract_storage_read, contract_id, key)
     }
+    fn contract_storage_read_all(
+        &self,
+        contract_id: &ContractId,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        dispatch!(self, contract_storage_read_all, contract_id)
+    }
     fn contract_storage_write(
         &self,
         contract_id: &ContractId,
@@ -198,9 +207,6 @@ impl Storage for AnyStorage {
     }
     fn clear_pending_transactions(&self) -> Result<(), StorageError> {
         dispatch!(self, clear_pending_transactions)
-    }
-    fn clone_storage(&self) -> Box<dyn Storage> {
-        dispatch!(self, clone_storage)
     }
     fn backup_to(&self, path: &std::path::Path) -> Result<(), StorageError> {
         dispatch!(self, backup_to, path)

@@ -67,6 +67,7 @@ pub trait ContractEngine: Send + Sync {
         storage: &dyn Storage,
         block_index: u64,
         block_timestamp: u64,
+        gas_limit: u64,
     ) -> Result<Vec<u8>, ContractError>;
 
     fn query_contract(
@@ -354,7 +355,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
         cm.total_calls += 1;
         cm.total_gas_used += execution_result.gas_used;
         cm.last_called = Some(
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
         );
 
         let total_time = cm.average_execution_time * (cm.total_calls.saturating_sub(1)) as u32;
@@ -599,7 +603,9 @@ impl<S: Storage> BaaLSContractEngine<S> {
                                 callee_method,
                                 e
                             );
-                            call_results.push(vec![]);
+                            // Push a failure marker so the caller can distinguish
+                            // failure from a successful call that returned 0 bytes.
+                            call_results.push(vec![0x00]);
                         }
                     }
                 }
@@ -649,7 +655,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                  value_ptr: i32,
                  value_len_cap: i32|
                  -> i32 {
-                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+                    let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                        Some(m) => m,
+                        None => return -1,
+                    };
 
                     let key_len = match checked_len(key_len, 1024 * 1024) {
                         Some(n) => n,
@@ -700,7 +709,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                  value_ptr: i32,
                  value_len: i32|
                  -> i32 {
-                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+                    let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                        Some(m) => m,
+                        None => return -1,
+                    };
 
                     let key_len = match checked_len(key_len, 1024 * 1024) {
                         Some(n) => n,
@@ -739,7 +751,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                 "env",
                 "baals_storage_remove",
                 |mut caller: Caller<'_, HostState>, key_ptr: i32, key_len: i32| -> i32 {
-                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+                    let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                        Some(m) => m,
+                        None => return -1,
+                    };
 
                     let key_len = match checked_len(key_len, 1024 * 1024) {
                         Some(n) => n,
@@ -766,7 +781,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
         // baals_get_sender(ptr) — writes 32-byte sender public key
         linker
             .func_wrap("env", "baals_get_sender", |mut caller: Caller<'_, HostState>, ptr: i32| {
-                let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+                let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    Some(m) => m,
+                    None => return,
+                };
                 let sender_bytes = caller.data().caller.to_bytes();
                 let _ = mem.write(&mut caller, ptr as usize, &sender_bytes);
             })
@@ -778,7 +796,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                 "env",
                 "baals_get_contract_id",
                 |mut caller: Caller<'_, HostState>, ptr: i32| {
-                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+                    let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                        Some(m) => m,
+                        None => return,
+                    };
                     let cid_bytes = caller.data().contract_id.to_bytes();
                     let _ = mem.write(&mut caller, ptr as usize, &cid_bytes);
                 },
@@ -805,7 +826,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                 "env",
                 "baals_get_input_data",
                 |mut caller: Caller<'_, HostState>, ptr: i32, len_cap: i32| -> i32 {
-                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+                    let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                        Some(m) => m,
+                        None => return -1,
+                    };
                     let data = caller.data().input_data.clone();
                     let len = data.len().min(len_cap as usize);
                     let _ = mem.write(&mut caller, ptr as usize, &data[..len]);
@@ -823,7 +847,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                  data_ptr: i32,
                  data_len: i32,
                  output_ptr: i32| {
-                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+                    let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                        Some(m) => m,
+                        None => return,
+                    };
 
                     let data_len = match checked_len(data_len, 1024 * 1024) {
                         Some(n) => n,
@@ -857,7 +884,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                  sig_ptr: i32,
                  sig_len: i32|
                  -> i32 {
-                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+                    let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                        Some(m) => m,
+                        None => return -1,
+                    };
 
                     let pubkey_len = match checked_len(pubkey_len, 1024 * 1024) {
                         Some(n) => n,
@@ -930,7 +960,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                  topic_len: i32,
                  data_ptr: i32,
                  data_len: i32| {
-                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+                    let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                        Some(m) => m,
+                        None => return,
+                    };
 
                     let topic_len = match checked_len(topic_len, 1024 * 1024) {
                         Some(n) => n,
@@ -1003,7 +1036,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                  args_len: i32,
                  value: i64|
                  -> i32 {
-                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+                    let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                        Some(m) => m,
+                        None => return -1,
+                    };
 
                     let callee_len = match checked_len(callee_len, 1024 * 1024) {
                         Some(n) => n,
@@ -1054,7 +1090,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                  result_len_cap: i32,
                  call_index: i32|
                  -> i32 {
-                    let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+                    let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                        Some(m) => m,
+                        None => return -1,
+                    };
                     let state = caller.data();
                     let idx = call_index as usize;
                     if idx >= state.inter_contract_results.len() {
@@ -1191,6 +1230,13 @@ impl<S: Storage> BaaLSContractEngine<S> {
         }
         Ok(())
     }
+
+    pub fn compute_contract_code_hash(wasm_bytes: &[u8]) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(wasm_bytes);
+        let hash = hasher.finalize();
+        hash.into()
+    }
 }
 
 // ─── WasmRuntime trait impl ───
@@ -1233,11 +1279,13 @@ impl<S: Storage> WasmRuntime for BaaLSContractEngine<S> {
     fn estimate_gas(
         &self,
         wasm_bytes: &[u8],
-        _method_name: &str,
-        _args: &[Vec<u8>],
+        method_name: &str,
+        args: &[Vec<u8>],
     ) -> Result<u64, ContractError> {
-        // Base cost + bytecode size proportional cost
-        Ok(21_000 + (wasm_bytes.len() as u64 / 100))
+        let base_cost = wasm_bytes.len() as u64 / 100;
+        let method_factor = method_name.len() as u64 * 100;
+        let args_cost: u64 = args.iter().map(|a| a.len() as u64 * 5).sum();
+        Ok(21_000 + base_cost + method_factor + args_cost)
     }
 }
 
@@ -1370,6 +1418,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         storage: &dyn Storage,
         block_index: u64,
         block_timestamp: u64,
+        gas_limit: u64,
     ) -> Result<Vec<u8>, ContractError> {
         // Reentrancy guard: check if this contract is already executing
         {
@@ -1471,7 +1520,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
             contract_id,
             storage,
             false,
-            self.resource_limits.gas_limit,
+            gas_limit.max(21_000),
             block_index,
             block_timestamp,
         )?;
@@ -1550,10 +1599,20 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
     fn verify_contract(
         &self,
         wasm_bytes: &[u8],
-        _contract_id: &ContractId,
+        contract_id: &ContractId,
     ) -> Result<(), ContractError> {
         let engine = Engine::default();
         Module::new(&engine, wasm_bytes).map_err(|e| ContractError::InvalidWasm(e.to_string()))?;
+        Self::scan_for_float_opcodes(wasm_bytes)
+            .map_err(ContractError::BytecodeValidationFailed)?;
+        let code_hash = Self::compute_contract_code_hash(wasm_bytes);
+        if contract_id.to_bytes() != [0u8; 32] && code_hash != contract_id.to_bytes() {
+            return Err(ContractError::BytecodeValidationFailed(format!(
+                "Contract code hash mismatch: expected {}, got {}",
+                hex::encode(contract_id.to_bytes()),
+                hex::encode(code_hash)
+            )));
+        }
         Ok(())
     }
 

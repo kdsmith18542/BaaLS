@@ -1,6 +1,6 @@
 # Codebase Review Summary
 
-> **Status**: All issues identified below have been resolved as of Phase 9 (2026-05-05). This document is retained for historical reference.
+> **Status**: All major Phase 9 issues have been resolved (2026-05-05). Additional issues identified in subsequent audits are tracked in `issues.md` in the repository root. Recent fixes (2026-05-07) addressed all items in `issues.md`.
 
 Scope: read all documents in `docs/` (overview, runtime, consensus, ledger/state, storage, mempool, smart contracts, CLI/SDK) and reviewed the current Rust implementation under `src/`.
 

@@ -218,7 +218,7 @@ fn benchmark_contract_operations(c: &mut Criterion) {
 
         b.iter(|| {
             let contract_id = contract_engine
-                .deploy_contract(&deployer, 0, &wasm_bytes, None, &storage, 100000)
+                .deploy_contract(&deployer, 0, &wasm_bytes, None, &storage, 1_000_000)
                 .unwrap();
             black_box(contract_id);
         });
@@ -235,7 +235,17 @@ fn benchmark_contract_operations(c: &mut Criterion) {
 
         b.iter(|| {
             let result = contract_engine
-                .call_contract(&caller, &contract_id, "test_method", &[], None, &storage, 0, 0)
+                .call_contract(
+                    &caller,
+                    &contract_id,
+                    "test_method",
+                    &[],
+                    None,
+                    &storage,
+                    0,
+                    0,
+                    1_000_000,
+                )
                 .unwrap();
             black_box(result);
         });

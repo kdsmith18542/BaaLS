@@ -9,11 +9,11 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use baals::{
-    config::{generate_default_config, setup_logging, Config, NodeStatus},
+    config::{generate_default_config, setup_logging, Config, NodeStatus, StorageBackend},
     Account, Address, AnyStorage, BaaLSContractEngine, ContractId, CustomSync, Keystore,
     MetricsCollector, NoopSync, PoAConsensus, PublicKey, RedbStorage, Runtime, SledStorage,
-    Storage, SyncLayer, SyncWrapper, Transaction, TransactionPayload, TransactionSignature,
-    WasmRuntime, CURRENT_SCHEMA_VERSION, CURRENT_STORAGE_FORMAT_VERSION,
+    Storage, SyncLayer, SyncWrapper, TlsConfig, Transaction, TransactionPayload,
+    TransactionSignature, WasmRuntime, CURRENT_SCHEMA_VERSION, CURRENT_STORAGE_FORMAT_VERSION,
 };
 
 #[derive(Parser)]
@@ -330,7 +330,7 @@ type BaaLSRuntime = Runtime<AnyStorage, PoAConsensus, SyncWrapper>;
 const NODE_STOP_FILENAME: &str = "baals.stop";
 
 fn node_pid_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("baals_node.pid")
+    data_dir.join("baals.pid")
 }
 
 fn node_stop_path(data_dir: &Path) -> PathBuf {
@@ -393,14 +393,16 @@ fn wait_for_pid_file(
 
 fn build_runtime(
     data_dir: &PathBuf,
-    backend: &str,
-    block_time_ms: u64,
+    config: &Config,
     peers: &[String],
     listen_addr: &str,
+    mdns: bool,
 ) -> Result<BaaLSRuntime, Box<dyn std::error::Error>> {
     std::fs::create_dir_all(data_dir)?;
-    let storage: AnyStorage = match backend {
-        "redb" => AnyStorage::Redb(RedbStorage::new(data_dir).map_err(|e| e.to_string())?),
+    let storage: AnyStorage = match config.storage.backend {
+        StorageBackend::Redb => {
+            AnyStorage::Redb(RedbStorage::new(data_dir).map_err(|e| e.to_string())?)
+        }
         _ => AnyStorage::Sled(SledStorage::new(data_dir)?),
     };
 
@@ -415,7 +417,8 @@ fn build_runtime(
         arr.copy_from_slice(&key_bytes);
         let signing_key = SigningKey::from_bytes(&arr);
         let pk = PublicKey::from(signing_key.verifying_key());
-        let consensus = PoAConsensus::new(pk, block_time_ms).with_signing_key(signing_key);
+        let consensus =
+            PoAConsensus::new(pk, config.consensus.block_time_ms).with_signing_key(signing_key);
         (pk, consensus)
     } else {
         let mut secret_bytes = [0u8; 32];
@@ -423,19 +426,29 @@ fn build_runtime(
         let signing_key = SigningKey::from_bytes(&secret_bytes);
         std::fs::write(&key_path, secret_bytes)?;
         let pk = PublicKey::from(signing_key.verifying_key());
-        let consensus = PoAConsensus::new(pk, block_time_ms).with_signing_key(signing_key);
+        let consensus =
+            PoAConsensus::new(pk, config.consensus.block_time_ms).with_signing_key(signing_key);
         (pk, consensus)
     };
 
     let contract_engine = BaaLSContractEngine::new(storage.clone())?;
 
-    // Create sync layer: CustomSync if peers configured, NoopSync otherwise
+    // Create sync layer: CustomSync if peers configured or mdns enabled, NoopSync otherwise
     let listen_socket: std::net::SocketAddr =
         listen_addr.parse().unwrap_or_else(|_| "0.0.0.0:9070".parse().unwrap());
-    let sync_layer = if peers.is_empty() {
+    let sync_layer = if peers.is_empty() && !mdns {
         SyncWrapper::Noop(NoopSync)
     } else {
-        let cs = CustomSync::new(public_key, listen_socket).with_storage(storage.clone_storage());
+        let mut cs =
+            CustomSync::new(public_key, listen_socket).with_storage(storage.clone_storage());
+        if config.network.tls_enabled {
+            let tls = TlsConfig::load(
+                &config.network.tls_cert_path,
+                &config.network.tls_key_path,
+                Some(config.network.tls_ca_cert_path.as_str()).filter(|s| !s.is_empty()),
+            )?;
+            cs = cs.with_tls(tls);
+        }
         for peer_addr in peers {
             if let Err(e) = cs.add_peer_by_address(peer_addr) {
                 log::warn!("Failed to add peer '{}': {}", peer_addr, e);
@@ -445,7 +458,7 @@ fn build_runtime(
     };
 
     let mut runtime = Runtime::new(storage, consensus, contract_engine, sync_layer)?;
-    runtime.auto_block_interval_ms = block_time_ms;
+    runtime.auto_block_interval_ms = config.consensus.block_time_ms;
     runtime.auto_block_mempool_threshold = 10;
     runtime.start()?;
     Ok(runtime)
@@ -488,13 +501,43 @@ fn spawn_health_server(
     })?;
 
     std::thread::spawn(move || {
+        let admin_token =
+            std::env::var("BAALS_ADMIN_TOKEN").ok().filter(|token| !token.trim().is_empty());
+
+        fn is_authorized_request(
+            request: &tiny_http::Request,
+            expected_token: Option<&str>,
+        ) -> bool {
+            if let Some(token) = expected_token {
+                let expected = format!("Bearer {}", token);
+                request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Authorization"))
+                    .map(|h| h.value.as_str() == expected)
+                    .unwrap_or(false)
+            } else {
+                true
+            }
+        }
+
+        fn respond_json(request: tiny_http::Request, status: u16, body: String) {
+            let mut response = Response::from_string(body).with_status_code(StatusCode(status));
+            if let Ok(header) =
+                Header::from_bytes(b"Content-Type".as_slice(), b"application/json".as_slice())
+            {
+                response = response.with_header(header);
+            }
+            let _ = request.respond(response);
+        }
+
         let mut rate_limiter = RateLimiter::new(10, 1); // 10 req/sec per IP
         info!("Health endpoint listening on http://{}/health", bind_addr);
         while runtime.is_running() {
             match server.recv_timeout(std::time::Duration::from_millis(250)) {
                 Ok(Some(mut request)) => {
                     let client_ip =
-                        request.remote_addr().map(|a| a.to_string()).unwrap_or_default();
+                        request.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default();
                     if !rate_limiter.check_and_record(&client_ip) {
                         let _ = request.respond(
                             Response::from_string("Too Many Requests")
@@ -502,21 +545,57 @@ fn spawn_health_server(
                         );
                         continue;
                     }
+
+                    let is_loopback =
+                        request.remote_addr().map(|addr| addr.ip().is_loopback()).unwrap_or(false);
+                    let is_mutating_endpoint = request.method() == &Method::Post
+                        && matches!(
+                            request.url(),
+                            "/tx/submit" | "/account" | "/contract/deploy" | "/contract/call"
+                        );
+                    if is_mutating_endpoint && !is_loopback {
+                        respond_json(
+                            request,
+                            403,
+                            serde_json::json!({
+                                "error": "mutating endpoints are restricted to loopback clients"
+                            })
+                            .to_string(),
+                        );
+                        continue;
+                    }
+                    if is_mutating_endpoint {
+                        let Some(expected_token) = admin_token.as_deref() else {
+                            respond_json(
+                                request,
+                                503,
+                                serde_json::json!({
+                                    "error": "mutating endpoints disabled until BAALS_ADMIN_TOKEN is configured"
+                                })
+                                .to_string(),
+                            );
+                            continue;
+                        };
+                        if !is_authorized_request(&request, Some(expected_token)) {
+                            respond_json(
+                                request,
+                                401,
+                                serde_json::json!({
+                                    "error": "missing or invalid Authorization header"
+                                })
+                                .to_string(),
+                            );
+                            continue;
+                        }
+                    }
+
                     let is_health = request.method() == &Method::Get && request.url() == "/health";
                     if is_health {
                         match runtime.get_health_status() {
                             Ok(health) => {
                                 let body = serde_json::to_string(&health)
                                     .unwrap_or_else(|_| "{\"status\":\"unhealthy\"}".to_string());
-                                let mut response =
-                                    Response::from_string(body).with_status_code(StatusCode(200));
-                                if let Ok(header) = Header::from_bytes(
-                                    b"Content-Type".as_slice(),
-                                    b"application/json".as_slice(),
-                                ) {
-                                    response = response.with_header(header);
-                                }
-                                let _ = request.respond(response);
+                                respond_json(request, 200, body);
                             }
                             Err(e) => {
                                 let body = serde_json::json!({
@@ -524,15 +603,7 @@ fn spawn_health_server(
                                     "error": e.to_string()
                                 })
                                 .to_string();
-                                let mut response =
-                                    Response::from_string(body).with_status_code(StatusCode(500));
-                                if let Ok(header) = Header::from_bytes(
-                                    b"Content-Type".as_slice(),
-                                    b"application/json".as_slice(),
-                                ) {
-                                    response = response.with_header(header);
-                                }
-                                let _ = request.respond(response);
+                                respond_json(request, 500, body);
                             }
                         }
                     } else if request.method() == &Method::Get
@@ -543,11 +614,24 @@ fn spawn_health_server(
                         let response_json =
                             (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
                                 let pk = parse_pubkey(addr_hex)?;
-                                let account =
+                                let _account =
                                     runtime.get_account(&pk)?.ok_or("Account not found")?;
                                 let mut smt = baals::SparseMerkleTree::new();
-                                let account_bytes = bincode::serialize(&account)?;
-                                smt.insert(pk.to_bytes(), account_bytes);
+                                // Build the full state tree from all stored accounts
+                                let all_accounts = runtime.storage().get_all_accounts()?;
+                                for (addr, acct) in &all_accounts {
+                                    let bytes = bincode::serialize(acct)?;
+                                    smt.insert(addr.to_bytes(), bytes);
+                                }
+                                // Verify the reconstructed root matches chain state
+                                let chain_state = runtime.get_chain_state()?;
+                                if smt.root() != chain_state.accounts_root_hash {
+                                    log::warn!(
+                                        "Account SMT root mismatch: computed={}, stored={}",
+                                        hex::encode(smt.root()),
+                                        hex::encode(chain_state.accounts_root_hash)
+                                    );
+                                }
                                 let proof = smt.generate_proof(pk.to_bytes());
                                 Ok(serde_json::json!({
                                     "root": hex::encode(proof.root),
@@ -556,19 +640,13 @@ fn spawn_health_server(
                                     "value_hex": hex::encode(&proof.value),
                                 }))
                             })();
-                        let body = match response_json {
-                            Ok(json) => json.to_string(),
-                            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (404, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
                         };
-                        let mut response =
-                            Response::from_string(body).with_status_code(StatusCode(200));
-                        if let Ok(header) = Header::from_bytes(
-                            b"Content-Type".as_slice(),
-                            b"application/json".as_slice(),
-                        ) {
-                            response = response.with_header(header);
-                        }
-                        let _ = request.respond(response);
+                        respond_json(request, status, body);
                     } else if request.method() == &Method::Get
                         && request.url().starts_with("/proof/contract/")
                     {
@@ -580,24 +658,26 @@ fn spawn_health_server(
                             let key_hex = parts[1];
                             let response_json =
                                 (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-                                    let cid_bytes = hex::decode(cid_hex)
-                                        .map_err(|_| "Invalid contract id hex")?;
-                                    if cid_bytes.len() != 32 {
-                                        return Err("Contract ID must be 32 bytes".into());
-                                    }
-                                    let mut cid_arr = [0u8; 32];
-                                    cid_arr.copy_from_slice(&cid_bytes);
-                                    let cid = baals::ContractId::from_bytes(&cid_arr);
-                                    let key_bytes = hex::decode(key_hex)
-                                        .map_err(|_| "Invalid storage key hex")?;
-                                    let value = runtime
-                                        .contract_storage_read(&cid, &key_bytes)?
-                                        .ok_or("Storage key not found")?;
                                     let mut smt = baals::SparseMerkleTree::new();
+                                    // Build full canonical proof by loading all keys for this contract
+                                    let all_storage = runtime
+                                        .storage()
+                                        .contract_storage_read_all(&baals::ContractId::from_bytes(
+                                            &hex::decode(cid_hex).unwrap().try_into().unwrap(),
+                                        ))
+                                        .map_err(|e| {
+                                            format!("Failed to read contract storage: {}", e)
+                                        })?;
+                                    for (k, v) in all_storage {
+                                        let mut k_arr = [0u8; 32];
+                                        let len = k.len().min(32);
+                                        k_arr[..len].copy_from_slice(&k[..len]);
+                                        smt.insert(k_arr, v);
+                                    }
                                     let mut key_arr = [0u8; 32];
-                                    let copy_len = key_bytes.len().min(32);
-                                    key_arr[..copy_len].copy_from_slice(&key_bytes[..copy_len]);
-                                    smt.insert(key_arr, value.clone());
+                                    let decoded_key = hex::decode(key_hex).unwrap_or_default();
+                                    let copy_len = decoded_key.len().min(32);
+                                    key_arr[..copy_len].copy_from_slice(&decoded_key[..copy_len]);
                                     let proof = smt.generate_proof(key_arr);
                                     Ok(serde_json::json!({
                                         "root": hex::encode(proof.root),
@@ -606,19 +686,13 @@ fn spawn_health_server(
                                         "value_hex": hex::encode(&proof.value),
                                     }))
                                 })();
-                            let body = match response_json {
-                                Ok(json) => json.to_string(),
-                                Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                            let (status, body) = match response_json {
+                                Ok(json) => (200, json.to_string()),
+                                Err(e) => {
+                                    (404, serde_json::json!({"error": e.to_string()}).to_string())
+                                }
                             };
-                            let mut response =
-                                Response::from_string(body).with_status_code(StatusCode(200));
-                            if let Ok(header) = Header::from_bytes(
-                                b"Content-Type".as_slice(),
-                                b"application/json".as_slice(),
-                            ) {
-                                response = response.with_header(header);
-                            }
-                            let _ = request.respond(response);
+                            respond_json(request, status, body);
                         } else {
                             let _ = request.respond(
                                 Response::from_string("Not Found")
@@ -634,19 +708,13 @@ fn spawn_health_server(
                                 runtime.submit_transaction(tx)?;
                                 Ok(serde_json::json!({"status": "ok"}))
                             })();
-                        let body = match response_json {
-                            Ok(json) => json.to_string(),
-                            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (400, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
                         };
-                        let mut response =
-                            Response::from_string(body).with_status_code(StatusCode(200));
-                        if let Ok(header) = Header::from_bytes(
-                            b"Content-Type".as_slice(),
-                            b"application/json".as_slice(),
-                        ) {
-                            response = response.with_header(header);
-                        }
-                        let _ = request.respond(response);
+                        respond_json(request, status, body);
                     } else if request.method() == &Method::Post && request.url() == "/account" {
                         let mut body = String::new();
                         let _ = request.as_reader().read_to_string(&mut body);
@@ -661,19 +729,13 @@ fn spawn_health_server(
                                 runtime.create_account(&pk, account)?;
                                 Ok(serde_json::json!({"status": "ok"}))
                             })();
-                        let body = match response_json {
-                            Ok(json) => json.to_string(),
-                            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (400, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
                         };
-                        let mut response =
-                            Response::from_string(body).with_status_code(StatusCode(200));
-                        if let Ok(header) = Header::from_bytes(
-                            b"Content-Type".as_slice(),
-                            b"application/json".as_slice(),
-                        ) {
-                            response = response.with_header(header);
-                        }
-                        let _ = request.respond(response);
+                        respond_json(request, status, body);
                     } else if request.method() == &Method::Post
                         && request.url() == "/contract/deploy"
                     {
@@ -707,19 +769,13 @@ fn spawn_health_server(
                                 )?;
                                 Ok(serde_json::json!({"contract_id": hex::encode(cid.to_bytes())}))
                             })();
-                        let body = match response_json {
-                            Ok(json) => json.to_string(),
-                            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (400, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
                         };
-                        let mut response =
-                            Response::from_string(body).with_status_code(StatusCode(200));
-                        if let Ok(header) = Header::from_bytes(
-                            b"Content-Type".as_slice(),
-                            b"application/json".as_slice(),
-                        ) {
-                            response = response.with_header(header);
-                        }
-                        let _ = request.respond(response);
+                        respond_json(request, status, body);
                     } else if request.method() == &Method::Post && request.url() == "/contract/call"
                     {
                         let mut body = String::new();
@@ -769,19 +825,13 @@ fn spawn_health_server(
                                     "result_len": result.len(),
                                 }))
                             })();
-                        let body = match response_json {
-                            Ok(json) => json.to_string(),
-                            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (400, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
                         };
-                        let mut response =
-                            Response::from_string(body).with_status_code(StatusCode(200));
-                        if let Ok(header) = Header::from_bytes(
-                            b"Content-Type".as_slice(),
-                            b"application/json".as_slice(),
-                        ) {
-                            response = response.with_header(header);
-                        }
-                        let _ = request.respond(response);
+                        respond_json(request, status, body);
                     } else if request.method() == &Method::Post
                         && request.url() == "/contract/query"
                     {
@@ -811,19 +861,82 @@ fn spawn_health_server(
                                 let result = runtime.query_contract(&cid, method, &payload)?;
                                 Ok(serde_json::json!({"result_hex": hex::encode(&result)}))
                             })();
-                        let body = match response_json {
-                            Ok(json) => json.to_string(),
-                            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (400, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
                         };
-                        let mut response =
-                            Response::from_string(body).with_status_code(StatusCode(200));
-                        if let Ok(header) = Header::from_bytes(
-                            b"Content-Type".as_slice(),
-                            b"application/json".as_slice(),
-                        ) {
-                            response = response.with_header(header);
-                        }
-                        let _ = request.respond(response);
+                        respond_json(request, status, body);
+                    } else if request.method() == &Method::Get && request.url() == "/block/latest" {
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let chain = runtime.get_chain_state()?;
+                                let block = runtime
+                                    .get_block_by_height(chain.latest_block_index)?
+                                    .ok_or("Latest block not found")?;
+                                Ok(serde_json::json!({
+                                    "height": block.index,
+                                    "hash": hex::encode(block.hash),
+                                    "timestamp": block.timestamp,
+                                    "tx_count": block.transactions.len(),
+                                }))
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (404, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
+                    } else if request.method() == &Method::Get
+                        && request.url().starts_with("/block/by_height/")
+                    {
+                        let url = request.url();
+                        let height_str = &url["/block/by_height/".len()..];
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let height: u64 = height_str
+                                    .parse()
+                                    .map_err(|_| format!("Invalid height: {}", height_str))?;
+                                let block = runtime
+                                    .get_block_by_height(height)?
+                                    .ok_or(format!("Block not found at height {}", height))?;
+                                Ok(block_to_json(&block))
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (404, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
+                    } else if request.method() == &Method::Get
+                        && request.url().starts_with("/block/by_hash/")
+                    {
+                        let url = request.url();
+                        let hash_hex = &url["/block/by_hash/".len()..];
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let hash_bytes = hex::decode(hash_hex)
+                                    .map_err(|_| "Invalid block hash hex".to_string())?;
+                                if hash_bytes.len() != 32 {
+                                    return Err("Block hash must be 32 bytes".into());
+                                }
+                                let mut hash_arr = [0u8; 32];
+                                hash_arr.copy_from_slice(&hash_bytes);
+                                let block = runtime
+                                    .get_block(&hash_arr)?
+                                    .ok_or(format!("Block not found for hash {}", hash_hex))?;
+                                Ok(block_to_json(&block))
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (404, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
                     } else {
                         let _ = request.respond(
                             Response::from_string("Not Found").with_status_code(StatusCode(404)),
@@ -1031,6 +1144,43 @@ fn parse_pubkey(hex_str: &str) -> Result<PublicKey, String> {
     PublicKey::from_bytes(&arr).map_err(|e| format!("Invalid public key: {:?}", e))
 }
 
+fn block_to_json(block: &baals::Block) -> serde_json::Value {
+    let txs: Vec<serde_json::Value> = block
+        .transactions
+        .iter()
+        .map(|tx| {
+            let from = hex::encode(tx.sender.to_bytes());
+            let to = match &tx.recipient {
+                Address::Wallet(pk) => hex::encode(pk.to_bytes()),
+                Address::Contract(cid) => hex::encode(cid.to_bytes()),
+            };
+            let value: u64 = match &tx.payload {
+                TransactionPayload::Transfer { amount } => *amount,
+                TransactionPayload::ContractCall { value: Some(v), .. } => *v,
+                _ => 0,
+            };
+            serde_json::json!({
+                "hash": hex::encode(tx.hash),
+                "from": from,
+                "to": to,
+                "value": value.to_string(),
+                "nonce": tx.nonce,
+                "gas": tx.gas_limit,
+                "gasUsed": 0,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "hash": hex::encode(block.hash),
+        "parentHash": hex::encode(block.prev_hash),
+        "number": block.index,
+        "height": block.index,
+        "timestamp": block.timestamp,
+        "transactions": txs,
+    })
+}
+
 // ─── Command dispatcher ───
 
 fn main() {
@@ -1090,9 +1240,19 @@ fn handle_node(
                     .arg(&data_dir)
                     .arg("--port")
                     .arg(port.to_string())
+                    .arg("--storage-backend")
+                    .arg(backend)
+                    .arg("--listen")
+                    .arg(&listen)
                     .arg("--foreground-internal");
                 if let Some(cfg) = &config {
                     cmd.arg("--config").arg(cfg);
+                }
+                for p in &peer {
+                    cmd.arg("--peer").arg(p);
+                }
+                if _mdns {
+                    cmd.arg("--mdns");
                 }
 
                 let child = cmd
@@ -1122,7 +1282,8 @@ fn handle_node(
             }
 
             info!("Starting BaaLS node on port {} data={:?}", port, data_dir);
-            let cfg = Config::load(config.as_deref()).unwrap_or_default();
+            let cfg = Config::load(config.as_deref())
+                .map_err(|e| format!("Failed to load config: {}", e))?;
             std::fs::create_dir_all(&data_dir)?;
             let pid_path = node_pid_path(&data_dir);
             let stop_path = node_stop_path(&data_dir);
@@ -1144,8 +1305,12 @@ fn handle_node(
             let started_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             write_pid_info(&pid_path, std::process::id(), started_at)?;
 
-            let runtime =
-                build_runtime(&data_dir, backend, cfg.consensus.block_time_ms, &peer, &listen)?;
+            let runtime = build_runtime(&data_dir, &cfg, &peer, &listen, _mdns)?;
+
+            #[cfg(not(feature = "mdns"))]
+            if _mdns {
+                log::warn!("--mdns flag was used but the 'mdns' cargo feature is not enabled; mDNS discovery will not work");
+            }
 
             #[cfg(feature = "mdns")]
             if _mdns {
@@ -1157,7 +1322,12 @@ fn handle_node(
                     arr.copy_from_slice(&key_bytes);
                     let signing_key = SigningKey::from_bytes(&arr);
                     let node_public_key = PublicKey::from(signing_key.verifying_key());
-                    let discovery = MdnsDiscovery::new(node_public_key, port)
+                    let p2p_port = listen
+                        .split(':')
+                        .last()
+                        .and_then(|p| p.parse::<u16>().ok())
+                        .unwrap_or(9070);
+                    let discovery = MdnsDiscovery::new(node_public_key, p2p_port)
                         .map_err(|e| format!("mDNS discovery init: {}", e))?;
                     discovery.start_announcing().map_err(|e| format!("mDNS announce: {}", e))?;
                     if let Ok(discovered) = discovery.browse() {
@@ -1178,11 +1348,16 @@ fn handle_node(
                 }
             }
 
-            let health_bind = format!("0.0.0.0:{}", cfg.node.health_port);
+            let health_bind = format!("127.0.0.1:{}", cfg.node.health_port);
             spawn_health_server(runtime.clone(), health_bind)?;
             info!("Node started. Press Ctrl+C to stop.");
+            let pc_file = data_dir.join("peer_count");
             let mut heartbeat = 0u64;
             loop {
+                // Update peer count file every ~10 heartbeats (1 sec each)
+                if heartbeat.is_multiple_of(10) {
+                    let _ = std::fs::write(&pc_file, runtime.sync_layer().peer_count().to_string());
+                }
                 if stop_path.exists() {
                     info!("Stop signal file detected at {:?}", stop_path);
                     if let Err(e) = runtime.stop() {
@@ -1254,7 +1429,12 @@ fn handle_node(
                 accounts_root_hash: [0u8; 32],
                 total_supply: 0,
             };
-            let (chain, mempool, storage_locked) = match SledStorage::new(&data_dir) {
+            let storage_res: Result<AnyStorage, Box<dyn std::error::Error>> = match backend {
+                "redb" => RedbStorage::new(&data_dir).map(AnyStorage::Redb).map_err(|e| e.into()),
+                _ => SledStorage::new(&data_dir).map(AnyStorage::Sled).map_err(|e| e.into()),
+            };
+
+            let (chain, mempool, storage_locked) = match storage_res {
                 Ok(storage) => {
                     let chain =
                         storage.get_chain_state().ok().flatten().unwrap_or(default_chain.clone());
@@ -1283,7 +1463,10 @@ fn handle_node(
                 chain_height: chain.latest_block_index,
                 latest_block_hash: hex::encode(chain.latest_block_hash),
                 mempool_size: mempool,
-                peer_count: 0,
+                peer_count: std::fs::read_to_string(data_dir.join("peer_count"))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+                    .unwrap_or(0),
                 uptime_seconds,
             };
             Ok(text_or_json(
@@ -1314,7 +1497,10 @@ fn handle_node(
         }
         NodeCommands::Config { action } => handle_config(action, json),
         NodeCommands::Backup { data_dir, output } => {
-            let storage = SledStorage::new(&data_dir)?;
+            let storage: AnyStorage = match backend {
+                "redb" => AnyStorage::Redb(RedbStorage::new(&data_dir).map_err(|e| e.to_string())?),
+                _ => AnyStorage::Sled(SledStorage::new(&data_dir)?),
+            };
             storage.backup_to(&output)?;
             Ok(text_or_json(
                 json,
@@ -1323,7 +1509,10 @@ fn handle_node(
             ))
         }
         NodeCommands::Restore { data_dir, input } => {
-            let storage = SledStorage::new(&data_dir)?;
+            let storage: AnyStorage = match backend {
+                "redb" => AnyStorage::Redb(RedbStorage::new(&data_dir).map_err(|e| e.to_string())?),
+                _ => AnyStorage::Sled(SledStorage::new(&data_dir)?),
+            };
             storage.restore_from(&input)?;
             Ok(text_or_json(
                 json,
@@ -1334,14 +1523,15 @@ fn handle_node(
     }
 }
 
-fn handle_config(
-    action: ConfigCommands,
-    _json: bool,
-) -> Result<String, Box<dyn std::error::Error>> {
+fn handle_config(action: ConfigCommands, json: bool) -> Result<String, Box<dyn std::error::Error>> {
     match action {
         ConfigCommands::Init { output } => {
             let _cfg = generate_default_config(&output)?;
-            Ok(format!("Config written to {:?}", output))
+            Ok(text_or_json(
+                json,
+                &format!("Config written to {:?}", output),
+                serde_json::json!({"status": "ok", "path": output.to_string_lossy()}),
+            ))
         }
         ConfigCommands::Set { key, value } => {
             let config_path = PathBuf::from("config.toml");
@@ -1352,7 +1542,11 @@ fn handle_config(
             };
             cfg.set(&key, &value)?;
             cfg.save(&config_path)?;
-            Ok(format!("Set {} = {}", key, value))
+            Ok(text_or_json(
+                json,
+                &format!("Set {} = {}", key, value),
+                serde_json::json!({"status": "ok", "key": key, "value": value}),
+            ))
         }
     }
 }
@@ -1366,13 +1560,17 @@ fn handle_wallet(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let keystore = Keystore::new(None)?;
     match action {
-        WalletCommands::Create { name: _ } => {
+        WalletCommands::Create { name } => {
             let password = prompt_password("Password: ")?;
             let pk = keystore.create_key(&password)?;
             Ok(text_or_json(
                 json,
-                &format!("Wallet created\nPublic Key: {}", hex::encode(pk.to_bytes())),
-                serde_json::json!({"public_key": hex::encode(pk.to_bytes())}),
+                &format!(
+                    "Wallet created ({})\nPublic Key: {}",
+                    name.as_deref().unwrap_or("unnamed"),
+                    hex::encode(pk.to_bytes())
+                ),
+                serde_json::json!({"public_key": hex::encode(pk.to_bytes()), "name": name}),
             ))
         }
         WalletCommands::List => {
@@ -1384,7 +1582,7 @@ fn handle_wallet(
                 Ok(text_or_json(json, &list.join("\n"), serde_json::json!({"wallets": list})))
             }
         }
-        WalletCommands::Import { private_key, name: _ } => {
+        WalletCommands::Import { private_key, name } => {
             let bytes = hex::decode(&private_key)?;
             if bytes.len() != 32 {
                 return Err("Private key must be 32 bytes hex".into());
@@ -1395,8 +1593,12 @@ fn handle_wallet(
             let pk = keystore.import_key(&arr, &password)?;
             Ok(text_or_json(
                 json,
-                &format!("Imported: {}", hex::encode(pk.to_bytes())),
-                serde_json::json!({"public_key": hex::encode(pk.to_bytes())}),
+                &format!(
+                    "Imported ({}) {}",
+                    name.as_deref().unwrap_or("unnamed"),
+                    hex::encode(pk.to_bytes())
+                ),
+                serde_json::json!({"public_key": hex::encode(pk.to_bytes()), "name": name}),
             ))
         }
         WalletCommands::Export { identifier, password } => {
@@ -1413,7 +1615,11 @@ fn handle_wallet(
             let pk = parse_pubkey(&identifier)?;
             let password = prompt_password("Password: ")?;
             let sk = keystore.load_key(&pk, &password)?;
-            let msg_bytes = hex::decode(&message).unwrap_or_else(|_| message.as_bytes().to_vec());
+            let msg_bytes = if let Some(hex_str) = message.strip_prefix("hex:") {
+                hex::decode(hex_str).unwrap_or_else(|_| hex_str.as_bytes().to_vec())
+            } else {
+                message.as_bytes().to_vec()
+            };
             let sig = sk.sign(&msg_bytes);
             Ok(text_or_json(
                 json,
@@ -1464,7 +1670,12 @@ fn handle_tx(
 
     match action {
         TxCommands::Transfer { sender, recipient, amount, memo, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
+            let mut cfg = Config::default();
+            cfg.storage.backend = match backend {
+                "redb" => StorageBackend::Redb,
+                _ => StorageBackend::Sled,
+            };
+            let runtime = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let sender_pk = parse_pubkey(&sender)?;
             let recipient_pk = parse_pubkey(&recipient)?;
 
@@ -1521,7 +1732,12 @@ fn handle_tx(
             ))
         }
         TxCommands::DeployContract { sender, wasm, init_args, gas_limit, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
+            let mut cfg = Config::default();
+            cfg.storage.backend = match backend {
+                "redb" => StorageBackend::Redb,
+                _ => StorageBackend::Sled,
+            };
+            let runtime = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let sender_pk = parse_pubkey(&sender)?;
             let wasm_bytes = std::fs::read(&wasm)?;
             let _account = runtime
@@ -1551,7 +1767,12 @@ fn handle_tx(
             gas_limit,
             data_dir,
         } => {
-            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
+            let mut cfg = Config::default();
+            cfg.storage.backend = match backend {
+                "redb" => StorageBackend::Redb,
+                _ => StorageBackend::Sled,
+            };
+            let runtime = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let sender_pk = parse_pubkey(&sender)?;
             let cid_bytes = hex::decode(&contract_id)?;
             if cid_bytes.len() != 32 {
@@ -1577,7 +1798,12 @@ fn handle_tx(
             ))
         }
         TxCommands::Data { sender, data, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
+            let mut cfg = Config::default();
+            cfg.storage.backend = match backend {
+                "redb" => StorageBackend::Redb,
+                _ => StorageBackend::Sled,
+            };
+            let runtime = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let sender_pk = parse_pubkey(&sender)?;
             let account = runtime
                 .get_account(&sender_pk)?
@@ -1644,7 +1870,12 @@ fn handle_query(
 ) -> Result<String, Box<dyn std::error::Error>> {
     match action {
         QueryCommands::Head { data_dir } => {
-            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
+            let mut cfg = Config::default();
+            cfg.storage.backend = match backend {
+                "redb" => StorageBackend::Redb,
+                _ => StorageBackend::Sled,
+            };
+            let runtime = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let chain = runtime.get_chain_state()?;
             let block = runtime.get_block(&chain.latest_block_hash)?.ok_or("No block found")?;
             Ok(text_or_json(
@@ -1659,7 +1890,12 @@ fn handle_query(
             ))
         }
         QueryCommands::Block { identifier, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
+            let mut cfg = Config::default();
+            cfg.storage.backend = match backend {
+                "redb" => StorageBackend::Redb,
+                _ => StorageBackend::Sled,
+            };
+            let runtime = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let block = if let Ok(h) = hex::decode(&identifier) {
                 if h.len() == 32 {
                     let mut arr = [0u8; 32];
@@ -1694,7 +1930,12 @@ fn handle_query(
             }
         }
         QueryCommands::Tx { hash, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
+            let mut cfg = Config::default();
+            cfg.storage.backend = match backend {
+                "redb" => StorageBackend::Redb,
+                _ => StorageBackend::Sled,
+            };
+            let runtime = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let h = hex::decode(&hash)?;
             if h.len() != 32 {
                 return Err("Hash must be 32 bytes hex".into());
@@ -1716,7 +1957,12 @@ fn handle_query(
             }
         }
         QueryCommands::Account { address, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
+            let mut cfg = Config::default();
+            cfg.storage.backend = match backend {
+                "redb" => StorageBackend::Redb,
+                _ => StorageBackend::Sled,
+            };
+            let runtime = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let pk = parse_pubkey(&address)?;
             match runtime.get_account(&pk)? {
                 Some(Account::Wallet { balance, nonce }) => Ok(text_or_json(
@@ -1740,7 +1986,12 @@ fn handle_query(
             }
         }
         QueryCommands::ContractState { contract_id, key, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
+            let mut cfg = Config::default();
+            cfg.storage.backend = match backend {
+                "redb" => StorageBackend::Redb,
+                _ => StorageBackend::Sled,
+            };
+            let runtime = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let cid_bytes = hex::decode(&contract_id)?;
             if cid_bytes.len() != 32 {
                 return Err("CID must be 32 bytes hex".into());
@@ -1764,7 +2015,12 @@ fn handle_query(
             }
         }
         QueryCommands::ContractCall { contract_id, method, args, data_dir } => {
-            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
+            let mut cfg = Config::default();
+            cfg.storage.backend = match backend {
+                "redb" => StorageBackend::Redb,
+                _ => StorageBackend::Sled,
+            };
+            let runtime = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let cid_bytes = hex::decode(&contract_id)?;
             if cid_bytes.len() != 32 {
                 return Err("CID must be 32 bytes hex".into());
@@ -1899,7 +2155,12 @@ fn handle_dev(
             ))
         }
         DevCommands::PerformanceReport { data_dir } => {
-            let runtime = build_runtime(&data_dir, backend, 5000, &[], "0.0.0.0:9070")?;
+            let mut cfg = Config::default();
+            cfg.storage.backend = match backend {
+                "redb" => StorageBackend::Redb,
+                _ => StorageBackend::Sled,
+            };
+            let runtime = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let metrics = runtime.get_detailed_metrics()?;
             Ok(text_or_json(
                 json,

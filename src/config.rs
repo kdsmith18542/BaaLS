@@ -341,8 +341,15 @@ impl Config {
 /// `config.logging.file`, rotating files when the size limit is reached.
 ///
 /// If a logger is already initialized, this call is a no-op.
-pub fn setup_logging(config: &Config, _default_level: &str) -> Result<(), ConfigError> {
-    let level_filter = match config.logging.level.as_str() {
+pub fn setup_logging(config: &Config, default_level: &str) -> Result<(), ConfigError> {
+    // CLI-provided level (from --verbose) takes precedence over config file.
+    // Config file can override only if the CLI didn't set a non-default level.
+    let effective_level = if default_level != "info" {
+        default_level.to_string()
+    } else {
+        config.logging.level.clone()
+    };
+    let level_filter = match effective_level.as_str() {
         "trace" => log::LevelFilter::Trace,
         "debug" => log::LevelFilter::Debug,
         "info" => log::LevelFilter::Info,

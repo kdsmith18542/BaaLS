@@ -321,13 +321,17 @@ impl Storage for RedbStorage {
         &self,
         tx_hash: &[u8; 32],
         block_hash: &[u8; 32],
-        _tx_index_in_block: u32,
+        tx_index_in_block: u32,
     ) -> Result<(), StorageError> {
         let key = format!("idx:{}:{}", hex::encode(tx_hash), hex::encode(block_hash));
+        let reverse_key = format!("rev_block:{}:{}", hex::encode(block_hash), tx_index_in_block);
         let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(TXS_TABLE).map_err(map_err)?;
             table.insert(key.as_bytes(), block_hash.as_slice()).map_err(map_err)?;
+            table
+                .insert(reverse_key.as_bytes(), hex::encode(tx_hash).as_bytes())
+                .map_err(map_err)?;
         }
         txn.commit().map_err(map_err)?;
         Ok(())
@@ -369,16 +373,26 @@ impl Storage for RedbStorage {
 
     fn get_transactions_by_block(
         &self,
-        _block_hash: &[u8; 32],
+        block_hash: &[u8; 32],
     ) -> Result<Vec<Transaction>, StorageError> {
         let txn = self.db_guard()?.begin_read().map_err(map_err)?;
-        let table = txn.open_table(TXS_TABLE).map_err(map_err)?;
+        let block = {
+            let blocks_table = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
+            let key = format!("hash:{}", hex::encode(block_hash));
+            match blocks_table.get(key.as_bytes()).map_err(map_err)? {
+                Some(v) => bincode::deserialize::<Block>(v.value())
+                    .map_err(|e| StorageError::IndexError(e.to_string()))?,
+                None => return Ok(Vec::new()),
+            }
+        };
+        let txs_table = txn.open_table(TXS_TABLE).map_err(map_err)?;
         let mut txs = Vec::new();
-        let iter = table.iter().map_err(map_err)?;
-        for item in iter {
-            let (_, v) = item.map_err(map_err)?;
-            if let Ok(tx) = bincode::deserialize::<Transaction>(v.value()) {
-                txs.push(tx);
+        for tx in &block.transactions {
+            let tx_key = format!("hash:{}", hex::encode(tx.hash));
+            if let Some(v) = txs_table.get(tx_key.as_bytes()).map_err(map_err)? {
+                if let Ok(tx) = bincode::deserialize::<Transaction>(v.value()) {
+                    txs.push(tx);
+                }
             }
         }
         Ok(txs)
@@ -617,6 +631,28 @@ impl Storage for RedbStorage {
         }
     }
 
+    fn contract_storage_read_all(
+        &self,
+        contract_id: &ContractId,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let prefix = format!("cstore:{}:", hex::encode(contract_id.to_bytes()));
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
+        let table = txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
+        let mut kv = Vec::new();
+        let iter = table.iter().map_err(map_err)?;
+        for item in iter {
+            let (k, v) = item.map_err(map_err)?;
+            let key_str = String::from_utf8_lossy(k.value());
+            if key_str.starts_with(&prefix) {
+                let contract_key_hex = &key_str[prefix.len()..];
+                let decoded_key = hex::decode(contract_key_hex)
+                    .map_err(|e| StorageError::IndexError(format!("Invalid hex key: {}", e)))?;
+                kv.push((decoded_key, v.value().to_vec()));
+            }
+        }
+        Ok(kv)
+    }
+
     fn contract_storage_write(
         &self,
         contract_id: &ContractId,
@@ -827,23 +863,35 @@ impl Storage for RedbStorage {
         let blocks = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
         let txs = txn.open_table(TXS_TABLE).map_err(map_err)?;
         let accounts = txn.open_table(ACCOUNTS_TABLE).map_err(map_err)?;
+        let contracts = txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
+        let pending = txn.open_table(PENDING_TABLE).map_err(map_err)?;
 
         let block_count = blocks.iter().map_err(map_err)?.count() as u64;
         let tx_count = txs.iter().map_err(map_err)?.count() as u64;
         let account_count = accounts.iter().map_err(map_err)?.count() as u64;
+        let contract_count = contracts.iter().map_err(map_err)?.count() as u64;
+        let mempool_size = pending.iter().map_err(map_err)?.count() as u64;
+        drop(pending);
+        drop(contracts);
         drop(accounts);
         drop(txs);
         drop(blocks);
         drop(txn);
 
+        let index_count = block_count + tx_count + account_count + contract_count + mempool_size;
+        let storage_size_bytes = match std::fs::metadata(&self.db_path) {
+            Ok(meta) => meta.len(),
+            Err(_) => 0,
+        };
+
         Ok(StorageStats {
             total_blocks: block_count,
             total_transactions: tx_count,
             total_accounts: account_count,
-            total_contracts: 0,
-            mempool_size: 0,
-            storage_size_bytes: 0,
-            index_count: 0,
+            total_contracts: contract_count,
+            mempool_size,
+            storage_size_bytes,
+            index_count,
         })
     }
 

@@ -15,8 +15,6 @@ pub enum ConsensusError {
     UnauthorizedSigner,
     #[error("Block timestamp is invalid")]
     InvalidTimestamp,
-    #[error("Mismatched previous hash")]
-    MismatchedPrevHash,
     #[error("Invalid nonce")]
     InvalidNonce,
     #[error("No pending transactions available to generate a block")]

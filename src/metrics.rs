@@ -376,15 +376,25 @@ impl MetricsCollector {
 
         let performance_score = self.calculate_performance_score(&metrics);
 
+        let mut sys = System::new();
+        sys.refresh_all();
+        let cpu_usage = sys.cpus().iter().map(|c| c.cpu_usage() as f64).sum::<f64>()
+            / sys.cpus().len().max(1) as f64;
+        let total_mem = sys.total_memory() as f64;
+        let used_mem = sys.used_memory() as f64;
+        let memory_usage = if total_mem > 0.0 { (used_mem / total_mem) * 100.0 } else { 0.0 };
+        let disk_usage = 0.0; // Process-level disk usage varies by platform
+        let network_usage = 0.0; // Network usage requires platform-specific tracking
+
         OptimizationReport {
             bottlenecks,
             recommendations,
             performance_score,
             resource_utilization: ResourceUtilization {
-                cpu_usage: 0.0, // Would be calculated from system metrics
-                memory_usage: 0.0,
-                disk_usage: 0.0,
-                network_usage: 0.0,
+                cpu_usage,
+                memory_usage,
+                disk_usage,
+                network_usage,
             },
         }
     }
@@ -426,7 +436,12 @@ impl MetricsCollector {
         let (storage_healthy, latest_block_index, latest_block_hash, mempool_size) = {
             let m = self.metrics.lock().unwrap();
             let healthy = m.error_count.values().sum::<u64>() == 0 || m.total_blocks_processed > 0;
-            (healthy, m.total_blocks_processed, String::new(), 0usize)
+            let hash = if m.total_blocks_processed > 0 {
+                format!("block:{}", m.total_blocks_processed)
+            } else {
+                String::new()
+            };
+            (healthy, m.total_blocks_processed, hash, m.mempool_operations as usize)
         };
 
         let status = if !storage_healthy || used_memory > 4096.0 {
@@ -470,59 +485,4 @@ where
     let duration = start.elapsed();
     metric_fn(collector, duration);
     result
-}
-
-// New: Performance profiling utilities for Phase 4
-pub struct PerformanceProfiler {
-    collector: MetricsCollector,
-    profiling_enabled: bool,
-}
-
-impl Default for PerformanceProfiler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PerformanceProfiler {
-    pub fn new() -> Self {
-        Self { collector: MetricsCollector::new(), profiling_enabled: true }
-    }
-
-    pub fn enable_profiling(&mut self) {
-        self.profiling_enabled = true;
-    }
-
-    pub fn disable_profiling(&mut self) {
-        self.profiling_enabled = false;
-    }
-
-    pub fn profile_operation<T, F>(&self, operation_name: &str, operation: F) -> T
-    where
-        F: FnOnce() -> T,
-    {
-        if !self.profiling_enabled {
-            return operation();
-        }
-
-        let start = Instant::now();
-        let result = operation();
-        let duration = start.elapsed();
-
-        // Record the operation based on its type
-        match operation_name {
-            "block_processing" => self.collector.record_block_processing(duration),
-            "transaction_validation" => self.collector.record_transaction_validation(duration),
-            "storage_operation" => self.collector.record_storage_operation(duration),
-            "contract_execution" => self.collector.record_contract_execution(duration),
-            "network_sync" => self.collector.record_network_sync(duration),
-            _ => {} // Unknown operation type
-        }
-
-        result
-    }
-
-    pub fn get_collector(&self) -> &MetricsCollector {
-        &self.collector
-    }
 }

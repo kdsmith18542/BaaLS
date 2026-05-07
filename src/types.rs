@@ -639,8 +639,11 @@ impl Block {
         for tx in &self.transactions {
             merkle.add_leaf_hash(tx.hash);
         }
-        let tx_root =
-            if merkle.is_empty() { [0u8; 32] } else { merkle.root().unwrap_or([0u8; 32]) };
+        let tx_root = if merkle.is_empty() {
+            [0u8; 32]
+        } else {
+            merkle.root().map_err(|_| CryptoError::HashConversionError)?
+        };
         hasher.update(tx_root);
 
         Ok(hasher.finalize().into())

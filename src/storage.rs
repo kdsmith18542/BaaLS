@@ -30,6 +30,9 @@ pub enum StorageError {
 pub const CURRENT_STORAGE_FORMAT_VERSION: u32 = 1;
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
+pub type StorageResult<T> = Result<T, StorageError>;
+pub type KVList = Vec<(Vec<u8>, Vec<u8>)>;
+
 pub trait Storage: Send + Sync {
     fn put_block(&self, block: &Block) -> Result<(), StorageError>;
     fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>, StorageError>;
@@ -83,7 +86,7 @@ pub trait Storage: Send + Sync {
         limit: usize,
     ) -> Result<Vec<Transaction>, StorageError>;
 
-    // Account State Management (used by Ledger)
+    // Account State
     fn put_account(&self, address: &PublicKey, account: &Account) -> Result<(), StorageError>;
     fn get_account(&self, address: &PublicKey) -> Result<Option<Account>, StorageError>;
     fn delete_account(&self, address: &PublicKey) -> Result<(), StorageError>;
@@ -105,6 +108,7 @@ pub trait Storage: Send + Sync {
         contract_id: &ContractId,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, StorageError>;
+    fn contract_storage_read_all(&self, contract_id: &ContractId) -> StorageResult<KVList>;
     fn contract_storage_write(
         &self,
         contract_id: &ContractId,
@@ -281,66 +285,71 @@ impl SledStorage {
     }
 
     fn migrate_key_prefixes(&self) -> Result<(), StorageError> {
-        // Migrate blocks_tree: raw 32-byte hash -> "hash:{32bytehash}"
-        if let Some(Ok((first_key, _))) = self.blocks_tree.iter().next() {
-            if first_key.len() == 32 {
-                let entries: Vec<(Vec<u8>, Vec<u8>)> = self
-                    .blocks_tree
-                    .iter()
-                    .filter_map(|r| r.ok())
-                    .filter(|(k, _)| k.len() == 32)
-                    .map(|(k, v)| (k.to_vec(), v.to_vec()))
-                    .collect();
-                self.blocks_tree.clear()?;
-                for (old_key, value) in &entries {
-                    let mut new_key = b"hash:".to_vec();
-                    new_key.extend_from_slice(old_key);
-                    self.blocks_tree.insert(new_key, value.as_slice())?;
-                }
-                self.blocks_tree.flush()?;
-            }
+        let migration_flag = b"key_migration_complete";
+
+        // Check if migration was already completed
+        if self.meta_tree.get(migration_flag)?.is_some() {
+            return Ok(());
         }
 
-        // Migrate accounts_tree: raw 32-byte address -> "acc:{32byteaddr}"
-        if let Some(Ok((first_key, _))) = self.accounts_tree.iter().next() {
-            if first_key.len() == 32 {
-                let entries: Vec<(Vec<u8>, Vec<u8>)> = self
-                    .accounts_tree
-                    .iter()
-                    .filter_map(|r| r.ok())
-                    .filter(|(k, _)| k.len() == 32)
-                    .map(|(k, v)| (k.to_vec(), v.to_vec()))
-                    .collect();
-                self.accounts_tree.clear()?;
-                for (old_key, value) in &entries {
-                    let mut new_key = b"acc:".to_vec();
-                    new_key.extend_from_slice(old_key);
-                    self.accounts_tree.insert(new_key, value.as_slice())?;
+        // Phase 1: Write new prefixed keys alongside old raw keys
+        self.migrate_tree_keys(&self.blocks_tree, b"hash:", 32)?;
+        self.migrate_tree_keys(&self.accounts_tree, b"acc:", 32)?;
+        self.migrate_tree_keys(&self.contract_code_tree, b"code:", 32)?;
+
+        // Phase 2: Remove old raw keys
+        self.cleanup_old_raw_keys(&self.blocks_tree, 32)?;
+        self.cleanup_old_raw_keys(&self.accounts_tree, 32)?;
+        self.cleanup_old_raw_keys(&self.contract_code_tree, 32)?;
+
+        // Mark migration complete
+        self.meta_tree.insert(migration_flag, b"1")?;
+        self.meta_tree.flush()?;
+
+        Ok(())
+    }
+
+    fn migrate_tree_keys(
+        &self,
+        tree: &sled::Tree,
+        prefix: &[u8],
+        raw_key_len: usize,
+    ) -> Result<(), StorageError> {
+        if let Some(Ok((first_key, _))) = tree.iter().next() {
+            if first_key.len() == raw_key_len {
+                for item in tree.iter() {
+                    let (key, value) = item?;
+                    if key.len() != raw_key_len {
+                        continue;
+                    }
+                    let mut new_key = prefix.to_vec();
+                    new_key.extend_from_slice(&key);
+                    // Only write if not already present (crash recovery)
+                    if tree.get(&new_key)?.is_none() {
+                        tree.insert(new_key, value.as_ref())?;
+                    }
                 }
-                self.accounts_tree.flush()?;
+                tree.flush()?;
             }
         }
+        Ok(())
+    }
 
-        // Migrate contract_code_tree: raw 32-byte id -> "code:{32byteid}"
-        if let Some(Ok((first_key, _))) = self.contract_code_tree.iter().next() {
-            if first_key.len() == 32 {
-                let entries: Vec<(Vec<u8>, Vec<u8>)> = self
-                    .contract_code_tree
-                    .iter()
-                    .filter_map(|r| r.ok())
-                    .filter(|(k, _)| k.len() == 32)
-                    .map(|(k, v)| (k.to_vec(), v.to_vec()))
-                    .collect();
-                self.contract_code_tree.clear()?;
-                for (old_key, value) in &entries {
-                    let mut new_key = b"code:".to_vec();
-                    new_key.extend_from_slice(old_key);
-                    self.contract_code_tree.insert(new_key, value.as_slice())?;
-                }
-                self.contract_code_tree.flush()?;
-            }
+    fn cleanup_old_raw_keys(
+        &self,
+        tree: &sled::Tree,
+        raw_key_len: usize,
+    ) -> Result<(), StorageError> {
+        let keys_to_remove: Vec<sled::IVec> = tree
+            .iter()
+            .filter_map(|r| r.ok())
+            .filter(|(k, _)| k.len() == raw_key_len)
+            .map(|(k, _)| k)
+            .collect();
+        for key in keys_to_remove {
+            tree.remove(key)?;
         }
-
+        tree.flush()?;
         Ok(())
     }
 
@@ -458,16 +467,27 @@ impl SledStorage {
     }
 
     fn compact_tree(tree: &sled::Tree) -> Result<(), StorageError> {
-        let mut entries = std::collections::BTreeMap::<Vec<u8>, Vec<u8>>::new();
+        const BATCH_SIZE: usize = 10_000;
+        let mut batch = std::collections::BTreeMap::<Vec<u8>, Vec<u8>>::new();
+        let mut total = 0usize;
         for item in tree.iter() {
             let (key, value) = item?;
-            entries.insert(key.to_vec(), value.to_vec());
+            batch.insert(key.to_vec(), value.to_vec());
+            total += 1;
+            if batch.len() >= BATCH_SIZE {
+                for (k, v) in std::mem::take(&mut batch) {
+                    tree.insert(k, v)?;
+                }
+                tree.flush()?;
+            }
         }
-        tree.clear()?;
-        for (key, value) in entries {
+        // Flush remaining entries
+        for (key, value) in batch {
             tree.insert(key, value)?;
         }
-        tree.flush()?;
+        if total > 0 {
+            tree.flush()?;
+        }
         Ok(())
     }
 
@@ -543,6 +563,9 @@ impl Clone for SledStorage {
 }
 
 impl Storage for SledStorage {
+    fn clone_storage(&self) -> Box<dyn Storage> {
+        Box::new(self.clone())
+    }
     fn put_block(&self, block: &Block) -> Result<(), StorageError> {
         let block_hash = block.hash;
         let block_height = block.index;
@@ -723,26 +746,22 @@ impl Storage for SledStorage {
         to_height: u64,
     ) -> Result<Vec<Transaction>, StorageError> {
         let mut transactions = Vec::new();
-        let from_height_key = format!("height:{}", from_height);
-        let _to_height_key = format!("height:{}", to_height);
-
-        let mut iter = self.blocks_tree.scan_prefix(from_height_key.as_bytes()).rev();
+        let mut iter = self.blocks_tree.scan_prefix(b"height:");
         while let Some(Ok((_key, encoded))) = iter.next() {
             let block: Block = bincode::deserialize(&encoded)?;
-            if block.index > to_height {
-                break;
-            }
-            for item in self
-                .tx_by_block_tree
-                .scan_prefix(format!("block_tx:{}:", hex::encode(block.hash)).as_bytes())
-            {
-                let (_key, tx_hash_bytes) = item?;
-                let tx_hash_array: [u8; 32] = tx_hash_bytes
-                    .as_ref()
-                    .try_into()
-                    .map_err(|_| CryptoError::HashConversionError)?;
-                if let Some(tx) = self.get_transaction(&tx_hash_array)? {
-                    transactions.push(tx);
+            if block.index >= from_height && block.index <= to_height {
+                for item in self
+                    .tx_by_block_tree
+                    .scan_prefix(format!("block_tx:{}:", hex::encode(block.hash)).as_bytes())
+                {
+                    let (_key, tx_hash_bytes) = item?;
+                    let tx_hash_array: [u8; 32] = tx_hash_bytes
+                        .as_ref()
+                        .try_into()
+                        .map_err(|_| CryptoError::HashConversionError)?;
+                    if let Some(tx) = self.get_transaction(&tx_hash_array)? {
+                        transactions.push(tx);
+                    }
                 }
             }
         }
@@ -755,16 +774,12 @@ impl Storage for SledStorage {
         to_height: u64,
     ) -> Result<Vec<[u8; 32]>, StorageError> {
         let mut block_hashes = Vec::new();
-        let from_height_key = format!("height:{}", from_height);
-        let _to_height_key = format!("height:{}", to_height);
-
-        let mut iter = self.blocks_tree.scan_prefix(from_height_key.as_bytes()).rev();
+        let mut iter = self.blocks_tree.scan_prefix(b"height:");
         while let Some(Ok((_key, encoded))) = iter.next() {
             let block: Block = bincode::deserialize(&encoded)?;
-            if block.index > to_height {
-                break;
+            if block.index >= from_height && block.index <= to_height {
+                block_hashes.push(block.hash);
             }
-            block_hashes.push(block.hash);
         }
         Ok(block_hashes)
     }
@@ -880,6 +895,28 @@ impl Storage for SledStorage {
         let full_key = format!("state:{}:{}", hex::encode(contract_id.id), hex::encode(key));
         let encoded = self.contract_storage_tree.get(full_key)?;
         Ok(encoded.map(|e| e.to_vec()))
+    }
+
+    fn contract_storage_read_all(
+        &self,
+        contract_id: &ContractId,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let prefix = format!("state:{}:", hex::encode(contract_id.id));
+        let mut kv = Vec::new();
+
+        for item in self.contract_storage_tree.scan_prefix(prefix.as_bytes()) {
+            let (raw_key, value) = item?;
+            let raw_key_str = String::from_utf8(raw_key.to_vec())
+                .map_err(|e| StorageError::IndexError(format!("Invalid UTF-8 key: {}", e)))?;
+            let key_hex = raw_key_str
+                .strip_prefix(&prefix)
+                .ok_or_else(|| StorageError::IndexError("Invalid contract storage key".into()))?;
+            let decoded_key = hex::decode(key_hex)
+                .map_err(|e| StorageError::IndexError(format!("Invalid hex key: {}", e)))?;
+            kv.push((decoded_key, value.to_vec()));
+        }
+
+        Ok(kv)
     }
 
     fn contract_storage_write(
@@ -1124,10 +1161,6 @@ impl Storage for SledStorage {
             storage_size_bytes,
             index_count,
         })
-    }
-
-    fn clone_storage(&self) -> Box<dyn Storage> {
-        Box::new(self.clone())
     }
 
     fn clear_pending_transactions(&self) -> Result<(), StorageError> {

@@ -97,7 +97,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         let initial_chain_state = ChainState {
             latest_block_hash: genesis_block.hash,
             latest_block_index: 0,
-            accounts_root_hash: [0; 32], // Placeholder, will be updated by Merkle tree impl
+            accounts_root_hash: [0; 32], // Updated by Merkle tree during block application
             total_supply: 0,             // No native token for now
         };
 
@@ -155,7 +155,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             )));
         }
 
-        // Timestamp check (simplified for MVP, typically more robust logic needed)
+        // Timestamp check: must be after previous block and within future tolerance
         debug!("[LEDGER] Validating block timestamp");
         if block.index > 0 {
             let prev_block =
@@ -176,7 +176,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             ));
         }
 
-        // Transaction Validation (within the block) - only basic checks for MVP
+        // Transaction Validation: signature, nonce, and balance checks
         debug!("[LEDGER] Validating {} transactions", block.transactions.len());
         for (i, tx) in block.transactions.iter().enumerate() {
             debug!(
@@ -483,6 +483,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                             &*self.storage,
                             block.index,
                             block.timestamp,
+                            tx.gas_limit.saturating_sub(gas_used),
                         ) {
                             Ok(result) => {
                                 info!(
@@ -505,14 +506,13 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                         }
                     }
                 }
-                TransactionPayload::Data { data: _ } => {
-                    // For MVP, just allow storing data. No specific state changes yet.
-                    gas_used += 10_000;
+                TransactionPayload::Data { data } => {
+                    gas_used += 10_000 + data.len() as u64 / 10;
                     if gas_used > tx.gas_limit {
                         tx_success = false;
                         warn!("[LEDGER] Data transaction exceeded gas limit");
                     } else {
-                        debug!("[LEDGER] Data transaction processed successfully");
+                        info!("[LEDGER] Data transaction stored {} bytes", data.len());
                     }
                 }
             }

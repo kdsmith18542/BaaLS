@@ -30,12 +30,18 @@ unsafe fn with_sdk<F, T>(f: F) -> Result<T, c_uint>
 where
     F: FnOnce(&BaaLSSdk) -> Result<T, crate::sdk::SdkError>,
 {
-    if let Some(sdk) = SDK_INSTANCE.get() {
-        let sdk = sdk.lock().unwrap();
-        let result = catch_unwind(AssertUnwindSafe(|| f(&sdk))).map_err(|_| 3u32)?;
-        result.map_err(|_| 1u32)
+    if let Some(sdk_mutex) = SDK_INSTANCE.get() {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let sdk = sdk_mutex.lock().map_err(|_| 4u32)?;
+            f(&sdk).map_err(|_| 1u32)
+        }));
+
+        match result {
+            Ok(inner_res) => inner_res,
+            Err(_) => Err(3u32), // Panic occurred
+        }
     } else {
-        Err(2u32)
+        Err(2u32) // Not initialized
     }
 }
 
@@ -257,10 +263,10 @@ pub unsafe extern "C" fn baals_sdk_call_contract(
     let cid = ContractId::from_bytes(&cid_arr);
 
     let method_str = unsafe { CStr::from_ptr(method) }.to_string_lossy().to_string();
-    let args_bytes = unsafe { std::slice::from_raw_parts(args_ptr, args_len as usize) };
-    let args: Vec<Vec<u8>> = if args_bytes.is_empty() {
+    let args: Vec<Vec<u8>> = if args_ptr.is_null() || args_len == 0 {
         Vec::new()
     } else {
+        let args_bytes = unsafe { std::slice::from_raw_parts(args_ptr, args_len as usize) };
         bincode::deserialize(args_bytes).unwrap_or_else(|_| vec![args_bytes.to_vec()])
     };
 

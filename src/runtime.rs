@@ -2,6 +2,7 @@ use ed25519_dalek::SigningKey;
 use log::{debug, error, info, warn};
 use rand::RngCore;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -186,6 +187,7 @@ pub struct Runtime<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> {
     pub backup_interval_secs: u64,
     metrics: Arc<MetricsCollector>,
     started_at: Arc<Mutex<Option<SystemTime>>>,
+    sync_in_flight: Arc<AtomicBool>,
     block_production_shutdown: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
     backup_shutdown: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
 }
@@ -207,6 +209,7 @@ impl<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> Clone for Runtime<S
             backup_interval_secs: self.backup_interval_secs,
             metrics: Arc::clone(&self.metrics),
             started_at: Arc::clone(&self.started_at),
+            sync_in_flight: Arc::clone(&self.sync_in_flight),
             block_production_shutdown: Arc::clone(&self.block_production_shutdown),
             backup_shutdown: Arc::clone(&self.backup_shutdown),
         }
@@ -261,6 +264,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             mempool_size_limit,
             metrics: Arc::new(MetricsCollector::new()),
             started_at: Arc::new(Mutex::new(None)),
+            sync_in_flight: Arc::new(AtomicBool::new(false)),
             block_production_shutdown: Arc::new(Mutex::new(None)),
             backup_shutdown: Arc::new(Mutex::new(None)),
         })
@@ -923,25 +927,34 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             fork_blocks.len()
         );
 
+        let original_chain_state = current_chain_state.clone();
         let mut expected_index = current_chain_state.latest_block_index + 1;
         let mut expected_prev_hash = current_chain_state.latest_block_hash;
 
         for block in fork_blocks {
             if block.index != expected_index {
+                *self.chain_state.lock().unwrap() = original_chain_state;
                 return Err(RuntimeError::InvalidTransaction(format!(
                     "Fork block index mismatch: expected {}, got {}",
                     expected_index, block.index
                 )));
             }
             if block.prev_hash != expected_prev_hash {
+                *self.chain_state.lock().unwrap() = original_chain_state;
                 return Err(RuntimeError::InvalidTransaction(format!(
                     "Fork block prev_hash mismatch at index {}",
                     block.index
                 )));
             }
 
-            self.ledger.validate_block(block, &current_chain_state)?;
-            self.ledger.apply_block(block.clone(), &mut current_chain_state)?;
+            if let Err(e) = self.ledger.validate_block(block, &current_chain_state) {
+                *self.chain_state.lock().unwrap() = original_chain_state;
+                return Err(e.into());
+            }
+            if let Err(e) = self.ledger.apply_block(block.clone(), &mut current_chain_state) {
+                *self.chain_state.lock().unwrap() = original_chain_state;
+                return Err(e.into());
+            }
 
             expected_index = block.index + 1;
             expected_prev_hash = block.hash;
@@ -989,24 +1002,24 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             }
         }
 
-        // Normal sequential block application
+        // Normal sequential block application.
+        // Keep validation and application under one explicit lock scope to avoid
+        // self-deadlock on re-locking the same mutex in a match scrutinee.
         for block in blocks {
-            match self.ledger.validate_block(&block, &self.chain_state.lock().unwrap()) {
-                Ok(()) => {
-                    let mut chain_state = self.chain_state.lock().unwrap();
-                    match self.ledger.apply_block(block.clone(), &mut chain_state) {
-                        Ok(()) => {
-                            info!(
-                                "[SYNC] Applied received block #{} ({} txns)",
-                                block.index,
-                                block.transactions.len()
-                            );
-                        }
-                        Err(e) => {
-                            warn!("[SYNC] Failed to apply received block #{}: {}", block.index, e);
-                        }
+            let mut chain_state = self.chain_state.lock().unwrap();
+            match self.ledger.validate_block(&block, &chain_state) {
+                Ok(()) => match self.ledger.apply_block(block.clone(), &mut chain_state) {
+                    Ok(()) => {
+                        info!(
+                            "[SYNC] Applied received block #{} ({} txns)",
+                            block.index,
+                            block.transactions.len()
+                        );
                     }
-                }
+                    Err(e) => {
+                        warn!("[SYNC] Failed to apply received block #{}: {}", block.index, e);
+                    }
+                },
                 Err(e) => {
                     warn!("[SYNC] Received block #{} failed validation: {}", block.index, e);
                 }
@@ -1016,11 +1029,20 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
     /// Check all known peers and sync with any that are ahead.
     fn sync_with_all_peers(&self) {
+        if self
+            .sync_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            debug!("[SYNC] Skipping sync tick because a sync worker is already in flight");
+            return;
+        }
+
         let sync_layer = Arc::clone(&self.sync_layer);
         let self_clone = self.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create sync tokio runtime");
-            rt.block_on(async move {
+            rt.block_on(async {
                 let peers = match sync_layer.discover_peers().await {
                     Ok(p) => p,
                     Err(_) => return,
@@ -1043,6 +1065,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                     }
                 }
             });
+            self_clone.sync_in_flight.store(false, Ordering::Release);
         });
     }
 
@@ -1131,10 +1154,27 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             hex::encode(caller.to_bytes())
         );
 
-        // Use the contract engine to call the contract
+        // Use real block context from current chain state
+        let chain_state = self.get_chain_state()?;
+        let block_index = chain_state.latest_block_index;
+        let block_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let gas = if _gas_limit > 0 { _gas_limit } else { 1_000_000 };
         let result = self
             .contract_engine_arc
-            .call_contract(caller, contract_id, method_name, args, value, &*self.storage, 0, 0)
+            .call_contract(
+                caller,
+                contract_id,
+                method_name,
+                args,
+                value,
+                &*self.storage,
+                block_index,
+                block_timestamp,
+                gas,
+            )
             .map_err(|e| {
                 RuntimeError::InvalidTransaction(format!("Contract call failed: {}", e))
             })?;
@@ -1156,10 +1196,23 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             method_name
         );
 
-        // Use the contract engine to query the contract
+        // Use real block context from current chain state
+        let chain_state = self.get_chain_state()?;
+        let block_index = chain_state.latest_block_index;
+        let block_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let result = self
             .contract_engine_arc
-            .query_contract(contract_id, method_name, payload, &*self.storage, 0, 0)
+            .query_contract(
+                contract_id,
+                method_name,
+                payload,
+                &*self.storage,
+                block_index,
+                block_timestamp,
+            )
             .map_err(|e| {
                 RuntimeError::InvalidTransaction(format!("Contract query failed: {}", e))
             })?;
