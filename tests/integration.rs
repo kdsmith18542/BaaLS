@@ -1,6 +1,7 @@
 use baals::*;
 use ed25519_dalek::Signer;
 use log::info;
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1866,4 +1867,249 @@ fn test_redb_storage_with_runtime() {
     assert_eq!(block.index, 1, "RedbStorage runtime produced block 1");
 
     info!("[TEST] RedbStorage runtime integration passed");
+}
+
+// ─── Multi-Node P2P Sync Integration Tests ───
+
+#[test]
+fn test_p2p_block_propagation() {
+    init_logging();
+    info!("[SYNC-TEST] Starting P2P block propagation test");
+
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+    let storage_a = SledStorage::new(dir_a.path()).unwrap();
+    let storage_b = SledStorage::new(dir_b.path()).unwrap();
+
+    // Generate keys for both nodes
+    let sk_a = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let sk_b = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let pk_a = PublicKey::from(sk_a.verifying_key());
+    let pk_b = PublicKey::from(sk_b.verifying_key());
+
+    // Create CustomSync for each node
+    let listen_a: std::net::SocketAddr = "127.0.0.1:19071".parse().unwrap();
+    let listen_b: std::net::SocketAddr = "127.0.0.1:19072".parse().unwrap();
+    let sync_a = CustomSync::new(pk_a, listen_a).with_storage(storage_a.clone_storage());
+    let sync_b = CustomSync::new(pk_b, listen_b).with_storage(storage_b.clone_storage());
+
+    // Build runtimes with auto-block disabled
+    let ce_a = BaaLSContractEngine::new(storage_a.clone()).unwrap();
+    let ce_b = BaaLSContractEngine::new(storage_b.clone()).unwrap();
+    let consensus_a = PoAConsensus::new(pk_a, 5000).with_signing_key(sk_a.clone());
+    let consensus_b = PoAConsensus::new(pk_b, 5000).with_signing_key(sk_b.clone());
+
+    let mut rt_a = Runtime::new(storage_a, consensus_a, ce_a, sync_a).unwrap();
+    let rt_b = Runtime::new(storage_b, consensus_b, ce_b, sync_b).unwrap();
+
+    // Use the Runtime's start() which spawns the listener, but set auto-block to 0.
+    rt_a.auto_block_interval_ms = 0;
+    rt_a.auto_block_mempool_threshold = 0;
+    rt_a.start().unwrap();
+    std::thread::sleep(Duration::from_millis(300)); // Let listener bind
+
+    // Add B as peer of A, and A as peer of B
+    rt_a.sync_layer().add_peer_by_address("127.0.0.1:19072").ok();
+    rt_b.sync_layer().add_peer_by_address("127.0.0.1:19071").ok();
+
+    // Create an account on Node A
+    let user_sk = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let user_pk = PublicKey::from(user_sk.verifying_key());
+    rt_a.create_account(&user_pk, Account::Wallet { balance: 1000, nonce: 0 }).unwrap();
+
+    // Submit a transfer transaction to Node A
+    let recipient_sk = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let recipient_pk = PublicKey::from(recipient_sk.verifying_key());
+    rt_a.create_account(&recipient_pk, Account::Wallet { balance: 0, nonce: 0 }).unwrap();
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let mut tx = Transaction {
+        hash: [0u8; 32],
+        sender: user_pk,
+        recipient: Address::Wallet(recipient_pk),
+        payload: TransactionPayload::Transfer { amount: 50 },
+        nonce: 1,
+        timestamp: now,
+        signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+        gas_limit: 100_000,
+        priority: 0,
+        metadata: None,
+    };
+    tx.hash = tx.calculate_hash().unwrap();
+    tx.sign(&user_sk).unwrap();
+    rt_a.submit_transaction(tx).unwrap();
+
+    // Produce a block on Node A
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    let block_a = tokio_rt.block_on(rt_a.produce_block()).unwrap();
+    assert_eq!(block_a.index, 1, "Node A produced block 1");
+    assert_eq!(block_a.transactions.len(), 1, "Block has 1 transaction");
+    info!("[SYNC-TEST] Node A block #{} hash={}", block_a.index, hex::encode(block_a.hash));
+
+    // Node B needs the same accounts to apply the synced block
+    rt_b.create_account(&user_pk, Account::Wallet { balance: 1000, nonce: 0 }).unwrap();
+    rt_b.create_account(&recipient_pk, Account::Wallet { balance: 0, nonce: 0 }).unwrap();
+
+    // Node B syncs with Node A
+    let peer_a = Peer { id: pk_a, address: listen_a };
+    let chain_state_b = rt_b.get_chain_state().unwrap();
+    assert_eq!(chain_state_b.latest_block_index, 0, "Node B starts at height 0");
+
+    let synced_block = tokio_rt
+        .block_on(async { rt_b.sync_layer().sync_with_peer(&peer_a, &chain_state_b).await })
+        .expect("Node B should sync block from Node A");
+
+    info!(
+        "[SYNC-TEST] Node B received block #{} hash={}",
+        synced_block.index,
+        hex::encode(synced_block.hash)
+    );
+    assert_eq!(synced_block.index, 1, "Synced block index is 1");
+    assert_eq!(synced_block.hash, block_a.hash, "Block hashes match");
+
+    // Apply the synced block to Node B
+    let mut chain_b = rt_b.chain_state_lock().lock().unwrap();
+    rt_b.ledger().apply_block(synced_block.clone(), &mut chain_b).unwrap();
+    drop(chain_b);
+
+    assert_eq!(
+        rt_b.get_chain_state().unwrap().latest_block_index,
+        1,
+        "Node B chain height advanced to 1"
+    );
+    assert_eq!(
+        rt_b.get_chain_state().unwrap().latest_block_hash,
+        block_a.hash,
+        "Node B chain head matches Node A"
+    );
+
+    // Clean shutdown
+    rt_a.stop().unwrap();
+    info!("[SYNC-TEST] P2P block propagation test passed");
+}
+
+#[test]
+fn test_p2p_storage_backed_block_serving() {
+    init_logging();
+    info!("[SYNC-TEST] Starting storage-backed block serving test");
+
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+    let storage_a = SledStorage::new(dir_a.path()).unwrap();
+    let storage_b = SledStorage::new(dir_b.path()).unwrap();
+
+    let sk_a = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let sk_b = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let pk_a = PublicKey::from(sk_a.verifying_key());
+    let pk_b = PublicKey::from(sk_b.verifying_key());
+
+    let listen_a: std::net::SocketAddr = "127.0.0.1:19081".parse().unwrap();
+    let listen_b: std::net::SocketAddr = "127.0.0.1:19082".parse().unwrap();
+    let sync_a = CustomSync::new(pk_a, listen_a).with_storage(storage_a.clone_storage());
+    let sync_b = CustomSync::new(pk_b, listen_b).with_storage(storage_b.clone_storage());
+
+    let ce_a = BaaLSContractEngine::new(storage_a.clone()).unwrap();
+    let ce_b = BaaLSContractEngine::new(storage_b.clone()).unwrap();
+    let consensus_a = PoAConsensus::new(pk_a, 5000).with_signing_key(sk_a.clone());
+    let consensus_b = PoAConsensus::new(pk_b, 5000).with_signing_key(sk_b.clone());
+
+    let mut rt_a = Runtime::new(storage_a, consensus_a, ce_a, sync_a).unwrap();
+    let rt_b = Runtime::new(storage_b, consensus_b, ce_b, sync_b).unwrap();
+
+    rt_a.auto_block_interval_ms = 0;
+    rt_a.auto_block_mempool_threshold = 0;
+    rt_a.start().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Produce multiple blocks on Node A so they're persisted to storage
+    let user_sk = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let user_pk = PublicKey::from(user_sk.verifying_key());
+    rt_a.create_account(&user_pk, Account::Wallet { balance: 10000, nonce: 0 }).unwrap();
+
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    let mut block_hashes = Vec::new();
+    for i in 1..=1 {
+        let now =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let mut tx = Transaction {
+            hash: [0u8; 32],
+            sender: user_pk,
+            recipient: Address::Wallet(user_pk),
+            payload: TransactionPayload::Data { data: vec![i as u8] },
+            nonce: i,
+            timestamp: now,
+            signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+            gas_limit: 100_000,
+            priority: 0,
+            metadata: None,
+        };
+        tx.hash = tx.calculate_hash().unwrap();
+        tx.sign(&user_sk).unwrap();
+        rt_a.submit_transaction(tx).unwrap();
+
+        let block = tokio_rt.block_on(rt_a.produce_block()).unwrap();
+        block_hashes.push(block.hash);
+        info!("[SYNC-TEST] Node A produced block #{}", block.index);
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    // Verify blocks are in Node A's storage
+    for h in &block_hashes {
+        assert!(rt_a.storage().get_block(h).unwrap().is_some(), "Block should be in storage");
+    }
+
+    // Create same account on B so it can apply synced blocks
+    rt_b.create_account(&user_pk, Account::Wallet { balance: 10000, nonce: 0 }).unwrap();
+
+    // Node B syncs with A — should get blocks served from A's storage
+    let peer_a = Peer { id: pk_a, address: listen_a };
+    let chain_state_b = rt_b.get_chain_state().unwrap();
+
+    let synced_block = tokio_rt
+        .block_on(async { rt_b.sync_layer().sync_with_peer(&peer_a, &chain_state_b).await })
+        .expect("Node B should sync from Node A");
+
+    assert_eq!(synced_block.index, 1, "Got the latest block (height 1)");
+
+    // Apply the synced block to Node B
+    let mut chain_b = rt_b.chain_state_lock().lock().unwrap();
+    rt_b.ledger().apply_block(synced_block.clone(), &mut chain_b).unwrap();
+    drop(chain_b);
+
+    assert_eq!(
+        rt_b.get_chain_state().unwrap().latest_block_index,
+        1,
+        "Node B advanced to height 1"
+    );
+
+    rt_a.stop().unwrap();
+    info!("[SYNC-TEST] Storage-backed block serving test passed");
 }

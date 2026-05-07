@@ -786,6 +786,18 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         &self.storage
     }
 
+    pub fn sync_layer(&self) -> &Y {
+        &self.sync_layer
+    }
+
+    pub fn ledger(&self) -> &Ledger<S, BaaLSContractEngine<S>> {
+        &self.ledger
+    }
+
+    pub fn chain_state_lock(&self) -> &Mutex<ChainState> {
+        &self.chain_state
+    }
+
     pub fn create_account(
         &self,
         address: &PublicKey,
