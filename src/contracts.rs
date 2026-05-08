@@ -280,7 +280,7 @@ struct HostState {
 
 impl HostState {
     fn charge_gas(&mut self, amount: u64) -> Result<(), ContractError> {
-        self.gas_used += amount;
+        self.gas_used = self.gas_used.saturating_add(amount);
         if self.gas_used > self.gas_limit {
             Err(ContractError::GasLimitExceeded)
         } else {
@@ -1199,24 +1199,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                 while i < section_end {
                     let op = wasm_bytes[i];
                     match op {
-                        0x2A..=0x2D => {
+                        // Float memory, constant, comparison, arithmetic, and conversion opcodes
+                        0x2A..=0x2D | 0x43..=0x44 | 0x5B..=0x66 | 0x8B..=0x9E | 0xA7..=0xB1 | 0x9F..=0xA2 => {
                             return Err(format!(
-                                "Non-deterministic float memory opcode 0x{:02X} at byte {}",
-                                op, i
-                            ))
-                        }
-                        0x43..=0x44 => {
-                            return Err(format!("Float constant opcode 0x{:02X} at byte {}", op, i))
-                        }
-                        0x5D..=0x66 => {
-                            return Err(format!(
-                                "Float comparison opcode 0x{:02X} at byte {}",
-                                op, i
-                            ))
-                        }
-                        0x8E..=0xA2 => {
-                            return Err(format!(
-                                "Float arithmetic opcode 0x{:02X} at byte {}",
+                                "Non-deterministic float opcode 0x{:02X} at byte {}",
                                 op, i
                             ))
                         }

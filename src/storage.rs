@@ -92,6 +92,10 @@ pub trait Storage: Send + Sync {
     fn delete_account(&self, address: &PublicKey) -> Result<(), StorageError>;
     fn get_all_accounts(&self) -> Result<Vec<(PublicKey, Account)>, StorageError>;
 
+    // State Tree Nodes (Incremental SMT)
+    fn put_state_node(&self, level: u16, path: &[u8; 32], hash: &[u8; 32]) -> Result<(), StorageError>;
+    fn get_state_node(&self, level: u16, path: &[u8; 32]) -> Result<Option<[u8; 32]>, StorageError>;
+
     // Global Chain State (used by Runtime/Ledger)
     fn put_chain_state(&self, state: &ChainState) -> Result<(), StorageError>;
     fn get_chain_state(&self) -> Result<Option<ChainState>, StorageError>;
@@ -207,6 +211,7 @@ pub enum StorageOperation {
     PutMempool(Vec<u8>, Vec<u8>),
     DeleteMempool(Vec<u8>),
     DeleteTransaction(Vec<u8>),
+    PutStateNode(Vec<u8>, Vec<u8>),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -237,6 +242,7 @@ pub struct SledStorage {
     address_to_tx_tree: Tree,
     contract_to_tx_tree: Tree,
     tx_count_tree: Tree,
+    state_tree: Tree,
 }
 
 impl SledStorage {
@@ -262,11 +268,11 @@ impl SledStorage {
             chain_state_tree: db.open_tree("chain_state")?,
             tx_by_block_tree: db.open_tree("tx_by_block")?,
             tx_to_block_tree: db.open_tree("tx_to_block")?,
-            // New: Advanced indexing trees
             height_to_block_tree: db.open_tree("height_to_block")?,
             address_to_tx_tree: db.open_tree("address_to_tx")?,
             contract_to_tx_tree: db.open_tree("contract_to_tx")?,
             tx_count_tree: db.open_tree("tx_count")?,
+            state_tree: db.open_tree("state_nodes")?,
             db,
         };
 
@@ -391,6 +397,9 @@ impl SledStorage {
                     if let Ok(tx) = bincode::deserialize::<Transaction>(&value) {
                         self.put_transaction(&tx)?;
                     }
+                }
+                StorageOperation::PutStateNode(key, value) => {
+                    self.state_tree.insert(key, value)?;
                 }
                 StorageOperation::PutTxIndex(key, value) => {
                     self.tx_by_block_tree.insert(key, value)?;
@@ -558,6 +567,7 @@ impl Clone for SledStorage {
             address_to_tx_tree: self.address_to_tx_tree.clone(),
             contract_to_tx_tree: self.contract_to_tx_tree.clone(),
             tx_count_tree: self.tx_count_tree.clone(),
+            state_tree: self.state_tree.clone(),
         }
     }
 }
@@ -785,9 +795,30 @@ impl Storage for SledStorage {
     }
 
     fn get_account_transaction_count(&self, address: &PublicKey) -> Result<u64, StorageError> {
-        let key = hex::encode(address.to_bytes());
-        let count_bytes = self.tx_count_tree.get(key.as_bytes())?.ok_or(StorageError::NotFound)?;
-        Ok(String::from_utf8_lossy(&count_bytes).parse::<u64>().unwrap_or(0))
+        let key = address.to_bytes();
+        Ok(self.tx_count_tree.get(key)?.and_then(|v| {
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&v);
+            Some(u64::from_le_bytes(arr))
+        }).unwrap_or(0))
+    }
+
+    fn put_state_node(&self, level: u16, path: &[u8; 32], hash: &[u8; 32]) -> Result<(), StorageError> {
+        let mut key = level.to_be_bytes().to_vec();
+        key.extend_from_slice(path);
+        self.state_tree.insert(key, hash)?;
+        Ok(())
+    }
+
+    fn get_state_node(&self, level: u16, path: &[u8; 32]) -> Result<Option<[u8; 32]>, StorageError> {
+        let mut key = level.to_be_bytes().to_vec();
+        key.extend_from_slice(path);
+        let val = self.state_tree.get(key)?;
+        Ok(val.map(|v| {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&v);
+            arr
+        }))
     }
 
     fn get_contract_transactions(

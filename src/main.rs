@@ -424,7 +424,20 @@ fn build_runtime(
         let mut secret_bytes = [0u8; 32];
         rand::rng().fill_bytes(&mut secret_bytes);
         let signing_key = SigningKey::from_bytes(&secret_bytes);
-        std::fs::write(&key_path, secret_bytes)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&key_path)?;
+        
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        
+        file.write_all(&secret_bytes)?;
+        info!("Generated new consensus key at {:?}", key_path);
         let pk = PublicKey::from(signing_key.verifying_key());
         let consensus =
             PoAConsensus::new(pk, config.consensus.block_time_ms).with_signing_key(signing_key);
@@ -660,11 +673,11 @@ fn spawn_health_server(
                                 (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
                                     let mut smt = baals::SparseMerkleTree::new();
                                     // Build full canonical proof by loading all keys for this contract
+                                    let cid_bytes = hex::decode(cid_hex).map_err(|e| format!("Invalid contract ID hex: {}", e))?;
+                                    let cid_arr: [u8; 32] = cid_bytes.try_into().map_err(|_| "Contract ID must be 32 bytes")?;
                                     let all_storage = runtime
                                         .storage()
-                                        .contract_storage_read_all(&baals::ContractId::from_bytes(
-                                            &hex::decode(cid_hex).unwrap().try_into().unwrap(),
-                                        ))
+                                        .contract_storage_read_all(&baals::ContractId::from_bytes(&cid_arr))
                                         .map_err(|e| {
                                             format!("Failed to read contract storage: {}", e)
                                         })?;
@@ -2062,11 +2075,16 @@ fn handle_dev(
             let wasm_bytes = std::fs::read(&wasm)?;
             let storage = SledStorage::new(&data_dir)?;
             let engine = BaaLSContractEngine::new(storage.clone())?;
-            let dummy_pk = sender
-                .as_ref()
-                .map(|s| parse_pubkey(s))
-                .unwrap_or_else(|| Ok(PublicKey::from_bytes(&[0u8; 32]).unwrap()))
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            let dummy_pk = match sender {
+                Some(s) => parse_pubkey(&s).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
+                None => {
+                    let mut bytes = [0u8; 32];
+                    rand::rng().fill_bytes(&mut bytes);
+                    // Just generate a random valid key
+                    let sk = ed25519_dalek::SigningKey::from_bytes(&bytes);
+                    PublicKey::from(sk.verifying_key())
+                }
+            };
             let cid = ContractId::from_bytes(&[0u8; 32]);
             let arg_bytes = args.map(|a| vec![a.into_bytes()]).unwrap_or_default();
 

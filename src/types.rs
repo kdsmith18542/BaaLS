@@ -276,6 +276,44 @@ impl SparseMerkleTree {
         current == expected_root
     }
 
+    pub fn update_with_siblings(
+        &mut self,
+        key: [u8; 32],
+        value: &[u8],
+        siblings: &[[u8; 32]; 256],
+    ) -> [u8; 32] {
+        let mut current = Self::hash_leaf(key, value);
+        for (idx, sibling) in siblings.iter().enumerate() {
+            let depth = 256 - idx;
+            let bit = Self::get_bit(&key, depth - 1);
+            current = if bit == 0 {
+                Self::hash_internal(current, *sibling)
+            } else {
+                Self::hash_internal(*sibling, current)
+            };
+        }
+        current
+    }
+
+    pub fn get_path_siblings<F>(key: [u8; 32], resolver: F) -> [[u8; 32]; 256]
+    where
+        F: Fn(u16, [u8; 32]) -> [u8; 32],
+    {
+        let mut siblings = [[0u8; 32]; 256];
+        let mut prefix = key;
+        for depth in (1..=256).rev() {
+            let bit = Self::get_bit(&key, depth - 1);
+            let sibling_prefix = {
+                let mut s = Self::truncate_key(prefix, depth);
+                Self::set_bit(&mut s, depth - 1, if bit == 0 { 1 } else { 0 });
+                Self::truncate_key(s, depth)
+            };
+            siblings[256 - depth] = resolver(depth as u16, sibling_prefix);
+            prefix = Self::truncate_key(prefix, depth - 1);
+        }
+        siblings
+    }
+
     fn build_levels(&self) -> BuildLevelsResult {
         let defaults = Self::default_hashes();
         let mut levels: Vec<std::collections::BTreeMap<[u8; 32], [u8; 32]>> =
@@ -306,7 +344,7 @@ impl SparseMerkleTree {
         (levels, defaults)
     }
 
-    fn default_hashes() -> Vec<[u8; 32]> {
+    pub fn default_hashes() -> Vec<[u8; 32]> {
         let mut defaults = vec![[0u8; 32]; 257];
         defaults[256] = Self::hash_leaf([0u8; 32], &[]);
         for depth in (0..256).rev() {
@@ -315,7 +353,7 @@ impl SparseMerkleTree {
         defaults
     }
 
-    fn hash_leaf(key: [u8; 32], value: &[u8]) -> [u8; 32] {
+    pub fn hash_leaf(key: [u8; 32], value: &[u8]) -> [u8; 32] {
         let value_hash: [u8; 32] = Sha256::digest(value).into();
         let mut hasher = Sha256::new();
         hasher.update([0u8]);
@@ -324,7 +362,7 @@ impl SparseMerkleTree {
         hasher.finalize().into()
     }
 
-    fn hash_internal(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
+    pub fn hash_internal(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update([1u8]);
         hasher.update(left);
@@ -332,7 +370,7 @@ impl SparseMerkleTree {
         hasher.finalize().into()
     }
 
-    fn get_bit(key: &[u8; 32], bit_index: usize) -> u8 {
+    pub fn get_bit(key: &[u8; 32], bit_index: usize) -> u8 {
         let byte_index = bit_index / 8;
         let bit_in_byte = 7 - (bit_index % 8);
         (key[byte_index] >> bit_in_byte) & 1
@@ -348,7 +386,7 @@ impl SparseMerkleTree {
         }
     }
 
-    fn truncate_key(mut key: [u8; 32], depth_bits: usize) -> [u8; 32] {
+    pub fn truncate_key(mut key: [u8; 32], depth_bits: usize) -> [u8; 32] {
         if depth_bits >= 256 {
             return key;
         }

@@ -63,6 +63,18 @@ Severity legend:
 - **File**: `benches/performance_benchmarks.rs`
 - **Fix**: Updated the benchmark suite to align with the latest `ContractEngine` API, restoring full `cargo bench` functionality.
 
+### 14) [REMEDIATED] O(N) State Root Recomputation
+- **File**: `src/ledger.rs`
+- **Fix**: Implemented incremental SMT updates using path-based recomputation, reducing state root updates from O(N) to O(log N).
+
+### 15) [REMEDIATED] SMT Depth Indexing Overflow
+- **File**: `src/storage.rs`, `src/types.rs`
+- **Fix**: Migrated SMT level/depth parameters from `u8` to `u16` to correctly support 256-bit depths without integer overflow.
+
+### 16) [REMEDIATED] Insecure Key Permissions
+- **File**: `src/main.rs`
+- **Fix**: Implemented restrictive filesystem permissions (0600 on Unix) for `consensus.key` to prevent unauthorized access.
+
 ## Verification Evidence (2026-05-07)
 
 - `cargo build --release` -> **PASS**

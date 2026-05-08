@@ -118,6 +118,12 @@ impl Storage for AnyStorage {
     fn get_all_accounts(&self) -> Result<Vec<(PublicKey, Account)>, StorageError> {
         dispatch!(self, get_all_accounts)
     }
+    fn put_state_node(&self, level: u16, path: &[u8; 32], hash: &[u8; 32]) -> Result<(), StorageError> {
+        dispatch!(self, put_state_node, level, path, hash)
+    }
+    fn get_state_node(&self, level: u16, path: &[u8; 32]) -> Result<Option<[u8; 32]>, StorageError> {
+        dispatch!(self, get_state_node, level, path)
+    }
     fn put_chain_state(&self, state: &ChainState) -> Result<(), StorageError> {
         dispatch!(self, put_chain_state, state)
     }

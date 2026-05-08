@@ -559,31 +559,54 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             }
         }
 
-        // Apply account updates
+        // Apply account updates and calculate sparse Merkle root incrementally
+        let defaults = SparseMerkleTree::default_hashes();
+        let mut current_root = current_chain_state.accounts_root_hash;
+
         for (address, account) in &accounts_to_update {
+            let account_bytes = bincode::serialize(account)?;
+            // 1. PutAccount in storage batch
             batch.ops.push(StorageOperation::PutAccount(
                 address.to_bytes().to_vec(),
-                bincode::serialize(account)?,
+                account_bytes.clone(),
             ));
+
+            // 2. Incremental SMT update
+            let key_hash: [u8; 32] = Sha256::digest(address.to_bytes()).into();
+            
+            // Fetch siblings for this key from storage
+            let siblings = SparseMerkleTree::get_path_siblings(key_hash, |depth, prefix| {
+                self.storage.get_state_node(depth, &prefix).ok().flatten().unwrap_or(defaults[depth as usize])
+            });
+
+            // Recompute path to root
+            let mut current = SparseMerkleTree::hash_leaf(key_hash, &account_bytes);
+            
+            // Record leaf node
+            batch.ops.push(StorageOperation::PutStateNode(
+                256u16.to_be_bytes().to_vec().into_iter().chain(key_hash.iter().cloned()).collect(),
+                current.to_vec()
+            ));
+
+            for (idx, sibling) in siblings.iter().enumerate() {
+                let depth = 256 - idx;
+                let bit = SparseMerkleTree::get_bit(&key_hash, depth - 1);
+                current = if bit == 0 {
+                    SparseMerkleTree::hash_internal(current, *sibling)
+                } else {
+                    SparseMerkleTree::hash_internal(*sibling, current)
+                };
+                
+                // Record parent node
+                let parent_depth = (depth - 1) as u16;
+                let mut node_key = parent_depth.to_be_bytes().to_vec();
+                node_key.extend_from_slice(&SparseMerkleTree::truncate_key(key_hash, depth - 1));
+                batch.ops.push(StorageOperation::PutStateNode(node_key, current.to_vec()));
+            }
+            current_root = current;
         }
 
-        // Build merged view of all accounts (existing + updated)
-        let mut merged_accounts: BTreeMap<PublicKey, Account> = BTreeMap::new();
-        let all_existing_accounts = self.storage.get_all_accounts()?;
-        for (pk, account) in all_existing_accounts {
-            merged_accounts.insert(pk, account);
-        }
-        for (pk, account) in &accounts_to_update {
-            merged_accounts.insert(*pk, account.clone());
-        }
-
-        // Calculate sparse Merkle root keyed by account-address hash.
-        let mut merkle = SparseMerkleTree::new();
-        for (pk, account) in &merged_accounts {
-            let key_hash: [u8; 32] = Sha256::digest(pk.to_bytes()).into();
-            merkle.insert(key_hash, bincode::serialize(account)?);
-        }
-        let accounts_root_hash = if merkle.is_empty() { [0; 32] } else { merkle.root() };
+        let accounts_root_hash = current_root;
 
         // Update chain state
         current_chain_state.latest_block_hash = block.hash;

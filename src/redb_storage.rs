@@ -20,6 +20,7 @@ const ADDR_TO_TX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("ad
 const CONTRACT_TO_TX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("contract_to_tx");
 const TX_COUNT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tx_count");
 const META_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("meta");
+const STATE_NODES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("state_nodes");
 
 fn map_err(e: impl std::fmt::Display) -> StorageError {
     StorageError::IndexError(e.to_string())
@@ -100,6 +101,7 @@ impl RedbStorage {
             let mut contract_to_tx = txn.open_table(CONTRACT_TO_TX_TABLE).map_err(map_err)?;
             let mut tx_count = txn.open_table(TX_COUNT_TABLE).map_err(map_err)?;
             let mut meta = txn.open_table(META_TABLE).map_err(map_err)?;
+            let mut state_nodes = txn.open_table(STATE_NODES_TABLE).map_err(map_err)?;
 
             for (table_name, key, value) in data {
                 match table_name.as_str() {
@@ -138,6 +140,9 @@ impl RedbStorage {
                     "meta" => {
                         meta.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
                     }
+                    "state_nodes" => {
+                        state_nodes.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
+                    }
                     _ => {}
                 }
             }
@@ -160,6 +165,7 @@ impl RedbStorage {
             txn.open_table(CONTRACT_TO_TX_TABLE).map_err(map_err)?;
             txn.open_table(TX_COUNT_TABLE).map_err(map_err)?;
             txn.open_table(META_TABLE).map_err(map_err)?;
+            txn.open_table(STATE_NODES_TABLE).map_err(map_err)?;
         }
         txn.commit().map_err(map_err)?;
         Ok(())
@@ -475,16 +481,42 @@ impl Storage for RedbStorage {
     }
 
     fn get_account_transaction_count(&self, address: &PublicKey) -> Result<u64, StorageError> {
-        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
+        let db = self.db_guard()?;
+        let txn = db.begin_read().map_err(map_err)?;
         let table = txn.open_table(TX_COUNT_TABLE).map_err(map_err)?;
-        let key = hex::encode(address.to_bytes());
-        match table.get(key.as_bytes()).map_err(map_err)? {
-            Some(v) => {
-                let count = String::from_utf8_lossy(v.value()).parse::<u64>().unwrap_or(0);
-                Ok(count)
-            }
-            None => Ok(0),
+        let key = address.to_bytes();
+        Ok(table.get(key.as_slice()).map_err(map_err)?.and_then(|v| {
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(v.value());
+            Some(u64::from_le_bytes(arr))
+        }).unwrap_or(0))
+    }
+
+    fn put_state_node(&self, level: u16, path: &[u8; 32], hash: &[u8; 32]) -> Result<(), StorageError> {
+        let mut key = level.to_be_bytes().to_vec();
+        key.extend_from_slice(path);
+        let db = self.db_guard()?;
+        let txn = db.begin_write().map_err(map_err)?;
+        {
+            let mut table = txn.open_table(STATE_NODES_TABLE).map_err(map_err)?;
+            table.insert(key.as_slice(), hash.as_slice()).map_err(map_err)?;
         }
+        txn.commit().map_err(map_err)?;
+        Ok(())
+    }
+
+    fn get_state_node(&self, level: u16, path: &[u8; 32]) -> Result<Option<[u8; 32]>, StorageError> {
+        let mut key = level.to_be_bytes().to_vec();
+        key.extend_from_slice(path);
+        let db = self.db_guard()?;
+        let txn = db.begin_read().map_err(map_err)?;
+        let table = txn.open_table(STATE_NODES_TABLE).map_err(map_err)?;
+        let val = table.get(key.as_slice()).map_err(map_err)?;
+        Ok(val.map(|v| {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(v.value());
+            arr
+        }))
     }
 
     fn get_contract_transactions(
@@ -492,7 +524,8 @@ impl Storage for RedbStorage {
         contract_id: &ContractId,
         limit: usize,
     ) -> Result<Vec<Transaction>, StorageError> {
-        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
+        let db = self.db_guard()?;
+        let txn = db.begin_read().map_err(map_err)?;
         let contract_table = txn.open_table(CONTRACT_TO_TX_TABLE).map_err(map_err)?;
         let txs_table = txn.open_table(TXS_TABLE).map_err(map_err)?;
         let prefix = format!("{}:", hex::encode(contract_id.to_bytes()));
@@ -503,12 +536,12 @@ impl Storage for RedbStorage {
             let key_str = String::from_utf8_lossy(k.value());
             if key_str.starts_with(&prefix) {
                 let tx_hash = v.value();
-                if let Ok(tx) = bincode::deserialize::<Transaction>(
-                    txs_table.get(tx_hash).map_err(map_err)?.unwrap().value(),
-                ) {
-                    txs.push(tx);
-                    if txs.len() >= limit {
-                        break;
+                if let Some(encoded_tx) = txs_table.get(tx_hash).map_err(map_err)? {
+                    if let Ok(tx) = bincode::deserialize::<Transaction>(encoded_tx.value()) {
+                        txs.push(tx);
+                        if txs.len() >= limit {
+                            break;
+                        }
                     }
                 }
             }
@@ -811,6 +844,10 @@ impl Storage for RedbStorage {
                     }
                     StorageOperation::DeleteTransaction(k) => {
                         txs_table.remove(k.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::PutStateNode(k, v) => {
+                        let mut state_nodes = txn.open_table(STATE_NODES_TABLE).map_err(map_err)?;
+                        state_nodes.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
                     }
                 }
             }

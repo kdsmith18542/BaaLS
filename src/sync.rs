@@ -161,7 +161,13 @@ pub struct CustomSync {
     storage: Arc<Mutex<Option<Box<dyn Storage>>>>,
     received_blocks: Arc<Mutex<Vec<Block>>>,
     shutdown_tx: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
+    connection_semaphore: Arc<tokio::sync::Semaphore>,
 }
+
+const MAX_CONCURRENT_CONNECTIONS: usize = 128;
+const MAX_KNOWN_PEERS: usize = 2048;
+const MAX_RECEIVED_BLOCKS_QUEUE: usize = 1000;
+const MAX_BLOCK_CACHE_SIZE: usize = 5000;
 
 impl std::fmt::Debug for CustomSync {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -392,6 +398,7 @@ impl CustomSync {
             storage: Arc::new(Mutex::new(None)),
             received_blocks: Arc::new(Mutex::new(Vec::new())),
             shutdown_tx: Arc::new(Mutex::new(None)),
+            connection_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
         }
     }
 
@@ -412,12 +419,16 @@ impl CustomSync {
 
     pub async fn cache_block(&self, block: Block) {
         let mut cache = self.block_cache.lock().await;
-        cache.insert(block.hash, block);
+        if cache.len() < MAX_BLOCK_CACHE_SIZE {
+            cache.insert(block.hash, block);
+        }
     }
 
     pub async fn add_peer(&self, peer: Peer) {
         let mut peers = self.known_peers.write().await;
-        peers.insert(peer.id, peer.address);
+        if peers.len() < MAX_KNOWN_PEERS {
+            peers.insert(peer.id, peer.address);
+        }
     }
 
     pub async fn resolve_fork(
@@ -503,6 +514,8 @@ impl CustomSync {
             .as_ref()
             .map(|tc| tokio_rustls::TlsAcceptor::from(Arc::new(tc.server_config.clone())));
 
+        let semaphore = Arc::clone(&self.connection_semaphore);
+
         loop {
             tokio::select! {
                 accept_result = listener.accept() => {
@@ -515,8 +528,10 @@ impl CustomSync {
                     let tls_acceptor = tls_acceptor.clone();
                     let storage = Arc::clone(&self.storage);
                     let received_blocks = Arc::clone(&self.received_blocks);
+                    let permit = semaphore.clone().acquire_owned().await;
 
                     tokio::spawn(async move {
+                        let _permit = permit;
                         if let Some(acceptor) = tls_acceptor {
                             match acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
@@ -567,7 +582,9 @@ impl CustomSync {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         // Expect inbound handshake from peer, then ack.
-        let inbound = Self::receive_message(&mut socket).await?;
+        let inbound = timeout(Duration::from_secs(30), Self::receive_message(&mut socket))
+            .await
+            .map_err(|_| SyncError::ConnectionTimeout)??;
         match inbound {
             NetworkMessage::Handshake { peer_id: remote_peer_id, version } => {
                 if version != 1 {
@@ -700,7 +717,9 @@ impl CustomSync {
                         cache.insert(block.hash, block.clone());
                         drop(cache);
                         let mut recv = received_blocks.lock().await;
-                        recv.push(block);
+                        if recv.len() < MAX_RECEIVED_BLOCKS_QUEUE {
+                            recv.push(block);
+                        }
                     }
                 }
                 _ => {}
@@ -730,8 +749,10 @@ impl CustomSync {
         S: AsyncRead + Unpin,
     {
         let mut length_buffer = [0u8; 4];
-        tokio::io::AsyncReadExt::read_exact(stream, &mut length_buffer)
+        // Use a reasonable timeout for the header
+        timeout(Duration::from_secs(10), tokio::io::AsyncReadExt::read_exact(stream, &mut length_buffer))
             .await
+            .map_err(|_| SyncError::ConnectionTimeout)?
             .map_err(|e| SyncError::NetworkError(e.to_string()))?;
 
         let length = u32::from_le_bytes(length_buffer);
@@ -739,9 +760,13 @@ impl CustomSync {
         if length > MAX_MESSAGE_SIZE {
             return Err(SyncError::InvalidMessage);
         }
+
         let mut message_buffer = vec![0u8; length as usize];
-        tokio::io::AsyncReadExt::read_exact(stream, &mut message_buffer)
+        // Use a timeout for the body based on the expected size (min 10s)
+        let body_timeout = Duration::from_secs(10 + (length as u64 / 1_000_000));
+        timeout(body_timeout, tokio::io::AsyncReadExt::read_exact(stream, &mut message_buffer))
             .await
+            .map_err(|_| SyncError::ConnectionTimeout)?
             .map_err(|e| SyncError::NetworkError(e.to_string()))?;
 
         let message: NetworkMessage = bincode::deserialize(&message_buffer)
@@ -787,7 +812,9 @@ impl CustomSync {
                     cache.insert(block.hash, block.clone());
                     drop(cache);
                     let mut recv = received_blocks.lock().await;
-                    recv.push(block);
+                    if recv.len() < MAX_RECEIVED_BLOCKS_QUEUE {
+                        recv.push(block);
+                    }
                 }
             }
         }
@@ -885,7 +912,9 @@ impl CustomSync {
                     cache.insert(block.hash, block.clone());
                     drop(cache);
                     let mut recv = self.received_blocks.lock().await;
-                    recv.push(block.clone());
+                    if recv.len() < MAX_RECEIVED_BLOCKS_QUEUE {
+                        recv.push(block.clone());
+                    }
                 }
                 if let Some(last) = blocks.last() {
                     Ok(last.clone())
@@ -986,11 +1015,17 @@ impl SyncLayer for CustomSync {
                         NetworkMessage::BlocksResponse { blocks } => {
                             for block in &blocks {
                                 let mut cache = self.block_cache.lock().await;
-                                cache.insert(block.hash, block.clone());
+                                if cache.len() < MAX_BLOCK_CACHE_SIZE {
+                                    cache.insert(block.hash, block.clone());
+                                }
                                 drop(cache);
                             }
                             let mut recv = self.received_blocks.lock().await;
-                            recv.extend(blocks.clone());
+                            if recv.len() + blocks.len() <= MAX_RECEIVED_BLOCKS_QUEUE {
+                                recv.extend(blocks.clone());
+                            } else {
+                                log::warn!("Dropped incoming blocks: received_blocks queue full");
+                            }
                             if let Some(last) = blocks.last() {
                                 return Ok(last.clone());
                             }
@@ -1024,7 +1059,9 @@ impl SyncLayer for CustomSync {
                         cache.insert(block.hash, block.clone());
                         drop(cache);
                         let mut recv = self.received_blocks.lock().await;
-                        recv.push(block.clone());
+                        if recv.len() < MAX_RECEIVED_BLOCKS_QUEUE {
+                            recv.push(block.clone());
+                        }
                         Ok(block)
                     }
                     NetworkMessage::BlockResponse { block: None } => Err(SyncError::BlockNotFound),
@@ -1257,6 +1294,7 @@ impl Clone for SyncWrapper {
                 storage: Arc::clone(&cs.storage),
                 received_blocks: Arc::clone(&cs.received_blocks),
                 shutdown_tx: Arc::clone(&cs.shutdown_tx),
+                connection_semaphore: Arc::clone(&cs.connection_semaphore),
             })),
         }
     }
