@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf, Component};
 
 use baals::sdk::BaaLSSdk;
 use baals::types::{Account, PublicKey, Transaction};
@@ -13,6 +13,11 @@ pub struct BaalsClient {
 impl BaalsClient {
     #[napi(constructor)]
     pub fn new(data_dir: String) -> napi::Result<Self> {
+        // Prevent path traversal attacks by rejecting paths containing '..'.
+        let path = Path::new(&data_dir);
+        if path.components().any(|c| c == Component::ParentDir) {
+            return Err(napi::Error::from_reason(format!("Invalid input: {}", path.display())));
+        }
         let sdk = BaaLSSdk::new(PathBuf::from(data_dir))
             .map_err(|e| napi::Error::from_reason(format!("{}", e)))?;
         Ok(Self { inner: sdk })
