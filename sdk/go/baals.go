@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -290,9 +291,16 @@ type BaalsClient struct {
 // located by searching PATH, ../../target/release, and ../../target/debug
 // (relative to this source file).
 func New(dataDir string) (*BaalsClient, error) {
+	validPath := regexp.MustCompile(`^[a-zA-Z0-9_\-\./\\:]+$`)
+	if !validPath.MatchString(dataDir) {
+		return nil, fmt.Errorf("invalid input")
+	}
 	abs, err := filepath.Abs(dataDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve data dir: %w", err)
+	}
+	if !validPath.MatchString(abs) {
+		return nil, fmt.Errorf("invalid input")
 	}
 	if err := os.MkdirAll(abs, 0755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
@@ -301,6 +309,9 @@ func New(dataDir string) (*BaalsClient, error) {
 	bin, err := findBinary()
 	if err != nil {
 		return nil, err
+	}
+	if !validPath.MatchString(bin) {
+		return nil, fmt.Errorf("invalid input")
 	}
 
 	return &BaalsClient{
@@ -320,6 +331,10 @@ func (b *BaalsClient) SetHTTPPort(port int) {
 // SetBinaryPath overrides the automatically-discovered baalsd executable
 // path.  Must be called before Start.
 func (b *BaalsClient) SetBinaryPath(path string) {
+	validPath := regexp.MustCompile(`^[a-zA-Z0-9_\-\./\\:]+$`)
+	if !validPath.MatchString(path) {
+		return
+	}
 	b.binPath = path
 }
 
@@ -651,6 +666,13 @@ func (b *BaalsClient) QueryContract(contractIDHex, method string, payload []byte
 // runQueryCmd runs `baalsd --json query <subcmd> [args...] --data-dir <dir>`
 // and returns the raw stdout (a JSON string).
 func runQueryCmd(binPath, dataDir, subcmd string, args ...string) ([]byte, error) {
+	validPath := regexp.MustCompile(`^[a-zA-Z0-9_\-\./\\:]+$`)
+	if !validPath.MatchString(binPath) {
+		return nil, fmt.Errorf("invalid input")
+	}
+	if !validPath.MatchString(dataDir) {
+		return nil, fmt.Errorf("invalid input")
+	}
 	argv := []string{
 		"--json", "query", subcmd,
 		"--data-dir", dataDir,
