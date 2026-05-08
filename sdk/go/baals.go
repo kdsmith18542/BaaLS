@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -290,6 +291,10 @@ type BaalsClient struct {
 // located by searching PATH, ../../target/release, and ../../target/debug
 // (relative to this source file).
 func New(dataDir string) (*BaalsClient, error) {
+	validPath := regexp.MustCompile(`^[a-zA-Z0-9_\-\./\\:]+$`)
+	if !validPath.MatchString(dataDir) {
+		return nil, fmt.Errorf("invalid input")
+	}
 	abs, err := filepath.Abs(dataDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve data dir: %w", err)
@@ -320,6 +325,10 @@ func (b *BaalsClient) SetHTTPPort(port int) {
 // SetBinaryPath overrides the automatically-discovered baalsd executable
 // path.  Must be called before Start.
 func (b *BaalsClient) SetBinaryPath(path string) {
+	validPath := regexp.MustCompile(`^[a-zA-Z0-9_\-\./\\:]+$`)
+	if !validPath.MatchString(path) {
+		return
+	}
 	b.binPath = path
 }
 
@@ -331,6 +340,10 @@ func (b *BaalsClient) Start() error {
 
 	if b.cmd != nil {
 		return errors.New("baals: already started")
+	}
+	validPath := regexp.MustCompile(`^[a-zA-Z0-9_\-\./\\:]+$`)
+	if !validPath.MatchString(b.binPath) || !validPath.MatchString(b.dataDir) {
+		return fmt.Errorf("invalid input")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -380,6 +393,10 @@ func (b *BaalsClient) Stop() error {
 
 	if b.cmd == nil {
 		return nil
+	}
+	validPath := regexp.MustCompile(`^[a-zA-Z0-9_\-\./\\:]+$`)
+	if !validPath.MatchString(b.binPath) || !validPath.MatchString(b.dataDir) {
+		return fmt.Errorf("invalid input")
 	}
 
 	stop := exec.Command(b.binPath,
@@ -651,6 +668,16 @@ func (b *BaalsClient) QueryContract(contractIDHex, method string, payload []byte
 // runQueryCmd runs `baalsd --json query <subcmd> [args...] --data-dir <dir>`
 // and returns the raw stdout (a JSON string).
 func runQueryCmd(binPath, dataDir, subcmd string, args ...string) ([]byte, error) {
+	validPath := regexp.MustCompile(`^[a-zA-Z0-9_\-\./\\:]+$`)
+	if !validPath.MatchString(binPath) || !validPath.MatchString(dataDir) {
+		return nil, fmt.Errorf("invalid input")
+	}
+	validArg := regexp.MustCompile(`^[a-zA-Z0-9_\-\./\\:]+$`)
+	for _, arg := range args {
+		if !validArg.MatchString(arg) {
+			return nil, fmt.Errorf("invalid input")
+		}
+	}
 	argv := []string{
 		"--json", "query", subcmd,
 		"--data-dir", dataDir,
