@@ -214,9 +214,8 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
         let mut total_size = 0usize;
 
         for tx in pending_transactions {
-            total_gas += tx.gas_limit;
-            total_size += std::mem::size_of_val(tx);
-            total_size += tx.payload_size_estimate();
+            total_gas = total_gas.saturating_add(tx.gas_limit);
+            total_size = total_size.saturating_add(tx.payload_size_estimate() + std::mem::size_of::<Transaction>());
 
             if total_gas > self.block_gas_limit || total_size > self.block_size_limit {
                 break;

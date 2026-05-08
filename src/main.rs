@@ -82,6 +82,8 @@ enum NodeCommands {
         listen: String,
         #[arg(long)]
         mdns: bool,
+        #[arg(long, default_value_t = false)]
+        allow_insecure_dev_network: bool,
     },
     Stop {
         #[arg(short, long, default_value = "./data")]
@@ -1242,6 +1244,7 @@ fn handle_node(
             peer,
             listen,
             mdns: _mdns,
+            allow_insecure_dev_network: _allow_insecure,
         } => {
             if daemon && !foreground_internal {
                 std::fs::create_dir_all(&data_dir)?;
@@ -1297,6 +1300,12 @@ fn handle_node(
             info!("Starting BaaLS node on port {} data={:?}", port, data_dir);
             let cfg = Config::load(config.as_deref())
                 .map_err(|e| format!("Failed to load config: {}", e))?;
+            // Require explicit flag for plain (non-TLS) P2P networking in production
+            if !cfg.network.tls_enabled && (!peer.is_empty() || _mdns) && !_allow_insecure {
+                return Err("Plain P2P networking without TLS is insecure. \
+                    Set --allow-insecure-dev-network to override for development."
+                    .into());
+            }
             std::fs::create_dir_all(&data_dir)?;
             let pid_path = node_pid_path(&data_dir);
             let stop_path = node_stop_path(&data_dir);

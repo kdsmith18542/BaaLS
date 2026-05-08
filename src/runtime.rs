@@ -79,8 +79,8 @@ impl Mempool {
                 )));
             }
         }
-        let tx_size = std::mem::size_of_val(&tx);
-        self.total_bytes += tx_size;
+        let tx_size = tx.payload_size_estimate() + std::mem::size_of::<Transaction>();
+        self.total_bytes = self.total_bytes.saturating_add(tx_size);
         let sender = tx.sender;
         let nonce = tx.nonce;
         self.txs_by_sender.entry(sender).or_default().insert(nonce, tx.hash);
@@ -90,7 +90,7 @@ impl Mempool {
 
     pub fn remove(&mut self, hash: &[u8; 32]) {
         if let Some(tx) = self.txs_by_hash.remove(hash) {
-            let tx_size = std::mem::size_of_val(&tx);
+            let tx_size = tx.payload_size_estimate() + std::mem::size_of::<Transaction>();
             self.total_bytes = self.total_bytes.saturating_sub(tx_size);
             if let Some(map) = self.txs_by_sender.get_mut(&tx.sender) {
                 map.remove(&tx.nonce);
@@ -722,8 +722,12 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             new_block.transactions.iter().map(|t| t.gas_limit).sum::<u64>()
         );
 
-        // Update metrics
-        self.metrics.update_average_block_size(std::mem::size_of_val(&new_block));
+        // Update metrics (use serialized size estimate for accuracy)
+        let block_size: usize = std::mem::size_of::<Block>()
+            + new_block.transactions.iter()
+                .map(|tx| tx.payload_size_estimate() + std::mem::size_of::<Transaction>())
+                .sum::<usize>();
+        self.metrics.update_average_block_size(block_size);
 
         println!("Block produced and applied: {}", crate::types::format_hex(&new_block.hash));
         debug!("[PRODUCE_BLOCK] Block production completed successfully");
@@ -1093,14 +1097,15 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
     pub fn get_mempool_stats(&self) -> Result<MempoolStats, RuntimeError> {
         let mempool = self.mempool.lock().unwrap();
-        let mut priority_counts = std::collections::HashMap::new();
-        let mut total_gas_limit = 0;
-        let mut total_size = 0;
+        let mut priority_counts: std::collections::HashMap<u8, usize> = std::collections::HashMap::new();
+        let mut total_gas_limit: u64 = 0;
+        let mut total_size: usize = 0;
 
         for tx in mempool.all() {
-            *priority_counts.entry(tx.priority).or_insert(0) += 1;
-            total_gas_limit += tx.gas_limit;
-            total_size += std::mem::size_of_val(tx);
+            let count = priority_counts.entry(tx.priority).or_insert(0);
+            *count = (*count).saturating_add(1);
+            total_gas_limit = total_gas_limit.saturating_add(tx.gas_limit);
+            total_size = total_size.saturating_add(tx.payload_size_estimate() + std::mem::size_of::<Transaction>());
         }
 
         Ok(MempoolStats {

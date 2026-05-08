@@ -85,7 +85,15 @@ Intentional design deviations from the spec documents in `docs/`, with rationale
 ### L6: baals_storage_remove now properly deletes
 **Resolved**: Previously inserted an empty vec instead of removing the key. Now calls `contract_storage.remove(&key)` and tracks deletions in `HostState.deleted_keys` for persistence.
 
-## All Gaps Resolved (2026-05-07)
+## Resolution Status (2026-05-07)
+
+**12 gaps resolved; 10 deliberate deviations accepted (WONTFIX).**
+
+The following items were either implemented or consciously accepted as
+intentional design differences from the specification. Items marked WONTFIX
+represent deliberate choices — typically type naming, API signatures, or
+simplifications that differ from the spec but do not affect correctness or
+security.
 
 | Gap | Status | Notes |
 |-----|--------|-------|
