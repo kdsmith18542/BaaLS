@@ -1,82 +1,179 @@
-# BaaLS Development Plan — COMPLETE
+# BaaLS Production Plan
 
-**ALL GAPS RESOLVED. ZERO DEFERRALS. ZERO SKIPS.**
-
-## Status Overview
+## Status: Pre-production hardening in progress
 
 | Metric | Value |
 |---|---|
-| Phases 1-26 | Complete |
-| Spec compliance | 363/363 implementable requirements (100%) |
-| Tests | 49 pass (12 lib + 37 integration) |
-| Clippy | 0 errors, 0 warnings |
-| Rustfmt | 0 diffs |
-| Build | 0 warnings |
+| Spec compliance | 12 gaps resolved, 10 WONTFIX deviations |
+| Safety criticals (P0) | Resolved |
+| Security hardening (P1) | Resolved |
+| Build | `cargo check` clean, 14 warnings |
+| Cargo.lock cranelift | 0.130.2 (AIKIDO-2025-10778 — already patched) |
 
 ---
 
-## All Tracks Complete
+## Phase A: Remaining Production Hardening (P1/P2)
 
-### Track A: Storage Compaction (GAP-1, GAP-2) ✅
-- SledStorage: WAL compaction with crash-recovery marker
-- RedbStorage: atomic file-swap compaction with backup restore
+### A1. Gas Pricing
+`src/ledger.rs:203` — `total_fee` hardcoded to `0u64`. Transactions pay no gas.
+- Add `gas_price: u64` to `Transaction` struct and all 69+ construction sites
+- Deduct `gas_price * gas_used` from sender balance
+- Add `baalsd tx estimate-fee` CLI command
 
-### Track B: Multi-Validator PoA Consensus (GAP-3) ✅
-- `authorized_signers: Vec<PublicKey>` with add/remove methods
-- `validate_block` accepts any authorized signer
-- `SignerRotation` struct with `effective_height`
-- `supports_signer_rotation` on `ConsensusEngine` trait
+### A2. Per-sender time-windowed rate limiting
+Mempool has count-based cap (100 tx/sender). No time-windowed limit.
+- Add `max_tx_per_sender_per_second` to Mempool config
+- Track per-sender submission timestamps
 
-### Track C: Peer Discovery via mDNS (GAP-4) ✅
-- `mdns-sd` optional dependency behind `mdns` feature flag
-- `MdnsDiscovery` with announce/browse
-- `--mdns` CLI flag on `node start`
-- Periodic re-browse every 30 seconds
+### A3. Expand fuzz targets
+3 targets exist (deserialize + hash/verify). Missing:
+- `fuzz_ledger_state_transition` — apply arbitrary txs to storage
+- `fuzz_contract_execution` — WASM with hostile host function calls
+- `fuzz_sync_messages` — deserialize all P2P message types
+- `fuzz_merkle_proof` — verify proofs with tampered data
 
-### Track D: Contract Engine Validation (GAP-5, GAP-6) ✅
-- Contract deployer address stored and validated on call
-- WASM export validation at deploy (must export ≥1 function)
-- ABI computed on-the-fly from module exports for arg count validation
-- `ContractAbi`/`ContractMethod` structs with method name and arg_count
+### A4. Release infrastructure
+- Add `justfile` (dev command shortcuts: `just ci`, `just release`, `just run`)
+- Reproducible build notes (`Cargo.lock` committed, `--locked` flag)
+- `cargo package` / `cargo publish` readiness
+- Binary checksums in releases
 
-### Track E: reorganize_chain() Wired (GAP-7) ✅
-- `apply_received_blocks()` detects forks and calls `reorganize_chain()`
-- `resolve_fork()` on `CustomSync` wired into `sync_with_peer()`
-- `detect_fork()` and `resolve_fork_blocks()` fully functional
+### A5. Keystore KDF upgrade
+PBKDF2-SHA256 at 600k iterations is good but not gold-standard.
+- Migration path to Argon2id or scrypt
+- Encrypted keystore format versioning for forward compatibility
 
-### Track F: HTTP API & CLI Improvements (GAP-8, GAP-9, GAP-10) ✅
-- `/proof/account/{address}` and `/proof/contract/{id}/storage/{key}` endpoints
-- `simulate-contract` shows gas estimate, events, execution time
-- Log rotation via `RotatingFileWriter` with `log_max_size_mb`/`log_max_files`
+---
 
-### Additional Resolved
-- NodeJS native SDK via napi-rs
-- Go SDK rewritten as pure Go (no CGo)
-- Certificate pinning in TLS
-- Dead code removal (send_peer_list, handle_peer_list, format_for_logging, postcard dep)
-- Dependency cleanup (tracing-appender removed, criterion→dev-deps, deduplicated deps)
+## Phase B: CLI Completion
 
-## Verification Gates — All Pass
-
+### B1. Missing wallet commands
 ```
-cargo build --release     → 0 warnings
-cargo clippy --all-targets -- -D warnings → 0 errors
-cargo fmt -- --check      → 0 diffs
-cargo test --lib          → 12 passed
-cargo test --test integration → 37 passed
+baalsd wallet show <id>
+baalsd wallet verify <id> <message> <signature>
+baalsd wallet change-password <id>
+baalsd wallet export-public <id>
+baalsd wallet recover --mnemonic "<words>"
 ```
 
-## Dependency Map
+### B2. Missing tx commands
+```
+baalsd tx sign --file unsigned_tx.json --wallet alice --out signed_tx.json
+baalsd tx submit --file signed_tx.json --data-dir ./data
+baalsd tx estimate-fee --file unsigned_tx.json
+baalsd tx validate --file signed_tx.json
+baalsd tx decode --file signed_tx.json
+```
 
-| Crate | Purpose |
-|---|---|
-| `sled` | Primary embedded database |
-| `redb` | Pure-Rust alternative backend |
-| `wasmtime` | WASM smart contract runtime |
-| `ed25519-dalek` | Digital signatures |
-| `sha2`, `blake3` | Cryptographic hashing |
-| `tokio`, `tokio-rustls` | Async networking + TLS |
-| `clap` | CLI argument parsing |
-| `serde`, `bincode` | Serialization |
-| `tracing-appender` | (removed — unused) |
-| `mdns-sd` (optional) | LAN peer discovery |
+### B3. Missing query commands
+```
+baalsd query blocks --from 0 --to 100
+baalsd query txs-by-account <pubkey> --limit 50
+baalsd query txs-by-contract <contract_id> --limit 50
+baalsd query mempool
+baalsd query proof account <pubkey>
+baalsd query proof contract <id> <key>
+```
+
+### B4. Missing db commands
+```
+baalsd db compact
+baalsd db backup --output backup.baals
+baalsd db restore --input backup.baals
+baalsd db check-indexes
+baalsd db rebuild-indexes
+baalsd db export --out export.json
+baalsd db import --input export.json
+```
+
+### B5. Missing dev commands
+```
+baalsd dev dump-state --out state.json
+baalsd dev replay-block <height>
+baalsd dev replay-chain
+baalsd dev fuzz-wasm --wasm contract.wasm
+baalsd dev inspect-wasm contract.wasm
+baalsd dev verify-merkle-root
+baalsd dev repair-indexes
+```
+
+### B6. New top-level command groups
+```
+baalsd key        # low-level key tools (generate, inspect keypair)
+baalsd api        # HTTP client wrapper (health, submit, deploy, call)
+baalsd p2p        # peer management (peers, add-peer, remove-peer, ping, sync-now)
+baalsd proof      # Merkle proof tools (account, contract, verify)
+baalsd contract   # contract tooling (inspect, simulate, estimate-gas, abi, verify-wasm)
+baalsd admin      # secured local admin ops (rotate-consensus-key, tls generate, token generate)
+baalsd doctor     # environment/config diagnostics
+```
+
+---
+
+## Phase C: Developer Experience
+
+### C1. `justfile`
+```
+just check          cargo check --all-targets --all-features
+just fmt            cargo fmt --all
+just fmt-check      cargo fmt --all -- --check
+just clippy         cargo clippy --all-targets --all-features -- -D warnings
+just test           cargo test --all-features
+just test-release   cargo test --release --all-features
+just audit          cargo audit
+just deny           cargo deny check
+just bench          cargo bench
+just docs           cargo doc --no-deps --all-features
+just ci             fmt-check + clippy + test + audit + deny
+just build          cargo build
+just release        cargo build --release --locked
+just run            cargo run -- node start --data-dir ./data
+just clean-data     rm -rf ./data
+```
+
+### C2. Production build flags
+- `--locked` in CI release builds
+- `cargo miri test` for unsafe code audit (nightly)
+- `cargo outdated` / `cargo machete` for dependency hygiene
+
+---
+
+## Phase D: Documentation
+
+### D1. Replace Spec_Compliance_Notes.md
+Replace the contradictory "All Gaps Resolved" doc with:
+- `docs/COMPLIANCE.md` — spec gap tracker with `RESOLVED` / `WONTFIX` / `OPEN` status per item
+- Auto-generated from CI results (test count, clippy status, audit status, fuzz status)
+
+### D2. Operator documentation
+- `docs/OPERATING.md` — node deployment, backup/restore, monitoring, key management
+- `docs/TLS_GUIDE.md` — TLS cert generation, pinning, mTLS setup
+
+---
+
+## Target CLI Layout (end state)
+
+```
+baalsd
+  node    start, stop, status, backup, restore
+          config init, set, get
+  wallet  create, list, show, import, export, export-public
+          sign, verify, delete, rotate, change-password, recover
+  tx      transfer, data, deploy-contract, call-contract
+          sign, submit, inspect, validate, estimate-fee, decode
+  query   head, block, tx, account, contract-state, contract-call
+          mempool, blocks, txs-by-account, txs-by-contract
+  contract inspect, simulate, estimate-gas, abi, verify-wasm
+  proof   account, contract, verify
+  p2p     peers, add-peer, remove-peer, ping, sync-now
+  db      version, migrate, verify, compact, backup, restore
+          check-indexes, rebuild-indexes, export, import
+  dev     generate-keys, validate-tx, storage-stats, performance-report
+          validate-chain, monitor, dump-state, replay-block, replay-chain
+          fuzz-wasm, inspect-wasm, verify-merkle-root, repair-indexes
+  admin   rotate-consensus-key, export-node-id, tls generate, tls fingerprint, token generate
+  doctor
+  key     generate, inspect, sign, verify
+
+Global flags: --json, --verbose, --storage-backend [sled|redb], --data-dir <path>
+```
