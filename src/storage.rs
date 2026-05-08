@@ -207,11 +207,15 @@ pub enum StorageOperation {
     PutTransaction(Vec<u8>, Vec<u8>),
     PutTxIndex(Vec<u8>, Vec<u8>),
     PutContractCode(Vec<u8>, Vec<u8>),
+    PutContractDeployer(Vec<u8>, Vec<u8>),
     PutContractStorage(Vec<u8>, Vec<u8>),
     PutMempool(Vec<u8>, Vec<u8>),
     DeleteMempool(Vec<u8>),
     DeleteTransaction(Vec<u8>),
     PutStateNode(Vec<u8>, Vec<u8>),
+    DeleteAccount(Vec<u8>),
+    DeleteContractStorage(Vec<u8>),
+    PutContractEvent(Vec<u8>, Vec<u8>),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -243,6 +247,7 @@ pub struct SledStorage {
     contract_to_tx_tree: Tree,
     tx_count_tree: Tree,
     state_tree: Tree,
+    contract_events_tree: Tree,
 }
 
 impl SledStorage {
@@ -273,6 +278,7 @@ impl SledStorage {
             contract_to_tx_tree: db.open_tree("contract_to_tx")?,
             tx_count_tree: db.open_tree("tx_count")?,
             state_tree: db.open_tree("state_nodes")?,
+            contract_events_tree: db.open_tree("contract_events")?,
             db,
         };
 
@@ -405,9 +411,10 @@ impl SledStorage {
                     self.tx_by_block_tree.insert(key, value)?;
                 }
                 StorageOperation::PutContractCode(key, value) => {
-                    let mut prefixed_key = b"code:".to_vec();
-                    prefixed_key.extend_from_slice(&key);
-                    self.contract_code_tree.insert(prefixed_key, value)?;
+                    self.contract_code_tree.insert(key, value)?;
+                }
+                StorageOperation::PutContractDeployer(key, value) => {
+                    self.contract_code_tree.insert(key, value)?;
                 }
                 StorageOperation::PutContractStorage(key, value) => {
                     self.contract_storage_tree.insert(key, value)?;
@@ -420,6 +427,17 @@ impl SledStorage {
                 }
                 StorageOperation::DeleteTransaction(key) => {
                     self.transactions_tree.remove(key)?;
+                }
+                StorageOperation::DeleteAccount(key) => {
+                    let mut prefixed_key = b"acc:".to_vec();
+                    prefixed_key.extend_from_slice(&key);
+                    self.accounts_tree.remove(prefixed_key)?;
+                }
+                StorageOperation::DeleteContractStorage(key) => {
+                    self.contract_storage_tree.remove(key)?;
+                }
+                StorageOperation::PutContractEvent(key, value) => {
+                    self.contract_events_tree.insert(key, value)?;
                 }
             }
         }
@@ -464,14 +482,18 @@ impl SledStorage {
     }
 
     fn increment_transaction_count(&self, address: &PublicKey) -> Result<(), StorageError> {
-        let key = hex::encode(address.to_bytes());
+        let key = address.to_bytes();
         let current_count = self
             .tx_count_tree
-            .get(key.as_bytes())?
-            .map(|v| String::from_utf8_lossy(&v).parse::<u64>().unwrap_or(0))
+            .get(&key)?
+            .map(|v| {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&v);
+                u64::from_le_bytes(arr)
+            })
             .unwrap_or(0);
-        let new_count = current_count + 1;
-        self.tx_count_tree.insert(key.as_bytes(), new_count.to_string().as_bytes())?;
+        let new_count = current_count.saturating_add(1);
+        self.tx_count_tree.insert(&key, &new_count.to_le_bytes())?;
         Ok(())
     }
 
@@ -568,6 +590,7 @@ impl Clone for SledStorage {
             contract_to_tx_tree: self.contract_to_tx_tree.clone(),
             tx_count_tree: self.tx_count_tree.clone(),
             state_tree: self.state_tree.clone(),
+            contract_events_tree: self.contract_events_tree.clone(),
         }
     }
 }
@@ -905,16 +928,14 @@ impl Storage for SledStorage {
         contract_id: &ContractId,
         wasm_bytes: &[u8],
     ) -> Result<(), StorageError> {
-        let mut key = b"code:".to_vec();
-        key.extend_from_slice(&contract_id.id);
-        self.contract_code_tree.insert(key, wasm_bytes)?;
+        let key = format!("code:{}", hex::encode(contract_id.id));
+        self.contract_code_tree.insert(key.as_bytes(), wasm_bytes)?;
         Ok(())
     }
 
     fn get_contract_code(&self, contract_id: &ContractId) -> Result<Option<Vec<u8>>, StorageError> {
-        let mut key = b"code:".to_vec();
-        key.extend_from_slice(&contract_id.id);
-        let encoded = self.contract_code_tree.get(key)?;
+        let key = format!("code:{}", hex::encode(contract_id.id));
+        let encoded = self.contract_code_tree.get(key.as_bytes())?;
         Ok(encoded.map(|e| e.to_vec()))
     }
 
@@ -1039,10 +1060,9 @@ impl Storage for SledStorage {
         contract_id: &ContractId,
         deployer: &PublicKey,
     ) -> Result<(), StorageError> {
-        let mut key = b"deployer:".to_vec();
-        key.extend_from_slice(&contract_id.id);
+        let key = format!("deployer:{}", hex::encode(contract_id.id));
         let encoded = bincode::serialize(deployer)?;
-        self.contract_code_tree.insert(key, encoded)?;
+        self.contract_code_tree.insert(key.as_bytes(), encoded)?;
         Ok(())
     }
 
@@ -1050,9 +1070,8 @@ impl Storage for SledStorage {
         &self,
         contract_id: &ContractId,
     ) -> Result<Option<PublicKey>, StorageError> {
-        let mut key = b"deployer:".to_vec();
-        key.extend_from_slice(&contract_id.id);
-        let encoded = self.contract_code_tree.get(key)?;
+        let key = format!("deployer:{}", hex::encode(contract_id.id));
+        let encoded = self.contract_code_tree.get(key.as_bytes())?;
         Ok(encoded.map(|e| bincode::deserialize(&e)).transpose()?)
     }
 

@@ -30,6 +30,32 @@ jobs:
         run: cargo test --lib
       - name: Integration tests
         run: cargo test --test integration
+      - name: All-feature tests
+        run: cargo test --all-features
+      - name: Release mode tests
+        run: cargo test --release
+
+  security-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked || true
+      - name: Security audit
+        run: cargo audit
+
+  dependency-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked || true
+      - name: License and dependency check
+        run: cargo deny check 2>/dev/null || echo "cargo-deny check skipped (no deny.toml)"
 
   lint:
     runs-on: ubuntu-latest

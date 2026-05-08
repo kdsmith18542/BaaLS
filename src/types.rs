@@ -199,6 +199,18 @@ pub struct SparseMerkleProof {
     pub root: [u8; 32],
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StorageUpdateSet {
+    pub writes: std::collections::HashMap<Vec<u8>, Vec<u8>>,
+    pub deletes: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ContractExecutionSideEffects {
+    pub storage_updates: StorageUpdateSet,
+    pub events: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
 /// Key-indexed sparse Merkle tree (256-bit keys).
 /// Leaves are hashed as H(0x00 || key || H(value)), and internal nodes as H(0x01 || left || right).
 #[derive(Default)]
@@ -635,6 +647,7 @@ pub enum Account {
         nonce: u64,
     },
     Contract {
+        balance: u64,
         code_hash: [u8; 32],         // Hash of the deployed WASM module
         storage_root_hash: [u8; 32], // Merkle root of the contract's internal key-value storage
         nonce: u64,
@@ -652,7 +665,7 @@ impl Account {
     pub fn balance(&self) -> u64 {
         match self {
             Account::Wallet { balance, .. } => *balance,
-            Account::Contract { .. } => 0,
+            Account::Contract { balance, .. } => *balance,
         }
     }
 

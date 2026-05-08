@@ -3,18 +3,28 @@ use std::os::raw::{c_char, c_uint};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::sdk::BaaLSSdk;
 use crate::types::{Account, ContractId, PublicKey, Transaction};
 
 static SDK_INSTANCE: OnceLock<Mutex<BaaLSSdk>> = OnceLock::new();
+static SDK_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 // ─── Helpers ───
 
 /// # Safety
 ///
 /// `ptr` must be null or a valid, null-terminated C string.
+unsafe fn c_str_to_str(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    CStr::from_ptr(ptr).to_str().ok().map(|s| s.to_string())
+}
+
+/// Returns the pathbuf if the pointer is non-null and valid UTF-8.
 unsafe fn c_str_to_path(ptr: *const c_char) -> Option<PathBuf> {
     if ptr.is_null() {
         return None;
@@ -30,6 +40,9 @@ unsafe fn with_sdk<F, T>(f: F) -> Result<T, c_uint>
 where
     F: FnOnce(&BaaLSSdk) -> Result<T, crate::sdk::SdkError>,
 {
+    if SDK_SHUTDOWN.load(Ordering::Acquire) {
+        return Err(6u32); // SDK shut down
+    }
     if let Some(sdk_mutex) = SDK_INSTANCE.get() {
         let result = catch_unwind(AssertUnwindSafe(|| {
             let sdk = sdk_mutex.lock().map_err(|_| 4u32)?;
@@ -60,6 +73,7 @@ fn json_or_null<T: serde::Serialize>(val: &T) -> *mut c_char {
 ///
 /// `data_dir` must be null or a valid, null-terminated C string path.
 /// Should be called exactly once before any other SDK function.
+/// Returns: 0 = OK, 1 = invalid input, 2 = init failed, 5 = already initialized
 pub unsafe extern "C" fn baals_sdk_init(data_dir: *const c_char) -> c_uint {
     let dir = match unsafe { c_str_to_path(data_dir) } {
         Some(d) => d,
@@ -67,7 +81,10 @@ pub unsafe extern "C" fn baals_sdk_init(data_dir: *const c_char) -> c_uint {
     };
     match BaaLSSdk::new(dir) {
         Ok(sdk) => {
-            let _ = SDK_INSTANCE.set(Mutex::new(sdk));
+            if SDK_INSTANCE.set(Mutex::new(sdk)).is_err() {
+                return 5; // BAALS_ERR_ALREADY_INITIALIZED
+            }
+            SDK_SHUTDOWN.store(false, Ordering::SeqCst);
             0 // BAALS_OK
         }
         Err(_) => 2,
@@ -161,8 +178,8 @@ pub unsafe extern "C" fn baals_sdk_get_account(pubkey_ptr: *const u8) -> *mut c_
 ///
 /// `tx_json` must be a valid, null-terminated JSON string.
 pub unsafe extern "C" fn baals_sdk_submit_tx(tx_json: *const c_char) -> c_uint {
-    let json = match unsafe { c_str_to_path(tx_json) } {
-        Some(p) => p.to_string_lossy().to_string(),
+    let json = match unsafe { c_str_to_str(tx_json) } {
+        Some(s) => s,
         None => return 1,
     };
     let tx: Transaction = match serde_json::from_str(&json) {
@@ -306,6 +323,23 @@ pub unsafe extern "C" fn baals_sdk_query_contract(
             .map(|result| json_or_null(&serde_json::json!({"result_hex": hex::encode(&result)})))
             .unwrap_or(ptr::null_mut())
     }
+}
+
+// ─── Shutdown ───
+
+#[no_mangle]
+pub extern "C" fn baals_sdk_shutdown() -> c_uint {
+    SDK_SHUTDOWN.store(true, Ordering::Release);
+    match unsafe { with_sdk(|s| s.stop()) } {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn baals_sdk_version() -> *mut c_char {
+    let version = env!("CARGO_PKG_VERSION");
+    CString::new(version).ok().map(|cs| cs.into_raw()).unwrap_or(ptr::null_mut())
 }
 
 // ─── Memory Management ───

@@ -703,12 +703,11 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             || {
                 debug!("[PRODUCE_BLOCK] Validating block with ledger");
                 // Validate and apply block to ledger
-                self.ledger.validate_block(&new_block, &current_chain_state)?;
+                self.ledger.validate_block(&new_block)?;
                 debug!("[PRODUCE_BLOCK] Block validation successful");
 
                 debug!("[PRODUCE_BLOCK] Applying block to ledger");
-                // Pass contract_engine to apply_block
-                self.ledger.apply_block(new_block.clone(), &mut current_chain_state)?;
+                self.ledger.apply_block(&new_block)?;
                 debug!("[PRODUCE_BLOCK] Block application successful");
                 Ok(())
             },
@@ -947,11 +946,18 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                 )));
             }
 
-            if let Err(e) = self.ledger.validate_block(block, &current_chain_state) {
+            // 1. Validate consensus
+            if let Err(e) = self.consensus.validate_block(block, &current_chain_state) {
+                *self.chain_state.lock().unwrap() = original_chain_state;
+                return Err(RuntimeError::InvalidTransaction(format!("Consensus validation failed on fork block #{}: {}", block.index, e)));
+            }
+
+            // 2. Validate and apply state transition
+            if let Err(e) = self.ledger.validate_block(block) {
                 *self.chain_state.lock().unwrap() = original_chain_state;
                 return Err(e.into());
             }
-            if let Err(e) = self.ledger.apply_block(block.clone(), &mut current_chain_state) {
+            if let Err(e) = self.ledger.apply_block(block) {
                 *self.chain_state.lock().unwrap() = original_chain_state;
                 return Err(e.into());
             }
@@ -1007,8 +1013,16 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         // self-deadlock on re-locking the same mutex in a match scrutinee.
         for block in blocks {
             let mut chain_state = self.chain_state.lock().unwrap();
-            match self.ledger.validate_block(&block, &chain_state) {
-                Ok(()) => match self.ledger.apply_block(block.clone(), &mut chain_state) {
+            
+            // 1. Validate consensus (PoA signature)
+            if let Err(e) = self.consensus.validate_block(&block, &chain_state) {
+                warn!("[SYNC] Consensus validation failed for block #{}: {}", block.index, e);
+                continue;
+            }
+
+            // 2. Validate state transition
+            match self.ledger.validate_block(&block) {
+                Ok(()) => match self.ledger.apply_block(&block) {
                     Ok(()) => {
                         info!(
                             "[SYNC] Applied received block #{} ({} txns)",
@@ -1116,7 +1130,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         let deployer_nonce = deployer_account.as_ref().map(|a| a.nonce()).unwrap_or(0);
 
         // Use the contract engine to deploy the contract
-        let contract_id = self
+        let deploy_result = self
             .contract_engine_arc
             .deploy_contract(
                 deployer,
@@ -1130,11 +1144,27 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                 RuntimeError::InvalidTransaction(format!("Contract deployment failed: {}", e))
             })?;
 
+        // Store contract code atomically (immutable, idempotent)
+        self.storage.put_contract_code(&deploy_result.contract_id, &deploy_result.wasm_bytes)
+            .map_err(|e| RuntimeError::InvalidTransaction(format!("Failed to store contract code: {}", e)))?;
+        self.storage.put_contract_deployer(&deploy_result.contract_id, &deploy_result.deployer)
+            .map_err(|e| RuntimeError::InvalidTransaction(format!("Failed to store deployer: {}", e)))?;
+
+        // Apply init side effects to storage
+        for (key, val) in deploy_result.side_effects.storage_updates.writes {
+            self.storage.contract_storage_write(&deploy_result.contract_id, &key, &val)
+                .map_err(|e| RuntimeError::InvalidTransaction(format!("Failed to write init storage: {}", e)))?;
+        }
+        for key in deploy_result.side_effects.storage_updates.deletes {
+            self.storage.contract_storage_remove(&deploy_result.contract_id, &key)
+                .map_err(|e| RuntimeError::InvalidTransaction(format!("Failed to delete init storage: {}", e)))?;
+        }
+
         info!(
             "[RUNTIME] Contract deployed successfully with ID: {}",
-            hex::encode(contract_id.to_bytes())
+            hex::encode(deploy_result.contract_id.to_bytes())
         );
-        Ok(contract_id)
+        Ok(deploy_result.contract_id)
     }
 
     /// Call a smart contract method
@@ -1180,7 +1210,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             })?;
 
         info!("[RUNTIME] Contract call completed successfully");
-        Ok(result)
+        Ok(result.output)
     }
 
     /// Query a smart contract (read-only)

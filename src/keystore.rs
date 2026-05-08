@@ -1,4 +1,4 @@
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -14,8 +14,8 @@ use crate::types::PublicKey;
 use ed25519_dalek::SigningKey;
 
 const KEYSTORE_DIR: &str = ".baals/keys";
-const PBKDF2_ITER: u32 = 100_000;
-const SALT_LEN: usize = 16;
+const PBKDF2_ITER: u32 = 600_000;
+const SALT_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 
@@ -105,6 +105,10 @@ impl Keystore {
 
     pub fn load_key(&self, pk: &PublicKey, password: &str) -> Result<SigningKey, KeystoreError> {
         let path = self.key_path(pk);
+        // Reject symlinks for security
+        if path.is_symlink() {
+            return Err(KeystoreError::Crypto("Key path is a symlink — rejected for security".to_string()));
+        }
         let mut file = File::open(&path)?;
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
@@ -118,25 +122,35 @@ impl Keystore {
         pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, PBKDF2_ITER, &mut key);
         let cipher = Aes256Gcm::new_from_slice(&key)
             .map_err(|_| KeystoreError::Crypto("Invalid key".to_string()))?;
-        let plaintext = cipher
+        let mut plaintext = cipher
             .decrypt(Nonce::from_slice(nonce), ciphertext)
             .map_err(|_| KeystoreError::InvalidPassword)?;
         key.zeroize();
         if plaintext.len() != 32 {
+            plaintext.zeroize();
             return Err(KeystoreError::Crypto("Invalid key length".to_string()));
         }
         let mut sk_bytes = [0u8; 32];
         sk_bytes.copy_from_slice(&plaintext);
-        Ok(SigningKey::from_bytes(&sk_bytes))
+        plaintext.zeroize();
+        let signing_key = SigningKey::from_bytes(&sk_bytes);
+        sk_bytes.zeroize();
+        Ok(signing_key)
     }
 
     fn save_key(&self, sk: &SigningKey, password: &str) -> Result<(), KeystoreError> {
         let pk = PublicKey::from_bytes(&sk.verifying_key().to_bytes())
             .map_err(|_| KeystoreError::Crypto("Invalid public key".to_string()))?;
         let path = self.key_path(&pk);
+
+        // Reject symlinks to prevent symlink attacks
         if path.exists() {
+            if path.is_symlink() {
+                return Err(KeystoreError::Crypto("Key path is a symlink — rejected for security".to_string()));
+            }
             return Err(KeystoreError::AlreadyExists(hex::encode(pk.to_bytes())));
         }
+
         let mut rng = rand::rng();
         let mut salt = [0u8; SALT_LEN];
         let mut nonce = [0u8; NONCE_LEN];
@@ -150,10 +164,25 @@ impl Keystore {
             .encrypt(Nonce::from_slice(&nonce), sk.to_bytes().as_ref())
             .map_err(|_| KeystoreError::Crypto("Encryption failed".to_string()))?;
         key.zeroize();
-        let mut file = File::create(&path)?;
-        file.write_all(&salt)?;
-        file.write_all(&nonce)?;
-        file.write_all(&ciphertext)?;
+
+        // Atomic write: write to temp file, then rename
+        let tmp_path = path.with_extension("tmp");
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            file.write_all(&salt)?;
+            file.write_all(&nonce)?;
+            file.write_all(&ciphertext)?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp_path, &path)?;
         Ok(())
     }
 

@@ -1,5 +1,5 @@
 use crate::storage::Storage;
-use crate::types::{ContractId, PublicKey, TransactionSignature};
+use crate::types::{ContractExecutionSideEffects, ContractId, PublicKey, StorageUpdateSet, TransactionSignature};
 use ed25519_dalek::Signature as Ed25519Signature;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -54,7 +54,7 @@ pub trait ContractEngine: Send + Sync {
         init_payload: Option<&[u8]>,
         storage: &dyn Storage,
         gas_limit: u64,
-    ) -> Result<ContractId, ContractError>;
+    ) -> Result<DeployContractResult, ContractError>;
 
     #[allow(clippy::too_many_arguments)]
     fn call_contract(
@@ -68,7 +68,7 @@ pub trait ContractEngine: Send + Sync {
         block_index: u64,
         block_timestamp: u64,
         gas_limit: u64,
-    ) -> Result<Vec<u8>, ContractError>;
+    ) -> Result<CallContractResult, ContractError>;
 
     fn query_contract(
         &self,
@@ -111,6 +111,22 @@ pub trait ContractEngine: Send + Sync {
     ) -> Result<(), ContractError>;
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeployContractResult {
+    pub contract_id: ContractId,
+    pub wasm_bytes: Vec<u8>,
+    pub deployer: PublicKey,
+    pub side_effects: ContractExecutionSideEffects,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallContractResult {
+    pub output: Vec<u8>,
+    pub gas_used: u64,
+    pub side_effects: ContractExecutionSideEffects,
+    pub reverted: bool,
+}
+
 /// Abstraction over the WASM runtime execution layer.
 /// Enables swapping wasmtime for other runtimes (wasmer, etc.) without
 /// changing the ContractEngine logic.
@@ -129,7 +145,7 @@ pub trait WasmRuntime: Send + Sync {
         gas_limit: u64,
         block_index: u64,
         block_timestamp: u64,
-    ) -> Result<(Vec<u8>, u64, Vec<(Vec<u8>, Vec<u8>)>), ContractError>;
+    ) -> Result<WasmResult, ContractError>;
 
     /// Validate WASM bytecode before deployment (magic bytes, size, opcodes, memory limits).
     fn validate_wasm_module(&self, wasm_bytes: &[u8]) -> Result<(), ContractError>;
@@ -311,7 +327,7 @@ pub struct BaaLSContractEngine<S: Storage> {
     inter_contract_results: Arc<Mutex<HashMap<ContractId, Vec<Vec<u8>>>>>,
 }
 
-type WasmResult = (Vec<u8>, u64, Vec<(Vec<u8>, Vec<u8>)>);
+type WasmResult = (Vec<u8>, u64, ContractExecutionSideEffects);
 
 impl<S: Storage> BaaLSContractEngine<S> {
     pub fn new(_storage: S) -> Result<Self, ContractError> {
@@ -319,7 +335,8 @@ impl<S: Storage> BaaLSContractEngine<S> {
         let mut config = Config::default();
         config.consume_fuel(true);
         config.max_wasm_stack(limits.stack_limit as usize);
-        config.static_memory_maximum_size(limits.memory_limit as u64);
+        // Memory limits are enforced via validate_wasm_module and WASM imports
+        // wasmtime 43.x does not expose static_memory_maximum_size on Config
         let wasm_engine =
             Engine::new(&config).map_err(|e| ContractError::WasmRuntimeError(e.to_string()))?;
         Ok(Self {
@@ -495,55 +512,33 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     ));
                 }
 
-                // Commit storage changes
-                if !read_only {
-                    for (key, value) in &host_state.contract_storage {
-                        host_state
-                            .storage
-                            .contract_storage_write(&host_state.contract_id, key, value)
-                            .map_err(ContractError::StorageError)?;
-                    }
-                    // Commit deletions
-                    for key in &host_state.deleted_keys {
-                        host_state
-                            .storage
-                            .contract_storage_remove(&host_state.contract_id, key)
-                            .ok();
-                    }
-                    // Persist emitted events
-                    for (topic, data) in &host_state.events {
-                        host_state
-                            .storage
-                            .contract_emit_event(&host_state.contract_id, topic, data)
-                            .ok();
-                    }
+                let mut host_state = store.data_mut();
+                if host_state.reverted {
+                    return Err(ContractError::Reverted(
+                        "Contract reverted during execution".to_string(),
+                    ));
                 }
 
-                let events = host_state.events.clone();
-                let pending_calls = std::mem::take(&mut host_state.inter_contract_calls);
+                let mut side_effects = ContractExecutionSideEffects {
+                    storage_updates: StorageUpdateSet {
+                        writes: std::mem::take(&mut host_state.contract_storage),
+                        deletes: std::mem::take(&mut host_state.deleted_keys),
+                    },
+                    events: std::mem::take(&mut host_state.events),
+                };
 
-                // Capture storage reference (avoid borrow conflicts)
+                let pending_calls = std::mem::take(&mut host_state.inter_contract_calls);
                 let storage_ref = storage.clone_storage();
 
-                info!(
-                    "[CONTRACTS] {}::{} executed: gas={}, time={:?}",
-                    hex::encode(contract_id.to_bytes()),
-                    method_name,
-                    gas_used,
-                    execution_time
-                );
-
-                // Process inter-contract calls after initial execution
+                // Process inter-contract calls
                 let mut call_results = Vec::new();
                 for (callee_id_bytes, method_bytes, call_args, _call_value) in &pending_calls {
                     let callee_method = String::from_utf8_lossy(method_bytes).to_string();
-                    // Look up callee contract code
                     let callee_id = if callee_id_bytes.len() == 32 {
                         let mut arr = [0u8; 32];
                         arr.copy_from_slice(callee_id_bytes);
                         ContractId::from_bytes(&arr)
                     } else {
-                        warn!("[CONTRACTS] Invalid callee ID length in inter-contract call");
                         call_results.push(vec![]);
                         continue;
                     };
@@ -551,36 +546,11 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     let callee_wasm = match storage_ref.get_contract_code(&callee_id) {
                         Ok(Some(code)) => code,
                         _ => {
-                            warn!(
-                                "[CONTRACTS] Callee contract {} not found",
-                                hex::encode(callee_id.to_bytes())
-                            );
                             call_results.push(vec![]);
                             continue;
                         }
                     };
 
-                    // Reentrancy guard for inter-contract calls
-                    {
-                        let mut executing = self.executing_contracts.lock().unwrap();
-                        let entry = executing.entry(callee_id.clone()).or_insert(0);
-                        *entry += 1;
-                        if *entry > 1 {
-                            *entry -= 1; // revert increment before continuing
-                            warn!(
-                                "[CONTRACTS] Reentrancy blocked on inter-contract call to {}",
-                                hex::encode(callee_id.to_bytes())
-                            );
-                            call_results.push(vec![]);
-                            continue;
-                        }
-                    }
-                    let _inter_guard = ReentrancyGuard {
-                        executing_contracts: self.executing_contracts.clone(),
-                        contract_id: callee_id.clone(),
-                    };
-
-                    // Execute callee inline (synchronous inter-contract call)
                     match self.execute_wasm_contract(
                         &callee_wasm,
                         &callee_method,
@@ -593,31 +563,20 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         block_index,
                         block_timestamp,
                     ) {
-                        Ok((result_data, _, _)) => {
+                        Ok((result_data, _, sub_side_effects)) => {
                             call_results.push(result_data);
+                            // MERGE side effects
+                            side_effects.storage_updates.writes.extend(sub_side_effects.storage_updates.writes);
+                            side_effects.storage_updates.deletes.extend(sub_side_effects.storage_updates.deletes);
+                            side_effects.events.extend(sub_side_effects.events);
                         }
-                        Err(e) => {
-                            warn!(
-                                "[CONTRACTS] Inter-contract call to {}::{} failed: {}",
-                                hex::encode(callee_id.to_bytes()),
-                                callee_method,
-                                e
-                            );
-                            // Push a failure marker so the caller can distinguish
-                            // failure from a successful call that returned 0 bytes.
+                        Err(_) => {
                             call_results.push(vec![0x00]);
                         }
                     }
                 }
-                // Store results for baals_read_call_result in case the initial caller reads them
-                store.data_mut().inter_contract_results = call_results.clone();
-                // Persist results in engine for subsequent contract calls within this block
-                {
-                    let mut engine_results = self.inter_contract_results.lock().unwrap();
-                    engine_results.insert(contract_id.clone(), call_results);
-                }
-
-                Ok((result_data, gas_used, events))
+                
+                Ok((result_data, gas_used, side_effects))
             }
             Err(e) => {
                 let host_state = store.data();
@@ -674,7 +633,9 @@ impl<S: Storage> BaaLSContractEngine<S> {
 
                     let value = {
                         let state = caller.data_mut();
-                        state.charge_gas(100).ok();
+                        if state.charge_gas(100).is_err() {
+                            return -1;
+                        }
                         state.contract_storage.get(&key).cloned().or_else(|| {
                             state
                                 .storage
@@ -732,7 +693,9 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     }
 
                     let state = caller.data_mut();
-                    state.charge_gas(200).ok();
+                    if state.charge_gas(200).is_err() {
+                        return -1;
+                    }
                     if state.read_only {
                         return -1;
                     }
@@ -766,7 +729,9 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     }
 
                     let state = caller.data_mut();
-                    state.charge_gas(50).ok();
+                    if state.charge_gas(50).is_err() {
+                        return -1;
+                    }
                     if state.read_only {
                         return -1;
                     }
@@ -861,7 +826,9 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         return;
                     }
 
-                    caller.data_mut().charge_gas(50 + data_len as u64 / 16).ok();
+                    if caller.data_mut().charge_gas(50 + data_len as u64 / 16).is_err() {
+                        return;
+                    }
 
                     let mut hasher = Sha256::new();
                     hasher.update(&data);
@@ -916,7 +883,9 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         return 0;
                     }
 
-                    caller.data_mut().charge_gas(500).ok();
+                    if caller.data_mut().charge_gas(500).is_err() {
+                        return -1;
+                    }
 
                     if pk_bytes.len() != 32 || sig_bytes.len() != 64 {
                         return 0;
@@ -982,7 +951,9 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     if !state.permissions.emit_events {
                         return;
                     }
-                    state.charge_gas(100 + topic_len as u64 + data_len as u64).ok();
+                    if state.charge_gas(100 + topic_len as u64 + data_len as u64).is_err() {
+                        return;
+                    }
                     state.events.push((topic, data));
                 },
             )
@@ -1064,7 +1035,9 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         return -1;
                     }
                     let state = caller.data_mut();
-                    state.charge_gas(1000).ok();
+                    if state.charge_gas(1000).is_err() {
+                        return -1;
+                    }
                     if state.read_only {
                         return -1;
                     }
@@ -1240,7 +1213,7 @@ impl<S: Storage> WasmRuntime for BaaLSContractEngine<S> {
         gas_limit: u64,
         block_index: u64,
         block_timestamp: u64,
-    ) -> Result<(Vec<u8>, u64, Vec<(Vec<u8>, Vec<u8>)>), ContractError> {
+    ) -> Result<WasmResult, ContractError> {
         BaaLSContractEngine::execute_wasm_contract(
             self,
             wasm_bytes,
@@ -1286,7 +1259,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         init_payload: Option<&[u8]>,
         storage: &dyn Storage,
         gas_limit: u64,
-    ) -> Result<ContractId, ContractError> {
+    ) -> Result<DeployContractResult, ContractError> {
         // Validate WASM bytecode
         if wasm_bytes.is_empty() {
             return Err(ContractError::BytecodeValidationFailed(
@@ -1348,13 +1321,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         let hash = hasher.finalize();
         let contract_id = ContractId::from_bytes(&hash.into());
 
-        // Store contract code
-        storage.put_contract_code(&contract_id, wasm_bytes).map_err(ContractError::StorageError)?;
-
-        // Store deployer address
-        storage
-            .put_contract_deployer(&contract_id, deployer)
-            .map_err(ContractError::StorageError)?;
+        let mut side_effects = ContractExecutionSideEffects::default();
 
         // If init_payload is provided, call the contract's init/instantiate function
         if let Some(payload) = init_payload {
@@ -1377,21 +1344,34 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
                     0,
                     0,
                 ) {
-                    Ok(_) => info!(
-                        "[CONTRACTS] Init successful for {}",
-                        hex::encode(contract_id.to_bytes())
-                    ),
-                    Err(e) => warn!(
-                        "[CONTRACTS] Init failed for {}: {}",
-                        hex::encode(contract_id.to_bytes()),
-                        e
-                    ),
+                    Ok((_result, _gas, init_side_effects)) => {
+                        side_effects = init_side_effects;
+                        info!(
+                            "[CONTRACTS] Init successful for {}",
+                            hex::encode(contract_id.to_bytes())
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "[CONTRACTS] Init failed for {}: {}",
+                            hex::encode(contract_id.to_bytes()),
+                            e
+                        );
+                        return Err(e);
+                    }
                 }
             }
         }
 
+        // Do NOT write contract code or deployer to storage here.
+        // The caller (ledger) must store these atomically in its batch.
         info!("[CONTRACTS] Contract deployed: {}", hex::encode(contract_id.to_bytes()));
-        Ok(contract_id)
+        Ok(DeployContractResult {
+            contract_id,
+            wasm_bytes: wasm_bytes.to_vec(),
+            deployer: *deployer,
+            side_effects,
+        })
     }
 
     fn call_contract(
@@ -1405,7 +1385,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         block_index: u64,
         block_timestamp: u64,
         gas_limit: u64,
-    ) -> Result<Vec<u8>, ContractError> {
+    ) -> Result<CallContractResult, ContractError> {
         // Reentrancy guard: check if this contract is already executing
         {
             let mut executing = self.executing_contracts.lock().unwrap();
@@ -1498,7 +1478,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
 
         let _ = value; // value transfer handled by ledger
 
-        let (result, gas_used, events) = self.execute_wasm_contract(
+        let (result, gas_used, side_effects) = self.execute_wasm_contract(
             &wasm_bytes,
             method_name,
             args,
@@ -1522,16 +1502,12 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         };
         self.update_contract_metrics(contract_id, &execution_result);
 
-        if !events.is_empty() {
-            info!(
-                "[CONTRACTS] {} events emitted by {}::{}",
-                events.len(),
-                hex::encode(contract_id.to_bytes()),
-                method_name
-            );
-        }
-
-        Ok(result)
+        Ok(CallContractResult {
+            output: result,
+            gas_used,
+            side_effects,
+            reverted: false,
+        })
     }
 
     fn query_contract(

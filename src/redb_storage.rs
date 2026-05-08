@@ -833,8 +833,21 @@ impl Storage for RedbStorage {
                     StorageOperation::PutContractCode(k, v) => {
                         contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
                     }
+                    StorageOperation::PutContractDeployer(k, v) => {
+                        contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                    }
                     StorageOperation::PutContractStorage(k, v) => {
                         contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::DeleteAccount(addr) => {
+                        accounts.remove(addr.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::DeleteContractStorage(key) => {
+                        contracts.remove(key.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::PutContractEvent(key, val) => {
+                        let mut events_table = txn.open_table(EVENTS_TABLE).map_err(map_err)?;
+                        events_table.insert(key.as_slice(), val.as_slice()).map_err(map_err)?;
                     }
                     StorageOperation::PutMempool(k, v) => {
                         pending.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;

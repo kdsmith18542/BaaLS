@@ -168,7 +168,7 @@ impl BaaLSSdk {
     ) -> Result<ContractId, SdkError> {
         let deployer_account = self.runtime.storage().get_account(deployer)?;
         let deployer_nonce = deployer_account.as_ref().map(|a| a.nonce()).unwrap_or(0);
-        let contract_id = self.runtime.contract_engine().deploy_contract(
+        let deploy_result = self.runtime.contract_engine().deploy_contract(
             deployer,
             deployer_nonce,
             wasm_bytes,
@@ -176,7 +176,17 @@ impl BaaLSSdk {
             self.runtime.storage(),
             gas_limit,
         )?;
-        Ok(contract_id)
+        // Store contract code (immutable, idempotent)
+        self.runtime.storage().put_contract_code(&deploy_result.contract_id, &deploy_result.wasm_bytes)?;
+        self.runtime.storage().put_contract_deployer(&deploy_result.contract_id, &deploy_result.deployer)?;
+        // Apply init side effects
+        for (key, val) in deploy_result.side_effects.storage_updates.writes {
+            self.runtime.storage().contract_storage_write(&deploy_result.contract_id, &key, &val)?;
+        }
+        for key in deploy_result.side_effects.storage_updates.deletes {
+            self.runtime.storage().contract_storage_remove(&deploy_result.contract_id, &key)?;
+        }
+        Ok(deploy_result.contract_id)
     }
 
     /// Call a smart contract
@@ -205,7 +215,7 @@ impl BaaLSSdk {
             block_timestamp,
             1_000_000,
         )?;
-        Ok(result)
+        Ok(result.output)
     }
 
     /// Query a smart contract

@@ -1983,7 +1983,7 @@ fn handle_query(
                     &format!("Wallet: balance={}, nonce={}", balance, nonce),
                     serde_json::json!({"type": "wallet", "balance": balance, "nonce": nonce}),
                 )),
-                Some(Account::Contract { code_hash, storage_root_hash, nonce }) => {
+                Some(Account::Contract { code_hash, storage_root_hash, nonce, .. }) => {
                     Ok(text_or_json(
                         json,
                         &format!(
@@ -2105,8 +2105,8 @@ fn handle_dev(
             )?;
             let exec_time = start.elapsed();
 
-            let events_count = events.len();
-            let state_changes = if !events.is_empty() {
+            let events_count = events.events.len();
+            let state_changes = if !events.events.is_empty() {
                 format!("{} events emitted", events_count)
             } else {
                 "no events emitted".to_string()

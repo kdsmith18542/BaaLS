@@ -1,7 +1,9 @@
 use async_trait::async_trait;
+use ed25519_dalek::{Signer, SigningKey, Verifier, Signature};
 use bincode;
 use hex;
 use log;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -47,8 +49,9 @@ pub struct Peer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NetworkMessage {
     // Handshake messages
-    Handshake { peer_id: PublicKey, version: u32 },
-    HandshakeAck { peer_id: PublicKey, version: u32 },
+    Handshake { peer_id: PublicKey, version: u32, challenge: [u8; 32] },
+    HandshakeAck { peer_id: PublicKey, version: u32, signature: Vec<u8>, challenge: [u8; 32] },
+    HandshakeVerify { signature: Vec<u8> },
 
     // Sync protocol messages
     GetChainHead,
@@ -162,6 +165,7 @@ pub struct CustomSync {
     received_blocks: Arc<Mutex<Vec<Block>>>,
     shutdown_tx: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
     connection_semaphore: Arc<tokio::sync::Semaphore>,
+    signing_key: Arc<Mutex<Option<SigningKey>>>,
 }
 
 const MAX_CONCURRENT_CONNECTIONS: usize = 128;
@@ -203,11 +207,13 @@ impl Clone for TlsConfig {
 }
 
 impl TlsConfig {
-    /// Load TLS config from certificate and key files
+    /// Load TLS config from certificate and key files.
+    /// If ca_cert_path is provided, enables server certificate verification
+    /// for outbound connections using the CA certificate(s).
     pub fn load(
         cert_path: &str,
         key_path: &str,
-        _ca_cert_path: Option<&str>,
+        ca_cert_path: Option<&str>,
     ) -> Result<Self, SyncError> {
         use rustls_pemfile::{certs, pkcs8_private_keys};
         use std::io::BufReader;
@@ -242,6 +248,26 @@ impl TlsConfig {
 
         // Build client config with certificate pinning
         let cert_pins = Arc::new(RwLock::new(HashSet::new()));
+
+        // If a CA certificate path is provided, load and pin the CA certificate(s)
+        if let Some(ca_path) = ca_cert_path {
+            let ca_file = std::fs::File::open(ca_path)
+                .map_err(|e| SyncError::NetworkError(format!("Failed to open CA cert file: {}", e)))?;
+            let mut ca_reader = BufReader::new(ca_file);
+            let ca_certs: Vec<rustls::pki_types::CertificateDer> = certs(&mut ca_reader)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| SyncError::NetworkError(format!("Failed to parse CA cert: {}", e)))?;
+            {
+                let mut pins = cert_pins.write()
+                    .map_err(|e| SyncError::NetworkError(e.to_string()))?;
+                for ca_cert in &ca_certs {
+                    let fingerprint = Sha256::digest(ca_cert.as_ref()).to_vec();
+                    log::info!("Pinned CA certificate with SHA256 fingerprint: {}", hex::encode(&fingerprint));
+                    pins.insert(fingerprint);
+                }
+            }
+        }
+
         let client_config = tokio_rustls::rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(CertificatePinner::new(Arc::clone(
@@ -399,7 +425,13 @@ impl CustomSync {
             received_blocks: Arc::new(Mutex::new(Vec::new())),
             shutdown_tx: Arc::new(Mutex::new(None)),
             connection_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
+            signing_key: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn with_signing_key(self, key: SigningKey) -> Self {
+        *self.signing_key.try_lock().unwrap() = Some(key);
+        self
     }
 
     pub fn with_storage(self, storage: Box<dyn Storage>) -> Self {
@@ -443,9 +475,11 @@ impl CustomSync {
 
         let mut stream = self.connect_to_peer(peer.address).await?;
 
+        let mut challenge = [0u8; 32];
+        rand::rng().fill_bytes(&mut challenge);
         Self::send_message(
             &mut stream,
-            NetworkMessage::Handshake { peer_id: self.peer_id, version: 1 },
+            NetworkMessage::Handshake { peer_id: self.peer_id, version: 1, challenge },
         )
         .await?;
 
@@ -528,6 +562,7 @@ impl CustomSync {
                     let tls_acceptor = tls_acceptor.clone();
                     let storage = Arc::clone(&self.storage);
                     let received_blocks = Arc::clone(&self.received_blocks);
+                    let signing_key = Arc::clone(&self.signing_key);
                     let permit = semaphore.clone().acquire_owned().await;
 
                     tokio::spawn(async move {
@@ -536,7 +571,7 @@ impl CustomSync {
                             match acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
                                     if let Err(e) = Self::handle_connection(
-                                        tls_stream, addr, peer_id, peers, block_cache, storage, received_blocks,
+                                        tls_stream, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key,
                                     ).await {
                                         log::error!("TLS connection error: {}", e);
                                     }
@@ -544,7 +579,7 @@ impl CustomSync {
                                 Err(e) => log::error!("TLS handshake error from {}: {}", addr, e),
                             }
                         } else if let Err(e) = Self::handle_connection(
-                            socket, addr, peer_id, peers, block_cache, storage, received_blocks,
+                            socket, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key,
                         ).await {
                             log::error!("Connection error: {}", e);
                         }
@@ -577,46 +612,54 @@ impl CustomSync {
         block_cache: Arc<Mutex<HashMap<[u8; 32], Block>>>,
         storage: Arc<Mutex<Option<Box<dyn Storage>>>>,
         received_blocks: Arc<Mutex<Vec<Block>>>,
+        signing_key: Arc<Mutex<Option<SigningKey>>>,
     ) -> Result<(), SyncError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        // Expect inbound handshake from peer, then ack.
+        // Expect inbound handshake from peer, then ack with signature of their challenge.
         let inbound = timeout(Duration::from_secs(30), Self::receive_message(&mut socket))
             .await
             .map_err(|_| SyncError::ConnectionTimeout)??;
+
         match inbound {
-            NetworkMessage::Handshake { peer_id: remote_peer_id, version } => {
+            NetworkMessage::Handshake { peer_id: remote_peer_id, version, challenge } => {
                 if version != 1 {
                     return Err(SyncError::NetworkError("Version mismatch".to_string()));
                 }
-                // Do not persist inbound source socket as peer listen address.
-                // Inbound source ports are typically ephemeral and poison outbound sync targets.
-                {
-                    let peers_guard = peers.read().await;
-                    if let Some(existing_addr) = peers_guard.get(&remote_peer_id) {
-                        log::debug!(
-                            "Peer {} connected from {} (known listen address: {})",
-                            hex::encode(remote_peer_id.to_bytes()),
-                            addr,
-                            existing_addr
-                        );
-                    } else {
-                        log::debug!(
-                            "Peer {} connected from {} with no advertised listen address; skipping peer-table insert",
-                            hex::encode(remote_peer_id.to_bytes()),
-                            addr
-                        );
-                    }
-                }
+                // Sign their challenge and send our own
+                let mut my_challenge = [0u8; 32];
+                rand::RngCore::fill_bytes(&mut rand::rng(), &mut my_challenge);
+
+                let signature = {
+                    let sig_key_guard = signing_key.lock().await;
+                    let sig_key = sig_key_guard.as_ref().ok_or(SyncError::AuthenticationFailed)?;
+                    sig_key.sign(&challenge).to_vec()
+                };
 
                 Self::send_message(
                     &mut socket,
-                    NetworkMessage::HandshakeAck { peer_id, version: 1 },
+                    NetworkMessage::HandshakeAck { peer_id, version: 1, signature, challenge: my_challenge },
                 )
                 .await?;
+
+                // Expect verification of our challenge
+                let verify = timeout(Duration::from_secs(10), Self::receive_message(&mut socket))
+                    .await
+                    .map_err(|_| SyncError::ConnectionTimeout)??;
+
+                match verify {
+                    NetworkMessage::HandshakeVerify { signature } => {
+                        let sig = Signature::from_slice(&signature).map_err(|_| SyncError::AuthenticationFailed)?;
+                        let remote_pk = ed25519_dalek::VerifyingKey::from_bytes(&remote_peer_id.to_bytes())
+                            .map_err(|_| SyncError::AuthenticationFailed)?;
+                        remote_pk.verify(&my_challenge, &sig).map_err(|_| SyncError::AuthenticationFailed)?;
+                    }
+                    _ => return Err(SyncError::AuthenticationFailed),
+                }
+
                 log::info!(
-                    "New peer connected: {} at {}",
+                    "Inbound peer connected and mutually authenticated: {} at {}",
                     hex::encode(remote_peer_id.to_bytes()),
                     addr
                 );
@@ -936,16 +979,40 @@ impl SyncLayer for CustomSync {
     ) -> Result<Block, SyncError> {
         let mut stream = self.connect_to_peer(peer.address).await?;
 
-        // Perform handshake
+        // Perform handshake with challenge
+        let mut challenge = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rng(), &mut challenge);
+
         Self::send_message(
             &mut stream,
-            NetworkMessage::Handshake { peer_id: self.peer_id, version: 1 },
+            NetworkMessage::Handshake { peer_id: self.peer_id, version: 1, challenge },
         )
         .await?;
 
         let response = Self::receive_message(&mut stream).await?;
         match response {
-            NetworkMessage::HandshakeAck { .. } => {}
+            NetworkMessage::HandshakeAck { peer_id: remote_peer_id, signature, challenge: remote_challenge, .. } => {
+                // 1. Verify their signature of our challenge
+                let sig = Signature::from_slice(&signature).map_err(|_| SyncError::AuthenticationFailed)?;
+                let remote_pk = ed25519_dalek::VerifyingKey::from_bytes(&remote_peer_id.to_bytes())
+                    .map_err(|_| SyncError::AuthenticationFailed)?;
+                remote_pk.verify(&challenge, &sig).map_err(|_| SyncError::AuthenticationFailed)?;
+
+                // 2. Sign their challenge
+                let my_sig = {
+                    let sig_key_guard = self.signing_key.lock().await;
+                    let sig_key = sig_key_guard.as_ref().ok_or(SyncError::AuthenticationFailed)?;
+                    sig_key.sign(&remote_challenge).to_vec()
+                };
+
+                Self::send_message(
+                    &mut stream,
+                    NetworkMessage::HandshakeVerify { signature: my_sig },
+                )
+                .await?;
+
+                log::info!("Outbound peer mutually authenticated: {}", hex::encode(remote_peer_id.to_bytes()));
+            }
             _ => return Err(SyncError::AuthenticationFailed),
         }
 
@@ -1084,18 +1151,43 @@ impl SyncLayer for CustomSync {
 
         for peer in peers {
             if let Ok(mut stream) = self.connect_to_peer(peer.address).await {
-                // Perform handshake before sending the announcement
+                // Perform mutual handshake
+                let mut challenge = [0u8; 32];
+                rand::RngCore::fill_bytes(&mut rand::rng(), &mut challenge);
+
                 if Self::send_message(
                     &mut stream,
-                    NetworkMessage::Handshake { peer_id: self.peer_id, version: 1 },
+                    NetworkMessage::Handshake { peer_id: self.peer_id, version: 1, challenge },
                 )
                 .await
                 .is_ok()
                 {
-                    if let Ok(NetworkMessage::HandshakeAck { .. }) =
+                    if let Ok(NetworkMessage::HandshakeAck { peer_id: remote_peer_id, signature, challenge: remote_challenge, .. }) =
                         Self::receive_message(&mut stream).await
                     {
-                        let _ = Self::send_message(&mut stream, announcement.clone()).await;
+                        // Verify their signature
+                        let sig_res = Signature::from_slice(&signature);
+                        let pk_res = ed25519_dalek::VerifyingKey::from_bytes(&remote_peer_id.to_bytes());
+                        
+                        if let (Ok(sig), Ok(pk)) = (sig_res, pk_res) {
+                            if pk.verify(&challenge, &sig).is_ok() {
+                                // Sign their challenge
+                                let my_sig = {
+                                    let sig_key_guard = self.signing_key.lock().await;
+                                    if let Some(sig_key) = sig_key_guard.as_ref() {
+                                        sig_key.sign(&remote_challenge).to_vec()
+                                    } else {
+                                        Vec::new()
+                                    }
+                                };
+                                if !my_sig.is_empty() {
+                                    let _ = Self::send_message(&mut stream, NetworkMessage::HandshakeVerify { signature: my_sig }).await;
+                                    let _ = Self::send_message(&mut stream, announcement.clone()).await;
+                                }
+                            }
+                        }
+                    }
+                }
                         // Handle the peer's block request as a response to our announcement
                         if let Ok(NetworkMessage::RequestBlock { hash }) =
                             Self::receive_message(&mut stream).await
@@ -1109,13 +1201,11 @@ impl SyncLayer for CustomSync {
                             .await
                             .ok();
                         }
-                    }
-                }
-            }
         }
-
-        Ok(())
     }
+
+    Ok(())
+}
 
     fn peer_count(&self) -> usize {
         self.known_peers.blocking_read().len()
@@ -1295,6 +1385,7 @@ impl Clone for SyncWrapper {
                 received_blocks: Arc::clone(&cs.received_blocks),
                 shutdown_tx: Arc::clone(&cs.shutdown_tx),
                 connection_semaphore: Arc::clone(&cs.connection_semaphore),
+                signing_key: Arc::clone(&cs.signing_key),
             })),
         }
     }
