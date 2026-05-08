@@ -48,6 +48,8 @@ spec:
       labels:
         app: baals
     spec:
+      securityContext:
+        runAsNonRoot: true
       containers:
       - name: baals
         image: baals:latest
