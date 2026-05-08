@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -332,6 +333,13 @@ func (b *BaalsClient) Start() error {
 	if b.cmd != nil {
 		return errors.New("baals: already started")
 	}
+	validPath := regexp.MustCompile(`^[a-zA-Z0-9_\-\./\\:]+$`)
+	if !validPath.MatchString(b.binPath) {
+		return fmt.Errorf("invalid input")
+	}
+	if !validPath.MatchString(b.dataDir) {
+		return fmt.Errorf("invalid input")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -380,6 +388,13 @@ func (b *BaalsClient) Stop() error {
 
 	if b.cmd == nil {
 		return nil
+	}
+	validPath := regexp.MustCompile(`^[a-zA-Z0-9_\-\./\\:]+$`)
+	if !validPath.MatchString(b.binPath) {
+		return fmt.Errorf("invalid input")
+	}
+	if !validPath.MatchString(b.dataDir) {
+		return fmt.Errorf("invalid input")
 	}
 
 	stop := exec.Command(b.binPath,
@@ -651,6 +666,19 @@ func (b *BaalsClient) QueryContract(contractIDHex, method string, payload []byte
 // runQueryCmd runs `baalsd --json query <subcmd> [args...] --data-dir <dir>`
 // and returns the raw stdout (a JSON string).
 func runQueryCmd(binPath, dataDir, subcmd string, args ...string) ([]byte, error) {
+	validPath := regexp.MustCompile(`^[a-zA-Z0-9_\-\./\\:]+$`)
+	if !validPath.MatchString(binPath) {
+		return nil, fmt.Errorf("invalid input")
+	}
+	if !validPath.MatchString(dataDir) {
+		return nil, fmt.Errorf("invalid input")
+	}
+	validArg := regexp.MustCompile(`^[a-zA-Z0-9_\-\./\\:]+$`)
+	for _, arg := range args {
+		if !validArg.MatchString(arg) {
+			return nil, fmt.Errorf("invalid input")
+		}
+	}
 	argv := []string{
 		"--json", "query", subcmd,
 		"--data-dir", dataDir,
