@@ -135,6 +135,7 @@ pub unsafe extern "C" fn baals_sdk_get_transaction(hash_ptr: *const u8) -> *mut 
     if hash_ptr.is_null() {
         return ptr::null_mut();
     }
+    debug_assert!(!hash_ptr.is_null(), "hash_ptr must be non-null and point to 32 valid bytes");
     let hash = unsafe { std::slice::from_raw_parts(hash_ptr, 32) };
     let mut arr = [0u8; 32];
     arr.copy_from_slice(hash);
@@ -155,6 +156,7 @@ pub unsafe extern "C" fn baals_sdk_get_account(pubkey_ptr: *const u8) -> *mut c_
     if pubkey_ptr.is_null() {
         return ptr::null_mut();
     }
+    debug_assert!(!pubkey_ptr.is_null(), "pubkey_ptr must point to 32 valid bytes");
     let pk_bytes = unsafe { std::slice::from_raw_parts(pubkey_ptr, 32) };
     let mut arr = [0u8; 32];
     arr.copy_from_slice(pk_bytes);
@@ -197,6 +199,7 @@ pub unsafe extern "C" fn baals_sdk_create_account(pubkey_ptr: *const u8, balance
     if pubkey_ptr.is_null() {
         return 1;
     }
+    debug_assert!(!pubkey_ptr.is_null(), "pubkey_ptr must point to 32 valid bytes");
     let pk_bytes = unsafe { std::slice::from_raw_parts(pubkey_ptr, 32) };
     let mut arr = [0u8; 32];
     arr.copy_from_slice(pk_bytes);
@@ -227,6 +230,7 @@ pub unsafe extern "C" fn baals_sdk_deploy_contract(
     if deployer_ptr.is_null() || wasm_ptr.is_null() {
         return ptr::null_mut();
     }
+    debug_assert!(!deployer_ptr.is_null(), "deployer_ptr must point to 32 valid bytes");
     let pk_bytes = unsafe { std::slice::from_raw_parts(deployer_ptr, 32) };
     let mut arr = [0u8; 32];
     arr.copy_from_slice(pk_bytes);
@@ -266,6 +270,8 @@ pub unsafe extern "C" fn baals_sdk_call_contract(
     if caller_ptr.is_null() || contract_id_ptr.is_null() || method.is_null() {
         return ptr::null_mut();
     }
+    debug_assert!(!caller_ptr.is_null(), "caller_ptr must point to 32 valid bytes");
+    debug_assert!(!contract_id_ptr.is_null(), "contract_id_ptr must point to 32 valid bytes");
     let pk_bytes = unsafe { std::slice::from_raw_parts(caller_ptr, 32) };
     let mut pk_arr = [0u8; 32];
     pk_arr.copy_from_slice(pk_bytes);
@@ -308,6 +314,7 @@ pub unsafe extern "C" fn baals_sdk_query_contract(
     if contract_id_ptr.is_null() || method.is_null() {
         return ptr::null_mut();
     }
+    debug_assert!(!contract_id_ptr.is_null(), "contract_id_ptr must point to 32 valid bytes");
     let cid_bytes = unsafe { std::slice::from_raw_parts(contract_id_ptr, 32) };
     let mut cid_arr = [0u8; 32];
     cid_arr.copy_from_slice(cid_bytes);

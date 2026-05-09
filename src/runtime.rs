@@ -15,6 +15,8 @@ use crate::storage::{Storage, StorageError};
 use crate::sync::SyncLayer;
 use crate::types::{Account, Block, ChainState, ContractId, CryptoError, PublicKey, Transaction};
 
+const MAX_NONCE_GAP_SKIP_CYCLES: u32 = 3;
+
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error("Storage error: {0}")]
@@ -45,6 +47,11 @@ pub struct Mempool {
     pub total_bytes: usize,
     pub ttl_seconds: u64,
     pub max_tx_per_sender: usize,
+    pub max_tx_per_sender_per_second: usize,
+    pub sender_timestamps: HashMap<PublicKey, Vec<u64>>,
+    /// Tracks how many block-production cycles a transaction has been skipped
+    /// due to a nonce gap. Evicted after MAX_SKIP_CYCLES consecutive skips.
+    pub skip_count: HashMap<[u8; 32], u32>,
 }
 
 impl Mempool {
@@ -60,6 +67,9 @@ impl Mempool {
             total_bytes: 0,
             ttl_seconds,
             max_tx_per_sender: 100,
+            max_tx_per_sender_per_second: 10,
+            sender_timestamps: HashMap::new(),
+            skip_count: HashMap::new(),
         }
     }
 
@@ -70,7 +80,7 @@ impl Mempool {
         if self.txs_by_hash.contains_key(&tx.hash) {
             return Err(RuntimeError::InvalidTransaction("Duplicate transaction".to_string()));
         }
-        // Per-sender rate limiting
+        // Per-sender count-based rate limiting
         if let Some(map) = self.txs_by_sender.get(&tx.sender) {
             if map.len() >= self.max_tx_per_sender {
                 return Err(RuntimeError::InvalidTransaction(format!(
@@ -79,10 +89,23 @@ impl Mempool {
                 )));
             }
         }
+        // Per-sender time-windowed rate limiting
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let window = 1; // 1 second window
+        let entries = self.sender_timestamps.entry(tx.sender).or_default();
+        entries.retain(|&t| now.saturating_sub(t) < window);
+        if entries.len() >= self.max_tx_per_sender_per_second {
+            return Err(RuntimeError::InvalidTransaction(format!(
+                "Rate limit exceeded for sender: max {} tx/s",
+                self.max_tx_per_sender_per_second
+            )));
+        }
+        entries.push(now);
         let tx_size = tx.payload_size_estimate() + std::mem::size_of::<Transaction>();
         self.total_bytes = self.total_bytes.saturating_add(tx_size);
         let sender = tx.sender;
         let nonce = tx.nonce;
+        self.skip_count.entry(tx.hash).or_insert(0);
         self.txs_by_sender.entry(sender).or_default().insert(nonce, tx.hash);
         self.txs_by_hash.insert(tx.hash, tx);
         Ok(())
@@ -98,6 +121,7 @@ impl Mempool {
                     self.txs_by_sender.remove(&tx.sender);
                 }
             }
+            self.skip_count.remove(hash);
         }
     }
 
@@ -157,6 +181,8 @@ impl Mempool {
         self.txs_by_hash.clear();
         self.txs_by_sender.clear();
         self.total_bytes = 0;
+        self.sender_timestamps.clear();
+        self.skip_count.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -384,6 +410,17 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             info!("BaaLS Runtime started (auto-block disabled)");
         }
         Ok(())
+    }
+
+    /// Override per-sender mempool limits for high-throughput scenarios (e.g. benchmarks/tests).
+    pub fn configure_mempool_sender_limits(
+        &self,
+        max_tx_per_sender: usize,
+        max_tx_per_sender_per_second: usize,
+    ) {
+        let mut mempool = self.mempool.lock().unwrap();
+        mempool.max_tx_per_sender = max_tx_per_sender;
+        mempool.max_tx_per_sender_per_second = max_tx_per_sender_per_second;
     }
 
     fn spawn_block_production(&self) {
@@ -659,8 +696,11 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         transactions.sort_by_key(|tx| (tx.sender, tx.nonce));
 
         // Filter to only include txs with continuous nonces per sender.
-        // Gap transactions (nonce > next_expected) are kept in mempool for later blocks.
+        // Gap transactions (nonce > next_expected) are tracked for eviction:
+        // after MAX_NONCE_GAP_SKIP_CYCLES consecutive skips they are removed
+        // to prevent nonce-gap DoS.
         let mut sender_next: HashMap<PublicKey, u64> = HashMap::new();
+        let mut to_evict: Vec<[u8; 32]> = Vec::new();
         transactions.retain(|tx| {
             let expected = sender_next.entry(tx.sender).or_insert_with(|| {
                 self.storage
@@ -674,13 +714,29 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                 *expected = tx.nonce + 1;
                 true
             } else if tx.nonce > *expected {
-                // Gap transaction — keep in mempool, skip for this block
-                false
+                // Gap transaction — increment skip counter, evict if exceeded
+                let count = mempool.skip_count.entry(tx.hash).or_insert(0);
+                *count += 1;
+                if *count > MAX_NONCE_GAP_SKIP_CYCLES {
+                    to_evict.push(tx.hash);
+                    warn!(
+                        "[MEMPOOL] Evicting tx {} from sender {} after {} nonce-gap skips",
+                        hex::encode(tx.hash),
+                        hex::encode(tx.sender.to_bytes()),
+                        *count
+                    );
+                    false
+                } else {
+                    false
+                }
             } else {
                 // Stale nonce — should have been rejected earlier, skip
                 false
             }
         });
+        for hash in &to_evict {
+            mempool.remove(hash);
+        }
 
         debug!("[PRODUCE_BLOCK] Collected {} transactions", transactions.len());
 
@@ -715,6 +771,12 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         );
 
         processing_result?;
+
+        // Reload chain state from storage after block application
+        if let Ok(Some(new_state)) = self.storage.get_chain_state() {
+            *current_chain_state = new_state;
+        }
+
         info!(
             "Block #{} produced ({} txns, {} gas)",
             new_block.index,
@@ -724,7 +786,9 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         // Update metrics (use serialized size estimate for accuracy)
         let block_size: usize = std::mem::size_of::<Block>()
-            + new_block.transactions.iter()
+            + new_block
+                .transactions
+                .iter()
                 .map(|tx| tx.payload_size_estimate() + std::mem::size_of::<Transaction>())
                 .sum::<usize>();
         self.metrics.update_average_block_size(block_size);
@@ -801,6 +865,13 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
     pub fn get_chain_state(&self) -> Result<ChainState, RuntimeError> {
         Ok(self.chain_state.lock().unwrap().clone())
+    }
+
+    pub fn refresh_chain_state(&self) -> Result<(), RuntimeError> {
+        if let Ok(Some(state)) = self.storage.get_chain_state() {
+            *self.chain_state.lock().unwrap() = state;
+        }
+        Ok(())
     }
 
     pub fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>, RuntimeError> {
@@ -911,8 +982,8 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             return Ok(self.get_chain_state()?.latest_block_index);
         }
 
-        let mut current_chain_state = self.chain_state.lock().unwrap();
-        let local_height = current_chain_state.latest_block_index;
+        let chain_snapshot = self.chain_state.lock().unwrap().clone();
+        let local_height = chain_snapshot.latest_block_index;
         let fork_height = fork_blocks.last().map(|b| b.index).unwrap_or(0);
 
         if fork_height <= local_height {
@@ -930,48 +1001,45 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             fork_blocks.len()
         );
 
-        let original_chain_state = current_chain_state.clone();
-        let mut expected_index = current_chain_state.latest_block_index + 1;
-        let mut expected_prev_hash = current_chain_state.latest_block_hash;
+        let mut expected_index = chain_snapshot.latest_block_index + 1;
+        let mut expected_prev_hash = chain_snapshot.latest_block_hash;
 
         for block in fork_blocks {
             if block.index != expected_index {
-                *self.chain_state.lock().unwrap() = original_chain_state;
                 return Err(RuntimeError::InvalidTransaction(format!(
                     "Fork block index mismatch: expected {}, got {}",
                     expected_index, block.index
                 )));
             }
             if block.prev_hash != expected_prev_hash {
-                *self.chain_state.lock().unwrap() = original_chain_state;
                 return Err(RuntimeError::InvalidTransaction(format!(
                     "Fork block prev_hash mismatch at index {}",
                     block.index
                 )));
             }
 
-            // 1. Validate consensus
-            if let Err(e) = self.consensus.validate_block(block, &current_chain_state) {
-                *self.chain_state.lock().unwrap() = original_chain_state;
-                return Err(RuntimeError::InvalidTransaction(format!("Consensus validation failed on fork block #{}: {}", block.index, e)));
+            if let Err(e) = self.consensus.validate_block(block, &chain_snapshot) {
+                return Err(RuntimeError::InvalidTransaction(format!(
+                    "Consensus validation failed on fork block #{}: {}",
+                    block.index, e
+                )));
             }
 
-            // 2. Validate and apply state transition
-            if let Err(e) = self.ledger.validate_block(block) {
-                *self.chain_state.lock().unwrap() = original_chain_state;
-                return Err(e.into());
-            }
-            if let Err(e) = self.ledger.apply_block(block) {
-                *self.chain_state.lock().unwrap() = original_chain_state;
-                return Err(e.into());
-            }
+            self.ledger.validate_block(block)?;
+            self.ledger.apply_block(block)?;
 
             expected_index = block.index + 1;
             expected_prev_hash = block.hash;
         }
 
-        info!("[CHAIN] Reorganized to height {}", current_chain_state.latest_block_index);
-        Ok(current_chain_state.latest_block_index)
+        if let Ok(Some(new_state)) = self.storage.get_chain_state() {
+            let new_height = new_state.latest_block_index;
+            *self.chain_state.lock().unwrap() = new_state;
+            info!("[CHAIN] Reorganized to height {}", new_height);
+            Ok(new_height)
+        } else {
+            Ok(chain_snapshot.latest_block_index)
+        }
     }
 
     pub fn get_node_status(&self) -> Result<ChainState, RuntimeError> {
@@ -1013,33 +1081,42 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         }
 
         // Normal sequential block application.
-        // Keep validation and application under one explicit lock scope to avoid
-        // self-deadlock on re-locking the same mutex in a match scrutinee.
         for block in blocks {
-            let mut chain_state = self.chain_state.lock().unwrap();
-            
-            // 1. Validate consensus (PoA signature)
-            if let Err(e) = self.consensus.validate_block(&block, &chain_state) {
-                warn!("[SYNC] Consensus validation failed for block #{}: {}", block.index, e);
+            // Scope for consensus validation lock
+            let consensus_valid = {
+                let chain_state = self.chain_state.lock().unwrap();
+                self.consensus.validate_block(&block, &chain_state).is_ok()
+            };
+            if !consensus_valid {
+                let chain_state = self.chain_state.lock().unwrap();
+                warn!(
+                    "[SYNC] Consensus validation failed for block #{} against chain at height {}",
+                    block.index, chain_state.latest_block_index
+                );
                 continue;
             }
 
-            // 2. Validate state transition
-            match self.ledger.validate_block(&block) {
-                Ok(()) => match self.ledger.apply_block(&block) {
-                    Ok(()) => {
-                        info!(
-                            "[SYNC] Applied received block #{} ({} txns)",
-                            block.index,
-                            block.transactions.len()
-                        );
+            // Validate state transition
+            if let Err(e) = self.ledger.validate_block(&block) {
+                warn!("[SYNC] Received block #{} failed validation: {}", block.index, e);
+                continue;
+            }
+
+            // Apply block
+            match self.ledger.apply_block(&block) {
+                Ok(()) => {
+                    info!(
+                        "[SYNC] Applied received block #{} ({} txns)",
+                        block.index,
+                        block.transactions.len()
+                    );
+                    // Reload chain state from storage after block application
+                    if let Ok(Some(new_state)) = self.storage.get_chain_state() {
+                        *self.chain_state.lock().unwrap() = new_state;
                     }
-                    Err(e) => {
-                        warn!("[SYNC] Failed to apply received block #{}: {}", block.index, e);
-                    }
-                },
+                }
                 Err(e) => {
-                    warn!("[SYNC] Received block #{} failed validation: {}", block.index, e);
+                    warn!("[SYNC] Failed to apply received block #{}: {}", block.index, e);
                 }
             }
         }
@@ -1058,31 +1135,35 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         let sync_layer = Arc::clone(&self.sync_layer);
         let self_clone = self.clone();
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().expect("Failed to create sync tokio runtime");
-            rt.block_on(async {
-                let peers = match sync_layer.discover_peers().await {
-                    Ok(p) => p,
-                    Err(_) => return,
-                };
-                if peers.is_empty() {
+
+        // Spawn on the current tokio runtime instead of creating a new one per tick
+        tokio::runtime::Handle::current().spawn(async move {
+            let peers = match sync_layer.discover_peers().await {
+                Ok(p) => p,
+                Err(_) => {
+                    self_clone.sync_in_flight.store(false, Ordering::Release);
                     return;
                 }
+            };
+            if peers.is_empty() {
+                self_clone.sync_in_flight.store(false, Ordering::Release);
+                return;
+            }
+            for peer in &peers {
+                // Re-read chain state after each peer to avoid stale comparisons
                 let chain_state = self_clone.chain_state.lock().unwrap().clone();
-                for peer in &peers {
-                    match sync_layer.sync_with_peer(peer, &chain_state).await {
-                        Ok(_block) => {
-                            debug!("[SYNC] Synced with peer {}", peer.address);
-                            self_clone.apply_received_blocks();
-                        }
-                        Err(e) => {
-                            if !matches!(e, crate::sync::SyncError::SynchronizationError(_)) {
-                                debug!("[SYNC] Sync with {} failed: {}", peer.address, e);
-                            }
+                match sync_layer.sync_with_peer(peer, &chain_state).await {
+                    Ok(_block) => {
+                        debug!("[SYNC] Synced with peer {}", peer.address);
+                        self_clone.apply_received_blocks();
+                    }
+                    Err(e) => {
+                        if !matches!(e, crate::sync::SyncError::SynchronizationError(_)) {
+                            debug!("[SYNC] Sync with {} failed: {}", peer.address, e);
                         }
                     }
                 }
-            });
+            }
             self_clone.sync_in_flight.store(false, Ordering::Release);
         });
     }
@@ -1097,7 +1178,8 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
     pub fn get_mempool_stats(&self) -> Result<MempoolStats, RuntimeError> {
         let mempool = self.mempool.lock().unwrap();
-        let mut priority_counts: std::collections::HashMap<u8, usize> = std::collections::HashMap::new();
+        let mut priority_counts: std::collections::HashMap<u8, usize> =
+            std::collections::HashMap::new();
         let mut total_gas_limit: u64 = 0;
         let mut total_size: usize = 0;
 
@@ -1105,7 +1187,8 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             let count = priority_counts.entry(tx.priority).or_insert(0);
             *count = (*count).saturating_add(1);
             total_gas_limit = total_gas_limit.saturating_add(tx.gas_limit);
-            total_size = total_size.saturating_add(tx.payload_size_estimate() + std::mem::size_of::<Transaction>());
+            total_size = total_size
+                .saturating_add(tx.payload_size_estimate() + std::mem::size_of::<Transaction>());
         }
 
         Ok(MempoolStats {
@@ -1150,19 +1233,34 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             })?;
 
         // Store contract code atomically (immutable, idempotent)
-        self.storage.put_contract_code(&deploy_result.contract_id, &deploy_result.wasm_bytes)
-            .map_err(|e| RuntimeError::InvalidTransaction(format!("Failed to store contract code: {}", e)))?;
-        self.storage.put_contract_deployer(&deploy_result.contract_id, &deploy_result.deployer)
-            .map_err(|e| RuntimeError::InvalidTransaction(format!("Failed to store deployer: {}", e)))?;
+        self.storage
+            .put_contract_code(&deploy_result.contract_id, &deploy_result.wasm_bytes)
+            .map_err(|e| {
+                RuntimeError::InvalidTransaction(format!("Failed to store contract code: {}", e))
+            })?;
+        self.storage
+            .put_contract_deployer(&deploy_result.contract_id, &deploy_result.deployer)
+            .map_err(|e| {
+                RuntimeError::InvalidTransaction(format!("Failed to store deployer: {}", e))
+            })?;
 
         // Apply init side effects to storage
         for (key, val) in deploy_result.side_effects.storage_updates.writes {
-            self.storage.contract_storage_write(&deploy_result.contract_id, &key, &val)
-                .map_err(|e| RuntimeError::InvalidTransaction(format!("Failed to write init storage: {}", e)))?;
+            self.storage.contract_storage_write(&deploy_result.contract_id, &key, &val).map_err(
+                |e| {
+                    RuntimeError::InvalidTransaction(format!("Failed to write init storage: {}", e))
+                },
+            )?;
         }
         for key in deploy_result.side_effects.storage_updates.deletes {
-            self.storage.contract_storage_remove(&deploy_result.contract_id, &key)
-                .map_err(|e| RuntimeError::InvalidTransaction(format!("Failed to delete init storage: {}", e)))?;
+            self.storage.contract_storage_remove(&deploy_result.contract_id, &key).map_err(
+                |e| {
+                    RuntimeError::InvalidTransaction(format!(
+                        "Failed to delete init storage: {}",
+                        e
+                    ))
+                },
+            )?;
         }
 
         info!(
@@ -1315,4 +1413,91 @@ pub struct RuntimeNodeStatus {
     pub metrics: crate::metrics::PerformanceMetrics,
     pub uptime_seconds: u64,
     pub peer_count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Address, Transaction, TransactionPayload, TransactionSignature};
+    use ed25519_dalek::SigningKey;
+    use rand::RngCore;
+
+    fn make_key() -> (SigningKey, PublicKey) {
+        let mut sk_bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut sk_bytes);
+        let sk = SigningKey::from_bytes(&sk_bytes);
+        let pk = PublicKey::from(sk.verifying_key());
+        (sk, pk)
+    }
+
+    fn dummy_tx(sender: PublicKey, nonce: u64, timestamp: u64) -> Transaction {
+        let mut tx = Transaction {
+            hash: [0u8; 32],
+            sender,
+            nonce,
+            timestamp,
+            recipient: Address::Wallet(sender),
+            payload: TransactionPayload::Data { data: vec![] },
+            signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+            gas_limit: 100000,
+            gas_price: 0,
+            priority: 0,
+            metadata: None,
+        };
+        tx.hash = tx.calculate_hash().unwrap();
+        tx
+    }
+
+    #[test]
+    fn test_mempool_rate_limiting_count() {
+        let mut mempool = Mempool::new(1000);
+        mempool.max_tx_per_sender = 3;
+        let (_, pk) = make_key();
+
+        assert!(mempool.insert(dummy_tx(pk, 1, 100)).is_ok());
+        assert!(mempool.insert(dummy_tx(pk, 2, 101)).is_ok());
+        assert!(mempool.insert(dummy_tx(pk, 3, 102)).is_ok());
+        assert!(mempool.insert(dummy_tx(pk, 4, 103)).is_err());
+        assert_eq!(mempool.len(), 3);
+    }
+
+    #[test]
+    fn test_mempool_rate_limiting_time_window() {
+        let mut mempool = Mempool::new(1000);
+        mempool.max_tx_per_sender_per_second = 2;
+        let (_, pk) = make_key();
+        let now =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+
+        assert!(mempool.insert(dummy_tx(pk, 1, now)).is_ok());
+        assert!(mempool.insert(dummy_tx(pk, 2, now)).is_ok());
+        assert!(mempool.insert(dummy_tx(pk, 3, now)).is_err());
+
+        let (_, pk2) = make_key();
+        assert!(mempool.insert(dummy_tx(pk2, 1, now)).is_ok());
+    }
+
+    #[test]
+    fn test_mempool_duplicate_rejected() {
+        let mut mempool = Mempool::new(1000);
+        let (_, pk) = make_key();
+        let mut tx = dummy_tx(pk, 1, 100);
+        tx.hash = tx.calculate_hash().unwrap();
+
+        assert!(mempool.insert(tx.clone()).is_ok());
+        assert!(mempool.insert(tx).is_err());
+    }
+
+    #[test]
+    fn test_mempool_eviction() {
+        let mut mempool = Mempool::with_ttl(2, 1);
+        let (_, pk) = make_key();
+
+        assert!(mempool.insert(dummy_tx(pk, 1, 100)).is_ok());
+        assert!(mempool.insert(dummy_tx(pk, 2, 101)).is_ok());
+
+        let (_, pk2) = make_key();
+        assert!(mempool.insert(dummy_tx(pk2, 1, 102)).is_ok());
+        assert_eq!(mempool.len(), 2);
+    }
 }

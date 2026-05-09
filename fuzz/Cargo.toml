@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 baals = { path = ".." }
+bincode = "1.3"
 
 [[bin]]
 name = "fuzz_transaction"
@@ -26,5 +27,29 @@ doc = false
 [[bin]]
 name = "fuzz_block"
 path = "fuzz_targets/fuzz_block.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ledger_state_transition"
+path = "fuzz_targets/fuzz_ledger_state_transition.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_contract_execution"
+path = "fuzz_targets/fuzz_contract_execution.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_sync_messages"
+path = "fuzz_targets/fuzz_sync_messages.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_merkle_proof"
+path = "fuzz_targets/fuzz_merkle_proof.rs"
 test = false
 doc = false

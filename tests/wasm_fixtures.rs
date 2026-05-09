@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 pub fn make_self_calling_module() -> Vec<u8> {
     wat::parse_str(
         r#"(module
@@ -22,6 +23,7 @@ pub fn make_self_calling_module() -> Vec<u8> {
     .unwrap()
 }
 
+#[allow(dead_code)]
 pub fn make_storage_write_read_module() -> Vec<u8> {
     wat::parse_str(
         r#"(module
@@ -40,6 +42,7 @@ pub fn make_storage_write_read_module() -> Vec<u8> {
     .unwrap()
 }
 
+#[allow(dead_code)]
 pub fn make_inter_contract_callee() -> Vec<u8> {
     wat::parse_str(
         r#"(module
@@ -60,6 +63,7 @@ pub fn make_inter_contract_callee() -> Vec<u8> {
 /// Create a WASM module that calls another contract at a hardcoded ID.
 /// `callee_id` is the 32-byte contract ID to call via `baals_call_contract`
 /// with method "main" and no args.
+#[allow(dead_code)]
 pub fn make_inter_contract_caller(callee_id: &[u8; 32]) -> Vec<u8> {
     let escaped: String = callee_id.iter().map(|b| format!("\\{:02X}", b)).collect();
     let wat_source = format!(
@@ -87,6 +91,7 @@ pub fn make_inter_contract_caller(callee_id: &[u8; 32]) -> Vec<u8> {
     wat::parse_str(&wat_source).unwrap()
 }
 
+#[allow(dead_code)]
 pub fn create_test_wasm_module() -> Vec<u8> {
     vec![
         0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f,

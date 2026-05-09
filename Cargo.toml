@@ -3,6 +3,11 @@ name = "baals"
 exclude = ["fuzz"]
 version = "0.1.0"
 edition = "2021"
+description = "BaaLS - Blockchain as a Local Service: an embedded blockchain node with WASM smart contracts, PoA consensus, and dual-storage backend"
+license = "MIT"
+repository = "https://github.com/anomalyco/baals"
+homepage = "https://baals.dev"
+keywords = ["blockchain", "wasm", "embedded", "consensus", "ledger"]
 
 [lib]
 crate-type = ["lib", "cdylib"]
@@ -42,6 +47,7 @@ tokio-rustls = "0.26"
 rustls-pemfile = "2"
 rcgen = "0.13"
 mdns-sd = { version = "0.11", optional = true }
+argon2 = "0.5.3"
 
 [dev-dependencies]
 tempfile = "3.8"

@@ -33,9 +33,12 @@ runtime. The primary security boundaries are:
    verified. P2P connections must be authenticated (TLS + cert pinning
    or Ed25519 challenge-response).
 
-3. **Key Management** — Private keys must be encrypted at rest using
-   AES-256-GCM with strong KDF (PBKDF2 >= 600k iterations). Key files
-   must be created with 0600 permissions and atomic writes.
+3. **Key Management** — Private keys (keystore + consensus) must be
+   encrypted at rest using AES-256-GCM with strong KDF (Argon2id or
+   PBKDF2 >= 600k iterations). Key files must be created with 0600
+   permissions, atomic writes, and symlink rejection. The consensus key
+   can be provided via `BAALS_CONSENSUS_KEY` env var (for K8s/Docker
+   secrets) or encrypted with `BAALS_CONSENSUS_PASSWORD`.
 
 4. **Storage Integrity** — The Merkle state root must always match the
    canonical state. All state transitions must be atomic per block.
@@ -55,10 +58,18 @@ runtime. The primary security boundaries are:
 - [x] Keystore atomic writes + 0600 permissions (Unix)
 - [x] Keystore symlink rejection
 - [x] Keystore plaintext zeroization
-- [x] FFI shutdown and reinit detection
-- [x] CI: cargo fmt, clippy -D warnings, cargo test, cargo audit
-- [ ] Fuzzing for transaction decoding, block import, sync messages
-- [ ] Argon2id/scrypt migration path for keystore KDF
+- [x] Consensus key encrypted at rest (AES-256-GCM + Argon2id, env var or K8s secret)
+- [x] Per-peer P2P rate limiting (token bucket)
+- [x] P2P message size limits (16MB max)
+- [x] RedbStorage write-ahead log for crash recovery
+- [x] Backup encryption (AES-256-GCM via BAALS_BACKUP_KEY)
+- [x] Log path traversal protection
+- [x] PID file advisory locking
+- [x] Nonce-gap DoS protection (evict after 3 skipped cycles)
+- [x] FFI pointer debug assertions
+- [x] Docker: non-root user, readOnlyRootFilesystem, K8s: PersistentVolumeClaim, securityContext
+- [x] CI: cargo fmt, clippy -D warnings, cargo test, cargo audit, cargo deny
+- [x] Fuzzing for transaction decoding, block import, sync messages
 - [ ] Formal WASM security audit
 
 ## Dependencies

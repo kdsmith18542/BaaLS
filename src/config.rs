@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::io::Write;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -332,6 +333,16 @@ impl Config {
     }
 }
 
+/// Checks that the given path does not escape the data directory via `..` components.
+fn is_safe_path(path: &Path) -> bool {
+    for component in path.components() {
+        if matches!(component, Component::ParentDir) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Initialize logging based on configuration. Uses `env_logger` with optional JSON output.
 ///
 /// If `config.logging.json_format` is true, each log line is emitted as:
@@ -382,6 +393,11 @@ pub fn setup_logging(config: &Config, default_level: &str) -> Result<(), ConfigE
 
     if config.logging.log_max_size_mb > 0 && !config.logging.file.is_empty() {
         let log_path = PathBuf::from(&config.logging.file);
+        if !is_safe_path(&log_path) {
+            return Err(ConfigError::Invalid(
+                "Log file path must not contain '..' components (path traversal)".to_string(),
+            ));
+        }
         let max_size = config.logging.log_max_size_mb * 1024 * 1024;
         let max_files = config.logging.log_max_files;
         let writer = RotatingFileWriter::new(log_path, max_size, max_files)

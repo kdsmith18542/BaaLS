@@ -33,6 +33,18 @@ data:
     file = "baals.log"
     json_format = false
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: baals-data
+  namespace: baals
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -50,6 +62,7 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
+        fsGroup: 1000
       containers:
       - name: baals
         image: baals:latest
@@ -58,9 +71,17 @@ spec:
         ports:
         - containerPort: 8080
           name: http
+        env:
+        - name: BAALS_CONSENSUS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: baals-consensus-key
+              key: password
+              optional: true
         volumeMounts:
         - name: config
           mountPath: /etc/baals
+          readOnly: true
         - name: data
           mountPath: /data
         resources:
@@ -70,6 +91,11 @@ spec:
           requests:
             cpu: "100m"
             memory: "128Mi"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
         readinessProbe:
           httpGet:
             path: /health
@@ -87,7 +113,8 @@ spec:
         configMap:
           name: baals-config
       - name: data
-        emptyDir: {}
+        persistentVolumeClaim:
+          claimName: baals-data
 ---
 apiVersion: v1
 kind: Service

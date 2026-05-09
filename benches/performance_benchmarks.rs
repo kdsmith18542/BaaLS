@@ -1,5 +1,5 @@
 use baals::*;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use sha2::Digest;
 use tempfile::TempDir;
 
@@ -44,6 +44,7 @@ fn create_test_transaction(
             .as_secs(),
         signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
         gas_limit: 100000,
+        gas_price: 0,
         priority: 0,
         metadata: None,
     };
@@ -66,7 +67,8 @@ fn benchmark_transaction_submission(c: &mut Criterion) {
 
         b.iter(|| {
             nonce += 1;
-            let tx = create_test_transaction(&public_key, &signing_key, black_box(nonce));
+            let tx =
+                create_test_transaction(&public_key, &signing_key, std::hint::black_box(nonce));
             let _ = runtime.submit_transaction(tx);
         });
     });
@@ -99,7 +101,7 @@ fn benchmark_block_production(c: &mut Criterion) {
 
         b.iter(|| {
             let block = tokio_runtime.block_on(async { runtime.produce_block().await.unwrap() });
-            black_box(block);
+            std::hint::black_box(block);
         });
     });
 
@@ -120,7 +122,7 @@ fn benchmark_block_production(c: &mut Criterion) {
         let tokio_runtime = tokio::runtime::Runtime::new().unwrap();
         b.iter(|| {
             let block = tokio_runtime.block_on(async { runtime.produce_block().await.unwrap() });
-            black_box(block);
+            std::hint::black_box(block);
         });
     });
 
@@ -150,7 +152,7 @@ fn benchmark_storage_operations(c: &mut Criterion) {
         b.iter(|| {
             storage.put_block(&test_block).unwrap();
             let retrieved = storage.get_block(&test_block.hash).unwrap().unwrap();
-            black_box(retrieved);
+            std::hint::black_box(retrieved);
         });
     });
 
@@ -165,7 +167,7 @@ fn benchmark_storage_operations(c: &mut Criterion) {
         b.iter(|| {
             storage.put_account(&test_key, &test_account).unwrap();
             let retrieved = storage.get_account(&test_key).unwrap().unwrap();
-            black_box(retrieved);
+            std::hint::black_box(retrieved);
         });
     });
 
@@ -189,6 +191,7 @@ fn benchmark_storage_operations(c: &mut Criterion) {
                 .as_secs(),
             signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
             gas_limit: 100000,
+            gas_price: 0,
             priority: 0,
             metadata: None,
         };
@@ -197,7 +200,7 @@ fn benchmark_storage_operations(c: &mut Criterion) {
             storage.put_transaction(&test_tx).unwrap();
             storage.index_transaction(&test_tx.hash, &[2u8; 32], 0).unwrap();
             let retrieved = storage.get_transaction(&test_tx.hash).unwrap().unwrap();
-            black_box(retrieved);
+            std::hint::black_box(retrieved);
         });
     });
 
@@ -220,7 +223,7 @@ fn benchmark_contract_operations(c: &mut Criterion) {
             let contract_id = contract_engine
                 .deploy_contract(&deployer, 0, &wasm_bytes, None, &storage, 1_000_000)
                 .unwrap();
-            black_box(contract_id);
+            std::hint::black_box(contract_id);
         });
     });
 
@@ -247,7 +250,7 @@ fn benchmark_contract_operations(c: &mut Criterion) {
                     1_000_000,
                 )
                 .unwrap();
-            black_box(result);
+            std::hint::black_box(result);
         });
     });
 
@@ -274,6 +277,7 @@ fn benchmark_cryptographic_operations(c: &mut Criterion) {
                 .as_secs(),
             signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
             gas_limit: 100000,
+            gas_price: 0,
             priority: 0,
             metadata: None,
         };
@@ -281,7 +285,7 @@ fn benchmark_cryptographic_operations(c: &mut Criterion) {
         b.iter(|| {
             tx.hash = tx.calculate_hash().unwrap();
             tx.sign(&signing_key).unwrap();
-            black_box(&tx);
+            std::hint::black_box(&tx);
         });
     });
 
@@ -290,7 +294,7 @@ fn benchmark_cryptographic_operations(c: &mut Criterion) {
 
         b.iter(|| {
             let hash = sha2::Sha256::digest(&data);
-            black_box(hash);
+            std::hint::black_box(hash);
         });
     });
 
@@ -332,7 +336,7 @@ fn benchmark_mempool_operations(c: &mut Criterion) {
 
         b.iter(|| {
             let pending_txs = runtime.get_pending_transactions().unwrap();
-            black_box(pending_txs);
+            std::hint::black_box(pending_txs);
         });
     });
 
@@ -362,7 +366,7 @@ fn benchmark_consensus_operations(c: &mut Criterion) {
 
         b.iter(|| {
             let result = consensus.validate_block(&block);
-            let _ = black_box(result);
+            let _ = std::hint::black_box(result);
         });
     });
 

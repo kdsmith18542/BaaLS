@@ -81,18 +81,11 @@ contract_engine.set_resource_limits(
 
 ### Storage Optimization
 
-BaaLS uses Sled for storage. Optimize performance with proper configuration:
-
-```rust
-// Configure Sled for optimal performance
-let config = sled::Config::default()
-    .path("./data")
-    .cache_capacity(1024 * 1024 * 1024) // 1GB cache
-    .flush_every_ms(Some(100))
-    .compression_factor(8);
-
-let storage = SledStorage::with_config(config)?;
-```
+BaaLS uses Sled or ReDB for storage. Optimize performance by:
+- Using SSDs for storage
+- Configuring cache sizes (via config.toml)
+- Running regular compaction
+- Monitoring storage size
 
 **Optimization Tips:**
 - Use SSDs for storage
@@ -104,17 +97,10 @@ let storage = SledStorage::with_config(config)?;
 ### Memory Management
 
 Optimize memory usage for high-throughput applications:
-
-```rust
-// Configure memory limits
-let resource_limits = ResourceLimits {
-    memory_limit: 128 * 1024 * 1024, // 128MB
-    table_limit: 20000,
-    stack_limit: 2000,
-    execution_timeout: Duration::from_secs(30),
-    gas_limit: 2_000_000,
-};
-```
+- Monitor memory usage via `baalsd dev monitor --detailed`
+- Increase WASM memory limits in config.toml if needed
+- Configure garbage collection intervals
+- Use streaming for large data operations
 
 **Memory Optimization:**
 - Monitor memory usage patterns
@@ -125,32 +111,22 @@ let resource_limits = ResourceLimits {
 ### Network Optimization
 
 Optimize network performance for distributed deployments:
-
-```rust
-// Configure network parameters
-let network_config = NetworkConfig {
-    max_connections: 100,
-    connection_timeout: Duration::from_secs(30),
-    keep_alive_interval: Duration::from_secs(60),
-    max_message_size: 1024 * 1024, // 1MB
-};
-```
+- Configure P2P peers via `--peer` flag in config.toml
+- Enable TLS for encrypted communication
+- Monitor peer connections via `baalsd p2p peers`
+- Adjust timeout intervals in config.toml
 
 ## Monitoring and Observability
 
 ### Metrics Collection
 
-BaaLS provides comprehensive metrics for monitoring:
+BaaLS provides comprehensive metrics for monitoring via the Runtime API:
 
-```rust
-// Initialize metrics collector
-let metrics_collector = MetricsCollector::new();
-metrics_collector.start_background_monitoring();
-
-// Record custom metrics
-metrics_collector.record_block_processing(duration);
-metrics_collector.record_transaction_validation(duration);
-metrics_collector.record_error("validation_error");
+```bash
+# Query metrics
+baalsd dev performance-report --data-dir ./data
+baalsd dev storage-stats --data-dir ./data
+baalsd dev monitor --data-dir ./data --detailed
 ```
 
 **Key Metrics to Monitor:**
@@ -166,16 +142,12 @@ metrics_collector.record_error("validation_error");
 
 Implement comprehensive logging for debugging and auditing:
 
-```rust
-// Configure logging
-env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-    .format_timestamp_millis()
-    .init();
+```bash
+# Run with info-level logging (default)
+RUST_LOG=info baalsd node start --data-dir ./data
 
-// Log important events
-info!("Block produced: height={}, hash={}", block.index, hex::encode(block.hash));
-warn!("High memory usage: {}MB", memory_usage_mb);
-error!("Transaction validation failed: {}", error);
+# Run with debug-level logging
+RUST_LOG=debug baalsd node start --data-dir ./data
 ```
 
 **Logging Best Practices:**
@@ -187,22 +159,20 @@ error!("Transaction validation failed: {}", error);
 
 ### Health Checks
 
-Implement health check endpoints for monitoring:
+BaaLS provides health status via HTTP API and CLI commands:
 
-```rust
-// Health check endpoint
-async fn health_check() -> Result<HealthStatus, Error> {
-    let metrics = metrics_collector.get_metrics();
-    let storage_stats = storage.get_storage_stats()?;
-    
-    Ok(HealthStatus {
-        status: "healthy",
-        uptime: metrics.uptime,
-        version: env!("CARGO_PKG_VERSION"),
-        storage_healthy: storage_stats.total_blocks > 0,
-        memory_usage: get_memory_usage(),
-    })
-}
+```bash
+# Check node status
+baalsd node status --data-dir ./data
+
+# Check storage health
+baalsd db verify --data-dir ./data
+
+# Check chain validity
+baalsd dev validate-chain --data-dir ./data
+
+# HTTP health endpoint (if server is running)
+curl http://localhost:8080/health
 ```
 
 ## Deployment Strategies
@@ -214,7 +184,7 @@ For simple use cases, deploy as a single node:
 ```bash
 # Build and run
 cargo build --release
-./target/release/baals dev start --data-dir ./data
+./target/release/baalsd dev start --data-dir ./data
 ```
 
 ### Multi-Node Deployment
@@ -223,10 +193,10 @@ For distributed deployments, configure multiple nodes:
 
 ```bash
 # Node 1
-./target/release/baals dev start --data-dir ./node1 --port 8080
+./target/release/baalsd dev start --data-dir ./node1 --port 8080
 
 # Node 2
-./target/release/baals dev start --data-dir ./node2 --port 8081 --peer 127.0.0.1:8080
+./target/release/baalsd dev start --data-dir ./node2 --port 8081 --peer 127.0.0.1:8080
 ```
 
 ### Container Deployment
@@ -286,22 +256,17 @@ spec:
 
 ### Backup and Recovery
 
-Implement regular backup procedures:
+Implement regular backup procedures using CLI:
 
-```rust
-// Create backup
-async fn create_backup(storage: &SledStorage, backup_path: &str) -> Result<(), Error> {
-    storage.backup(backup_path).await?;
-    info!("Backup created: {}", backup_path);
-    Ok(())
-}
+```bash
+# Create backup
+baalsd db backup --data-dir ./data --output backup.baals
 
-// Restore from backup
-async fn restore_backup(storage: &SledStorage, backup_path: &str) -> Result<(), Error> {
-    storage.restore(backup_path).await?;
-    info!("Backup restored: {}", backup_path);
-    Ok(())
-}
+# Restore from backup
+baalsd db restore --data-dir ./data --input backup.baals
+
+# Verify backup integrity
+baalsd db verify --data-dir ./data
 ```
 
 **Backup Schedule:**
@@ -383,16 +348,16 @@ Use built-in debugging tools:
 
 ```bash
 # Show detailed metrics
-baals monitor detailed
+baalsd dev monitor --detailed
 
 # Show storage statistics
-baals dev storage-stats
+baalsd dev storage-stats --data-dir ./data
 
 # Show performance report
-baals dev performance-report
+baalsd dev performance-report --data-dir ./data
 
 # Validate chain integrity
-baals dev validate-chain
+baalsd dev validate-chain --data-dir ./data
 ```
 
 ## Best Practices

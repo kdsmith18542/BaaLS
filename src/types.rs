@@ -563,6 +563,7 @@ pub struct Transaction {
     pub payload: TransactionPayload,
     pub signature: TransactionSignature,
     pub gas_limit: u64,
+    pub gas_price: u64,
     pub priority: u8,
     pub metadata: Option<std::collections::BTreeMap<String, String>>,
 }
@@ -600,6 +601,30 @@ impl ContractId {
 
     pub fn to_bytes(&self) -> [u8; 32] {
         self.id
+    }
+}
+
+/// Maps a contract ID to a deterministic, signature-safe account key.
+///
+/// Some contract IDs are not valid Ed25519 points, while account storage keys use `PublicKey`.
+/// This helper keeps contract-account addressing deterministic without relying on raw key validity.
+pub fn contract_account_public_key(contract_id: &ContractId) -> PublicKey {
+    let raw = contract_id.to_bytes();
+    if let Ok(pk) = PublicKey::from_bytes(&raw) {
+        return pk;
+    }
+
+    let mut counter = 0u32;
+    loop {
+        let mut hasher = Sha256::new();
+        hasher.update(b"baals:contract-account:v1");
+        hasher.update(raw);
+        hasher.update(counter.to_be_bytes());
+        let candidate: [u8; 32] = hasher.finalize().into();
+        if let Ok(pk) = PublicKey::from_bytes(&candidate) {
+            return pk;
+        }
+        counter = counter.wrapping_add(1);
     }
 }
 
@@ -708,6 +733,7 @@ impl Transaction {
         hasher.update(self.nonce.to_le_bytes());
         hasher.update(self.timestamp.to_le_bytes());
         hasher.update(self.gas_limit.to_le_bytes());
+        hasher.update(self.gas_price.to_le_bytes());
         hasher.update(self.priority.to_le_bytes());
 
         // Serialize recipient deterministically
@@ -777,6 +803,7 @@ mod tests {
             payload: TransactionPayload::Data { data: vec![1, 2, 3] },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
             gas_limit: 0,
+            gas_price: 0,
             priority: 0,
             metadata: None,
         };
@@ -789,6 +816,7 @@ mod tests {
             payload: TransactionPayload::Data { data: vec![4, 5, 6] },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
             gas_limit: 0,
+            gas_price: 0,
             priority: 0,
             metadata: None,
         };
@@ -833,6 +861,7 @@ mod tests {
             payload: TransactionPayload::Data { data: vec![1, 2, 3] },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
             gas_limit: 0,
+            gas_price: 0,
             priority: 0,
             metadata: None,
         };
@@ -1013,5 +1042,62 @@ mod tests {
         let proof_a = tree.generate_proof(key_a);
         assert!(SparseMerkleTree::verify_proof(key_a, b"alpha", &proof_a, root));
         assert!(!SparseMerkleTree::verify_proof(key_a, b"wrong", &proof_a, root));
+    }
+
+    #[test]
+    fn test_gas_price_affects_hash() {
+        let mut sk_bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut sk_bytes);
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
+        let pk = PublicKey::from(signing_key.verifying_key());
+
+        let mut tx1 = Transaction {
+            hash: [0; 32],
+            sender: pk,
+            nonce: 1,
+            timestamp: 1000,
+            recipient: Address::Wallet(pk),
+            payload: TransactionPayload::Transfer { amount: 100 },
+            signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
+            gas_limit: 100000,
+            gas_price: 0,
+            priority: 0,
+            metadata: None,
+        };
+        let mut tx2 = tx1.clone();
+        tx2.gas_price = 10;
+        tx1.hash = tx1.calculate_hash().unwrap();
+        tx2.hash = tx2.calculate_hash().unwrap();
+        assert_ne!(tx1.hash, tx2.hash, "different gas_price should produce different hashes");
+    }
+
+    #[test]
+    fn test_gas_price_serialization_roundtrip() {
+        let mut sk_bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut sk_bytes);
+        let sk = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
+        let pk = PublicKey::from(sk.verifying_key());
+        let tx = Transaction {
+            hash: [0; 32],
+            sender: pk,
+            nonce: 1,
+            timestamp: 1000,
+            recipient: Address::Wallet(pk),
+            payload: TransactionPayload::Data { data: vec![1, 2, 3] },
+            signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
+            gas_limit: 100000,
+            gas_price: 42,
+            priority: 0,
+            metadata: None,
+        };
+        let encoded = bincode::serialize(&tx).unwrap();
+        let decoded: Transaction = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(decoded.gas_price, 42);
+        assert_eq!(decoded.gas_limit, 100000);
+
+        let json = serde_json::to_string(&tx).unwrap();
+        let from_json: Transaction = serde_json::from_str(&json).unwrap();
+        assert_eq!(from_json.gas_price, 42);
+        assert_eq!(from_json.gas_limit, 100000);
     }
 }

@@ -177,11 +177,19 @@ impl BaaLSSdk {
             gas_limit,
         )?;
         // Store contract code (immutable, idempotent)
-        self.runtime.storage().put_contract_code(&deploy_result.contract_id, &deploy_result.wasm_bytes)?;
-        self.runtime.storage().put_contract_deployer(&deploy_result.contract_id, &deploy_result.deployer)?;
+        self.runtime
+            .storage()
+            .put_contract_code(&deploy_result.contract_id, &deploy_result.wasm_bytes)?;
+        self.runtime
+            .storage()
+            .put_contract_deployer(&deploy_result.contract_id, &deploy_result.deployer)?;
         // Apply init side effects
         for (key, val) in deploy_result.side_effects.storage_updates.writes {
-            self.runtime.storage().contract_storage_write(&deploy_result.contract_id, &key, &val)?;
+            self.runtime.storage().contract_storage_write(
+                &deploy_result.contract_id,
+                &key,
+                &val,
+            )?;
         }
         for key in deploy_result.side_effects.storage_updates.deletes {
             self.runtime.storage().contract_storage_remove(&deploy_result.contract_id, &key)?;

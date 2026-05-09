@@ -22,6 +22,55 @@ const TX_COUNT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tx_c
 const META_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("meta");
 const STATE_NODES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("state_nodes");
 
+const ENCRYPTED_BACKUP_MAGIC: &str = "BAALSENC1\n";
+
+fn detect_encrypted_backup(path: &std::path::Path) -> bool {
+    if let Ok(mut f) = std::fs::File::open(path) {
+        let mut magic = [0u8; 10];
+        use std::io::Read;
+        if f.read_exact(&mut magic).is_ok() {
+            return magic == ENCRYPTED_BACKUP_MAGIC.as_bytes();
+        }
+    }
+    false
+}
+
+fn decrypt_backup(path: &std::path::Path) -> Result<String, StorageError> {
+    use aes_gcm::aead::Aead;
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+    use std::io::Read;
+    let key_hex = std::env::var("BAALS_BACKUP_KEY").map_err(|_| {
+        StorageError::IndexError(
+            "BAALS_BACKUP_KEY not set for encrypted backup restore".to_string(),
+        )
+    })?;
+    let key_bytes = hex::decode(key_hex.trim())
+        .map_err(|e| StorageError::IndexError(format!("Invalid BAALS_BACKUP_KEY hex: {}", e)))?;
+    if key_bytes.len() != 32 {
+        return Err(StorageError::IndexError("BAALS_BACKUP_KEY must be 32 bytes".to_string()));
+    }
+    let mut key_arr = [0u8; 32];
+    key_arr.copy_from_slice(&key_bytes);
+
+    let mut file = std::fs::File::open(path).map_err(map_err)?;
+    // Skip magic
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).map_err(map_err)?;
+    if buf.len() < 10 + 12 {
+        return Err(StorageError::IndexError("Truncated encrypted backup".to_string()));
+    }
+    let nonce_bytes = &buf[10..22];
+    let ciphertext = &buf[22..];
+
+    let cipher = Aes256Gcm::new_from_slice(&key_arr)
+        .map_err(|e| StorageError::IndexError(format!("AES-256 init: {}", e)))?;
+    let plaintext = cipher.decrypt(Nonce::from_slice(nonce_bytes), ciphertext).map_err(|_| {
+        StorageError::IndexError("Backup decryption failed (wrong key?)".to_string())
+    })?;
+    String::from_utf8(plaintext)
+        .map_err(|_| StorageError::IndexError("Backup contains invalid UTF-8".to_string()))
+}
+
 fn map_err(e: impl std::fmt::Display) -> StorageError {
     StorageError::IndexError(e.to_string())
 }
@@ -48,7 +97,10 @@ impl RedbStorage {
             Self::init_tables(&db)?;
             (path.to_path_buf(), db)
         };
-        Ok(Self { db: Arc::new(std::sync::RwLock::new(Arc::new(db))), db_path })
+        let storage = Self { db: Arc::new(std::sync::RwLock::new(Arc::new(db))), db_path };
+        // Recover any pending batches from previous crash (WAL entries)
+        storage.recover_pending_batches()?;
+        Ok(storage)
     }
 
     fn db_guard(&self) -> Result<std::sync::RwLockReadGuard<'_, Arc<Database>>, StorageError> {
@@ -166,6 +218,103 @@ impl RedbStorage {
             txn.open_table(TX_COUNT_TABLE).map_err(map_err)?;
             txn.open_table(META_TABLE).map_err(map_err)?;
             txn.open_table(STATE_NODES_TABLE).map_err(map_err)?;
+        }
+        txn.commit().map_err(map_err)?;
+        Ok(())
+    }
+
+    fn recover_pending_batches(&self) -> Result<(), StorageError> {
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
+        let table = txn.open_table(META_TABLE).map_err(map_err)?;
+        let mut pending_batches: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let iter = table.iter().map_err(map_err)?;
+        for item in iter {
+            let (k, v) = item.map_err(map_err)?;
+            let key = String::from_utf8_lossy(k.value());
+            if key.starts_with("batch:") {
+                pending_batches.push((k.value().to_vec(), v.value().to_vec()));
+            }
+        }
+        drop(table);
+        drop(txn);
+
+        for (key_bytes, batch_bytes) in pending_batches {
+            if let Ok(batch) = bincode::deserialize::<StorageBatch>(&batch_bytes) {
+                let result = self.apply_batch_inner(batch);
+                if result.is_ok() {
+                    if let Ok(wal_txn) = self.db_guard()?.begin_write() {
+                        if let Ok(mut t) = wal_txn.open_table(META_TABLE) {
+                            let _ = t.remove(key_bytes.as_slice());
+                        }
+                        let _ = wal_txn.commit();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply batch without WAL (used by WAL recovery itself)
+    fn apply_batch_inner(&self, batch: StorageBatch) -> Result<(), StorageError> {
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
+        {
+            let mut blocks = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
+            let mut txs_table = txn.open_table(TXS_TABLE).map_err(map_err)?;
+            let mut accounts = txn.open_table(ACCOUNTS_TABLE).map_err(map_err)?;
+            let mut contracts = txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
+            let mut pending = txn.open_table(PENDING_TABLE).map_err(map_err)?;
+
+            for op in &batch.ops {
+                match op {
+                    StorageOperation::PutBlock(k, v) => {
+                        blocks.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::PutAccount(k, v) => {
+                        accounts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::PutChainState(k, v) => {
+                        accounts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::PutTransaction(k, v) => {
+                        txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::PutTxIndex(k, v) => {
+                        txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::PutContractCode(k, v) => {
+                        contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::PutContractDeployer(k, v) => {
+                        contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::PutContractStorage(k, v) => {
+                        contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::DeleteAccount(addr) => {
+                        accounts.remove(addr.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::DeleteContractStorage(key) => {
+                        contracts.remove(key.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::PutContractEvent(key, val) => {
+                        let mut events_table = txn.open_table(EVENTS_TABLE).map_err(map_err)?;
+                        events_table.insert(key.as_slice(), val.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::PutMempool(k, v) => {
+                        pending.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::DeleteMempool(k) => {
+                        pending.remove(k.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::DeleteTransaction(k) => {
+                        txs_table.remove(k.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::PutStateNode(k, v) => {
+                        let mut state_nodes = txn.open_table(STATE_NODES_TABLE).map_err(map_err)?;
+                        state_nodes.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                    }
+                }
+            }
         }
         txn.commit().map_err(map_err)?;
         Ok(())
@@ -485,14 +634,23 @@ impl Storage for RedbStorage {
         let txn = db.begin_read().map_err(map_err)?;
         let table = txn.open_table(TX_COUNT_TABLE).map_err(map_err)?;
         let key = address.to_bytes();
-        Ok(table.get(key.as_slice()).map_err(map_err)?.and_then(|v| {
-            let mut arr = [0u8; 8];
-            arr.copy_from_slice(v.value());
-            Some(u64::from_le_bytes(arr))
-        }).unwrap_or(0))
+        Ok(table
+            .get(key.as_slice())
+            .map_err(map_err)?
+            .map(|v| {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(v.value());
+                u64::from_le_bytes(arr)
+            })
+            .unwrap_or(0))
     }
 
-    fn put_state_node(&self, level: u16, path: &[u8; 32], hash: &[u8; 32]) -> Result<(), StorageError> {
+    fn put_state_node(
+        &self,
+        level: u16,
+        path: &[u8; 32],
+        hash: &[u8; 32],
+    ) -> Result<(), StorageError> {
         let mut key = level.to_be_bytes().to_vec();
         key.extend_from_slice(path);
         let db = self.db_guard()?;
@@ -505,7 +663,11 @@ impl Storage for RedbStorage {
         Ok(())
     }
 
-    fn get_state_node(&self, level: u16, path: &[u8; 32]) -> Result<Option<[u8; 32]>, StorageError> {
+    fn get_state_node(
+        &self,
+        level: u16,
+        path: &[u8; 32],
+    ) -> Result<Option<[u8; 32]>, StorageError> {
         let mut key = level.to_be_bytes().to_vec();
         key.extend_from_slice(path);
         let db = self.db_guard()?;
@@ -805,68 +967,100 @@ impl Storage for RedbStorage {
     }
 
     fn apply_batch(&self, batch: StorageBatch) -> Result<(), StorageError> {
-        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
+        // Write-ahead log for crash recovery (same pattern as SledStorage)
+        let batch_id = format!(
+            "batch:{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
         {
-            let mut blocks = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
-            let mut txs_table = txn.open_table(TXS_TABLE).map_err(map_err)?;
-            let mut accounts = txn.open_table(ACCOUNTS_TABLE).map_err(map_err)?;
-            let mut contracts = txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
-            let mut pending = txn.open_table(PENDING_TABLE).map_err(map_err)?;
+            let wal_txn = self.db_guard()?.begin_write().map_err(map_err)?;
+            let batch_bytes = bincode::serialize(&batch)?;
+            {
+                let mut wal_table = wal_txn.open_table(META_TABLE).map_err(map_err)?;
+                wal_table.insert(batch_id.as_bytes(), batch_bytes.as_slice()).map_err(map_err)?;
+            }
+            wal_txn.commit().map_err(map_err)?;
+        }
 
-            for op in &batch.ops {
-                match op {
-                    StorageOperation::PutBlock(k, v) => {
-                        blocks.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
-                    }
-                    StorageOperation::PutAccount(k, v) => {
-                        accounts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
-                    }
-                    StorageOperation::PutChainState(k, v) => {
-                        accounts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
-                    }
-                    StorageOperation::PutTransaction(k, v) => {
-                        txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
-                    }
-                    StorageOperation::PutTxIndex(k, v) => {
-                        txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
-                    }
-                    StorageOperation::PutContractCode(k, v) => {
-                        contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
-                    }
-                    StorageOperation::PutContractDeployer(k, v) => {
-                        contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
-                    }
-                    StorageOperation::PutContractStorage(k, v) => {
-                        contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
-                    }
-                    StorageOperation::DeleteAccount(addr) => {
-                        accounts.remove(addr.as_slice()).map_err(map_err)?;
-                    }
-                    StorageOperation::DeleteContractStorage(key) => {
-                        contracts.remove(key.as_slice()).map_err(map_err)?;
-                    }
-                    StorageOperation::PutContractEvent(key, val) => {
-                        let mut events_table = txn.open_table(EVENTS_TABLE).map_err(map_err)?;
-                        events_table.insert(key.as_slice(), val.as_slice()).map_err(map_err)?;
-                    }
-                    StorageOperation::PutMempool(k, v) => {
-                        pending.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
-                    }
-                    StorageOperation::DeleteMempool(k) => {
-                        pending.remove(k.as_slice()).map_err(map_err)?;
-                    }
-                    StorageOperation::DeleteTransaction(k) => {
-                        txs_table.remove(k.as_slice()).map_err(map_err)?;
-                    }
-                    StorageOperation::PutStateNode(k, v) => {
-                        let mut state_nodes = txn.open_table(STATE_NODES_TABLE).map_err(map_err)?;
-                        state_nodes.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+        let result = (|| -> Result<(), StorageError> {
+            let txn = self.db_guard()?.begin_write().map_err(map_err)?;
+            {
+                let mut blocks = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
+                let mut txs_table = txn.open_table(TXS_TABLE).map_err(map_err)?;
+                let mut accounts = txn.open_table(ACCOUNTS_TABLE).map_err(map_err)?;
+                let mut contracts = txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
+                let mut pending = txn.open_table(PENDING_TABLE).map_err(map_err)?;
+
+                for op in &batch.ops {
+                    match op {
+                        StorageOperation::PutBlock(k, v) => {
+                            blocks.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::PutAccount(k, v) => {
+                            accounts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::PutChainState(k, v) => {
+                            accounts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::PutTransaction(k, v) => {
+                            txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::PutTxIndex(k, v) => {
+                            txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::PutContractCode(k, v) => {
+                            contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::PutContractDeployer(k, v) => {
+                            contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::PutContractStorage(k, v) => {
+                            contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::DeleteAccount(addr) => {
+                            accounts.remove(addr.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::DeleteContractStorage(key) => {
+                            contracts.remove(key.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::PutContractEvent(key, val) => {
+                            let mut events_table = txn.open_table(EVENTS_TABLE).map_err(map_err)?;
+                            events_table.insert(key.as_slice(), val.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::PutMempool(k, v) => {
+                            pending.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::DeleteMempool(k) => {
+                            pending.remove(k.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::DeleteTransaction(k) => {
+                            txs_table.remove(k.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::PutStateNode(k, v) => {
+                            let mut state_nodes =
+                                txn.open_table(STATE_NODES_TABLE).map_err(map_err)?;
+                            state_nodes.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                        }
                     }
                 }
             }
+            txn.commit().map_err(map_err)?;
+            Ok(())
+        })();
+
+        // Remove WAL entry on success (best-effort: failure means replay on next startup)
+        if result.is_ok() {
+            if let Ok(cleanup_txn) = self.db_guard()?.begin_write() {
+                if let Ok(mut t) = cleanup_txn.open_table(META_TABLE) {
+                    let _ = t.remove(batch_id.as_bytes());
+                }
+                let _ = cleanup_txn.commit();
+            }
         }
-        txn.commit().map_err(map_err)?;
-        Ok(())
+        result
     }
 
     fn compact(&self) -> Result<(), StorageError> {
@@ -1016,7 +1210,7 @@ impl Storage for RedbStorage {
     fn backup_to(&self, path: &std::path::Path) -> Result<(), StorageError> {
         use std::io::Write;
         let txn = self.db_guard()?.begin_read().map_err(map_err)?;
-        let mut file = std::fs::File::create(path).map_err(map_err)?;
+        let mut plaintext = Vec::new();
         let tables = [
             ("blocks", BLOCKS_TABLE),
             ("txs", TXS_TABLE),
@@ -1035,18 +1229,69 @@ impl Storage for RedbStorage {
             let iter = table.iter().map_err(map_err)?;
             for item in iter {
                 let (k, v) = item.map_err(map_err)?;
-                writeln!(file, "{}:{}:{}", name, hex::encode(k.value()), hex::encode(v.value()))
-                    .map_err(map_err)?;
+                writeln!(
+                    plaintext,
+                    "{}.{}.{}",
+                    name,
+                    hex::encode(k.value()),
+                    hex::encode(v.value())
+                )
+                .map_err(map_err)?;
             }
         }
+
+        // Encrypt backup with BAALS_BACKUP_KEY env var (AES-256-GCM) if available
+        if let Ok(key_hex) = std::env::var("BAALS_BACKUP_KEY") {
+            let key_hex = key_hex.trim().to_string();
+            if !key_hex.is_empty() {
+                use aes_gcm::aead::Aead;
+                use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+                let key_bytes = hex::decode(&key_hex).map_err(|e| {
+                    StorageError::IndexError(format!("Invalid BAALS_BACKUP_KEY hex: {}", e))
+                })?;
+                if key_bytes.len() != 32 {
+                    return Err(StorageError::IndexError(
+                        "BAALS_BACKUP_KEY must be 32 bytes (64 hex chars)".to_string(),
+                    ));
+                }
+                let mut key_arr = [0u8; 32];
+                key_arr.copy_from_slice(&key_bytes);
+                let mut nonce_bytes = [0u8; 12];
+                rand::RngCore::fill_bytes(&mut rand::rng(), &mut nonce_bytes);
+                let cipher = Aes256Gcm::new_from_slice(&key_arr)
+                    .map_err(|e| StorageError::IndexError(format!("AES-256 init: {}", e)))?;
+                let ciphertext = cipher
+                    .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
+                    .map_err(|e| StorageError::IndexError(format!("AES-256 encrypt: {}", e)))?;
+                let mut file = std::fs::File::create(path).map_err(map_err)?;
+                file.write_all(b"BAALSENC1\n").map_err(map_err)?;
+                file.write_all(&nonce_bytes).map_err(map_err)?;
+                file.write_all(&ciphertext).map_err(map_err)?;
+                log::info!("Encrypted backup written to {:?} with BAALS_BACKUP_KEY", path);
+                return Ok(());
+            }
+        }
+
+        // No encryption key: write plaintext backup with a warning
+        log::warn!(
+            "Writing unencrypted backup to {:?}. Set BAALS_BACKUP_KEY env var (64 hex chars) \
+             to enable AES-256-GCM encryption.",
+            path
+        );
+        let mut file = std::fs::File::create(path).map_err(map_err)?;
+        file.write_all(&plaintext).map_err(map_err)?;
         Ok(())
     }
 
     fn restore_from(&self, path: &std::path::Path) -> Result<(), StorageError> {
-        let content = std::fs::read_to_string(path).map_err(map_err)?;
+        let content = if detect_encrypted_backup(path) {
+            decrypt_backup(path)?
+        } else {
+            std::fs::read_to_string(path).map_err(map_err)?
+        };
         let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         for line in content.lines() {
-            let parts: Vec<&str> = line.splitn(3, ':').collect();
+            let parts: Vec<&str> = line.splitn(3, '.').collect();
             if parts.len() != 3 {
                 continue;
             }

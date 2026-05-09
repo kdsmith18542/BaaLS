@@ -72,6 +72,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             payload: TransactionPayload::Transfer { amount: 100 },
             signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
             gas_limit: 100000,
+            gas_price: 0,
             priority: 0,
             metadata: None,
         };
@@ -101,6 +102,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             },
             signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
             gas_limit: 500000,
+            gas_price: 0,
             priority: 0,
             metadata: None,
         };
@@ -129,6 +131,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             },
             signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
             gas_limit: 500000,
+            gas_price: 0,
             priority: 0,
             metadata: None,
         };
@@ -155,6 +158,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             payload: TransactionPayload::Data { data: vec![1, 2, 3, 4] },
             signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
             gas_limit: 100000,
+            gas_price: 0,
             priority: 0,
             metadata: None,
         };
@@ -179,6 +183,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             payload: TransactionPayload::Transfer { amount: 50 },
             signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
             gas_limit: 100000,
+            gas_price: 0,
             priority: 0,
             metadata: Some(BTreeMap::from([("memo".to_string(), "test".to_string())])),
         };
@@ -203,6 +208,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             payload: TransactionPayload::Transfer { amount: 50 },
             signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
             gas_limit: 100000,
+            gas_price: 0,
             priority: 0,
             metadata: None,
         };
@@ -227,6 +233,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             payload: TransactionPayload::Transfer { amount: 25 },
             signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
             gas_limit: 100000,
+            gas_price: 0,
             priority: 0,
             metadata: None,
         };
@@ -251,6 +258,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             payload: TransactionPayload::Data { data: vec![9, 8, 7] },
             signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
             gas_limit: 100000,
+            gas_price: 0,
             priority: 0,
             metadata: None,
         };
@@ -358,6 +366,7 @@ pub fn test_tx_roundtrip_vec_args() {
         },
         signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
         gas_limit: 100000,
+        gas_price: 0,
         priority: 0,
         metadata: None,
     };

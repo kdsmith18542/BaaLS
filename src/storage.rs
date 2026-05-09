@@ -93,8 +93,14 @@ pub trait Storage: Send + Sync {
     fn get_all_accounts(&self) -> Result<Vec<(PublicKey, Account)>, StorageError>;
 
     // State Tree Nodes (Incremental SMT)
-    fn put_state_node(&self, level: u16, path: &[u8; 32], hash: &[u8; 32]) -> Result<(), StorageError>;
-    fn get_state_node(&self, level: u16, path: &[u8; 32]) -> Result<Option<[u8; 32]>, StorageError>;
+    fn put_state_node(
+        &self,
+        level: u16,
+        path: &[u8; 32],
+        hash: &[u8; 32],
+    ) -> Result<(), StorageError>;
+    fn get_state_node(&self, level: u16, path: &[u8; 32])
+        -> Result<Option<[u8; 32]>, StorageError>;
 
     // Global Chain State (used by Runtime/Ledger)
     fn put_chain_state(&self, state: &ChainState) -> Result<(), StorageError>;
@@ -485,7 +491,7 @@ impl SledStorage {
         let key = address.to_bytes();
         let current_count = self
             .tx_count_tree
-            .get(&key)?
+            .get(key.as_slice())?
             .map(|v| {
                 let mut arr = [0u8; 8];
                 arr.copy_from_slice(&v);
@@ -493,7 +499,7 @@ impl SledStorage {
             })
             .unwrap_or(0);
         let new_count = current_count.saturating_add(1);
-        self.tx_count_tree.insert(&key, &new_count.to_le_bytes())?;
+        self.tx_count_tree.insert(key.as_slice(), new_count.to_le_bytes().as_slice())?;
         Ok(())
     }
 
@@ -819,21 +825,34 @@ impl Storage for SledStorage {
 
     fn get_account_transaction_count(&self, address: &PublicKey) -> Result<u64, StorageError> {
         let key = address.to_bytes();
-        Ok(self.tx_count_tree.get(key)?.and_then(|v| {
-            let mut arr = [0u8; 8];
-            arr.copy_from_slice(&v);
-            Some(u64::from_le_bytes(arr))
-        }).unwrap_or(0))
+        Ok(self
+            .tx_count_tree
+            .get(key)?
+            .map(|v| {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&v);
+                u64::from_le_bytes(arr)
+            })
+            .unwrap_or(0))
     }
 
-    fn put_state_node(&self, level: u16, path: &[u8; 32], hash: &[u8; 32]) -> Result<(), StorageError> {
+    fn put_state_node(
+        &self,
+        level: u16,
+        path: &[u8; 32],
+        hash: &[u8; 32],
+    ) -> Result<(), StorageError> {
         let mut key = level.to_be_bytes().to_vec();
         key.extend_from_slice(path);
         self.state_tree.insert(key, hash)?;
         Ok(())
     }
 
-    fn get_state_node(&self, level: u16, path: &[u8; 32]) -> Result<Option<[u8; 32]>, StorageError> {
+    fn get_state_node(
+        &self,
+        level: u16,
+        path: &[u8; 32],
+    ) -> Result<Option<[u8; 32]>, StorageError> {
         let mut key = level.to_be_bytes().to_vec();
         key.extend_from_slice(path);
         let val = self.state_tree.get(key)?;

@@ -215,7 +215,8 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
 
         for tx in pending_transactions {
             total_gas = total_gas.saturating_add(tx.gas_limit);
-            total_size = total_size.saturating_add(tx.payload_size_estimate() + std::mem::size_of::<Transaction>());
+            total_size = total_size
+                .saturating_add(tx.payload_size_estimate() + std::mem::size_of::<Transaction>());
 
             if total_gas > self.block_gas_limit || total_size > self.block_size_limit {
                 break;

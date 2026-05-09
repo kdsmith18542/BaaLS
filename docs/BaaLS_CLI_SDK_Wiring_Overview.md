@@ -138,4 +138,271 @@ Default: Human-readable, nicely formatted tables or descriptive text.
 Configuration: CLI commands will use a hierarchical configuration system (CLI flags > Environment Variables > Config File > Default values).
 
 2. SDKs (Software Development Kits)
-SDKs provide the necessary libraries and tools for developers to integrate BaaLS functionalities directly into their applications (desktop, mobile, web backend). 
+
+SDKs provide the necessary libraries and tools for developers to integrate BaaLS functionalities directly into their applications (desktop, mobile, web backend).
+
+### 2.1 Rust SDK (libbaals)
+
+The Rust SDK is the canonical interface to BaaLS, providing direct access to the Runtime and all core features.
+
+**Availability:**
+- Published on crates.io as `baals`
+- Library crate with public API for programmatic access
+- Feature-gated optional dependencies (mdns, profiling, etc.)
+
+**Core API (libbaals/src/lib.rs):**
+
+```rust
+pub struct Runtime { ... }
+
+impl Runtime {
+    pub fn new(config: RuntimeConfig) -> Result<Self>;
+    pub fn apply_transaction(&mut self, tx: Transaction) -> Result<Receipt>;
+    pub fn apply_block(&mut self, block: Block) -> Result<BlockReceipt>;
+    pub fn query_account(&self, address: Address) -> Result<Account>;
+    pub fn query_contract_state(&self, contract_id: [u8; 32], key: &[u8]) -> Result<Vec<u8>>;
+    pub fn generate_signing_key() -> Result<SigningKey>;
+    pub fn get_chain_state(&self) -> ChainState;
+}
+
+pub struct Keystore { ... }
+
+impl Keystore {
+    pub fn new(path: &str) -> Result<Self>;
+    pub fn create_wallet(&mut self, name: &str) -> Result<PublicKey>;
+    pub fn sign(&self, public_key: &PublicKey, message: &[u8]) -> Result<Signature>;
+    pub fn list_keys(&self) -> Vec<PublicKey>;
+}
+```
+
+**Usage Example:**
+
+```rust
+use baals::{Runtime, RuntimeConfig, Keystore, Transaction, Address};
+
+let mut runtime = Runtime::new(RuntimeConfig::default())?;
+let mut keystore = Keystore::new("./keys")?;
+
+let alice = keystore.create_wallet("alice")?;
+let tx = Transaction::transfer(alice, Address::zero(), 1000)?;
+let receipt = runtime.apply_transaction(tx)?;
+```
+
+### 2.2 JavaScript/TypeScript SDK (baals-js)
+
+Provides Node.js and browser-compatible bindings via WebAssembly and FFI.
+
+**Availability:**
+- NPM package: `@baals/sdk`
+- WASM bindings for pure JS execution
+- Native bindings (node-gyp) for performance-critical operations
+- TypeScript definitions included
+
+**API:**
+
+```typescript
+import { Runtime, Keystore, Transaction } from '@baals/sdk';
+
+const runtime = new Runtime({ dataDir: './data' });
+const keystore = new Keystore('./keys');
+
+const alice = await keystore.createWallet('alice');
+const tx = Transaction.transfer(alice, Address.ZERO, 1000n);
+const receipt = await runtime.applyTransaction(tx);
+```
+
+**Features:**
+- Promise-based async API
+- Full TypeScript support
+- Event emitters for block/transaction notifications
+- JSON serialization of all types
+- Error handling with descriptive messages
+
+### 2.3 Python SDK (baals-py)
+
+Provides Pythonic bindings for BaaLS via ctypes or PyO3.
+
+**Availability:**
+- PyPI package: `baals`
+- Pure Python with C extension bindings
+- Support for Python 3.8+
+
+**API:**
+
+```python
+from baals import Runtime, Keystore, Transaction
+
+runtime = Runtime(data_dir='./data')
+keystore = Keystore('./keys')
+
+alice = keystore.create_wallet('alice')
+tx = Transaction.transfer(alice, Address.ZERO, 1000)
+receipt = runtime.apply_transaction(tx)
+```
+
+### 2.4 Go SDK (baals-go)
+
+Provides idiomatic Go bindings via cgo and FFI.
+
+**Availability:**
+- Go package: `github.com/anomalyco/baals-go`
+- Pure Go with CGO bindings for cryptography
+- Support for Go 1.19+
+
+**API:**
+
+```go
+import "github.com/anomalyco/baals-go"
+
+runtime, _ := baals.NewRuntime(config)
+keystore, _ := baals.NewKeystore("./keys")
+
+alice, _ := keystore.CreateWallet("alice")
+tx := baals.NewTransfer(alice, baals.ZeroAddress, 1000)
+receipt, _ := runtime.ApplyTransaction(tx)
+```
+
+### 2.5 HTTP/REST API (via API Server)
+
+For remote access, BaaLS exposes a REST API via the HTTP server (port 8080 by default).
+
+**Endpoints:**
+
+```
+POST   /api/v1/transactions      Submit a signed transaction
+GET    /api/v1/blocks/<height>   Fetch block by height
+GET    /api/v1/accounts/<addr>   Query account state
+POST   /api/v1/contracts/call    Execute read-only contract call
+GET    /health                   Health check
+```
+
+**Authentication:**
+- Optional: Bearer token (JWT or custom)
+- TLS 1.3 for encrypted transport
+- Rate limiting: 100 req/min per IP (configurable)
+
+### 2.6 WebSocket API (Streaming)
+
+For real-time updates, clients can connect via WebSocket.
+
+**Endpoints:**
+
+```
+ws://localhost:8080/ws/blocks      Stream new blocks
+ws://localhost:8080/ws/transactions Stream new transactions
+```
+
+**Message Format:**
+
+```json
+{
+  "type": "block",
+  "data": { "height": 100, "hash": "0x...", ... }
+}
+```
+
+### 2.7 FFI / C Bindings
+
+For languages without native SDKs (C, C++, Ruby, etc.), BaaLS exports a stable C API via `libbaals_ffi.so`/`.dll`.
+
+**Header:**
+
+```c
+// libbaals_ffi.h
+typedef struct BaalsRuntime BaalsRuntime;
+
+BaalsRuntime* baals_runtime_new(const char* config_path);
+int baals_apply_transaction(BaalsRuntime* rt, const uint8_t* tx_bytes, size_t tx_len);
+void baals_runtime_free(BaalsRuntime* rt);
+```
+
+**Build:**
+
+```bash
+cargo build --release --features ffi
+# Produces: target/release/libbaals_ffi.so (Linux), .dll (Windows), .dylib (macOS)
+```
+
+---
+
+## 3. Security Best Practices
+
+### For CLI Users
+- Store keystore files in secure locations with restricted permissions (0600 on Unix)
+- Use strong passphrases for encrypted keys
+- Never share private keys or mnemonics
+- Validate TLS certificates when connecting to remote nodes
+
+### For SDK Users
+- Never log private keys or signatures
+- Validate input types and ranges before constructing transactions
+- Use HTTPS for remote connections
+- Implement retry logic with exponential backoff for transient failures
+- Handle cryptographic errors gracefully
+
+### For SDK Maintainers
+- Audit FFI boundaries for memory safety
+- Test against multiple language runtimes
+- Document key rotation and backup procedures
+- Provide security advisories via security@baals.dev
+- Keep dependencies updated (use `cargo audit` / equivalent)
+
+---
+
+## 4. Configuration
+
+### Environment Variables
+
+All SDKs respect these environment variables:
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `BAALS_DATA_DIR` | Data directory for storage | `./data` |
+| `BAALS_LOG_LEVEL` | Log level (debug, info, warn, error) | `info` |
+| `BAALS_CONSENSUS_KEY` | Raw consensus private key (hex) | (none) |
+| `BAALS_CONSENSUS_PASSWORD` | Keystore password for consensus key | (none) |
+| `BAALS_BACKUP_KEY` | AES-256-GCM key for backup encryption | (none) |
+| `BAALS_TLS_CERT` | Path to TLS certificate | (none) |
+| `BAALS_TLS_KEY` | Path to TLS private key | (none) |
+
+### Config File Format
+
+All SDKs support TOML configuration files:
+
+```toml
+[node]
+data_dir = "./data"
+port = 8080
+
+[consensus]
+block_time_ms = 5000
+max_transactions_per_block = 1000
+
+[logging]
+level = "info"
+
+[network]
+max_peers = 50
+connection_timeout_ms = 30000
+```
+
+---
+
+## 5. Roadmap
+
+**Current (v0.1):**
+- ✅ CLI (all 63 commands)
+- ✅ Rust SDK (libbaals)
+- ✅ HTTP/REST API
+- 🔶 Stub implementations: p2p, contract, admin, api command groups
+
+**Near-term (v0.2):**
+- ⬜ JavaScript/TypeScript SDK (baals-js)
+- ⬜ Full P2P, Contract, Admin, API command groups
+- ⬜ WebSocket streaming API
+
+**Future (v0.3+):**
+- ⬜ Python SDK (baals-py)
+- ⬜ Go SDK (baals-go)
+- ⬜ Mobile SDKs (Swift, Kotlin)
+- ⬜ Formal WASM security audit 

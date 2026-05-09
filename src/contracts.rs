@@ -1,5 +1,7 @@
 use crate::storage::Storage;
-use crate::types::{ContractExecutionSideEffects, ContractId, PublicKey, StorageUpdateSet, TransactionSignature};
+use crate::types::{
+    ContractExecutionSideEffects, ContractId, PublicKey, StorageUpdateSet, TransactionSignature,
+};
 use ed25519_dalek::Signature as Ed25519Signature;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -488,7 +490,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
 
         let result = func.call(&mut store, (0i32, args_len));
 
-        let execution_time = start_time.elapsed();
+        let _execution_time = start_time.elapsed();
         let remaining_fuel = store.get_fuel().unwrap_or(0);
         let gas_used = gas_limit.saturating_sub(remaining_fuel);
 
@@ -506,13 +508,6 @@ impl<S: Storage> BaaLSContractEngine<S> {
                 };
 
                 let host_state = store.data_mut();
-                if host_state.reverted {
-                    return Err(ContractError::Reverted(
-                        "Contract reverted during execution".to_string(),
-                    ));
-                }
-
-                let mut host_state = store.data_mut();
                 if host_state.reverted {
                     return Err(ContractError::Reverted(
                         "Contract reverted during execution".to_string(),
@@ -566,8 +561,14 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         Ok((result_data, _, sub_side_effects)) => {
                             call_results.push(result_data);
                             // MERGE side effects
-                            side_effects.storage_updates.writes.extend(sub_side_effects.storage_updates.writes);
-                            side_effects.storage_updates.deletes.extend(sub_side_effects.storage_updates.deletes);
+                            side_effects
+                                .storage_updates
+                                .writes
+                                .extend(sub_side_effects.storage_updates.writes);
+                            side_effects
+                                .storage_updates
+                                .deletes
+                                .extend(sub_side_effects.storage_updates.deletes);
                             side_effects.events.extend(sub_side_effects.events);
                         }
                         Err(_) => {
@@ -575,7 +576,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         }
                     }
                 }
-                
+
                 Ok((result_data, gas_used, side_effects))
             }
             Err(e) => {
@@ -1173,7 +1174,12 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     let op = wasm_bytes[i];
                     match op {
                         // Float memory, constant, comparison, arithmetic, and conversion opcodes
-                        0x2A..=0x2D | 0x43..=0x44 | 0x5B..=0x66 | 0x8B..=0x9E | 0xA7..=0xB1 | 0x9F..=0xA2 => {
+                        0x2A..=0x2D
+                        | 0x43..=0x44
+                        | 0x5B..=0x66
+                        | 0x8B..=0x9E
+                        | 0xA7..=0xB1
+                        | 0x9F..=0xA2 => {
                             return Err(format!(
                                 "Non-deterministic float opcode 0x{:02X} at byte {}",
                                 op, i
@@ -1502,12 +1508,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         };
         self.update_contract_metrics(contract_id, &execution_result);
 
-        Ok(CallContractResult {
-            output: result,
-            gas_used,
-            side_effects,
-            reverted: false,
-        })
+        Ok(CallContractResult { output: result, gas_used, side_effects, reverted: false })
     }
 
     fn query_contract(
