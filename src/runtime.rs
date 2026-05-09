@@ -632,6 +632,29 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                         expected_nonce, transaction.nonce
                     )));
                 }
+
+                // 6. Balance check — sender must cover max gas cost + transfer value
+                let transfer_amount = match &transaction.payload {
+                    crate::types::TransactionPayload::Transfer { amount } => *amount,
+                    crate::types::TransactionPayload::ContractCall { value, .. } => {
+                        value.unwrap_or(0)
+                    }
+                    _ => 0,
+                };
+                let max_gas_cost = transaction
+                    .gas_price
+                    .saturating_mul(transaction.gas_limit);
+                let min_balance_required = max_gas_cost.saturating_add(transfer_amount);
+                if sender_account.balance() < min_balance_required {
+                    return Err(RuntimeError::InvalidTransaction(format!(
+                        "Insufficient balance: have {}, need {} (gas {} + value {})",
+                        sender_account.balance(),
+                        min_balance_required,
+                        max_gas_cost,
+                        transfer_amount
+                    )));
+                }
+
                 Ok(())
             },
             MetricsCollector::record_transaction_validation,
@@ -1439,10 +1462,11 @@ mod tests {
             recipient: Address::Wallet(sender),
             payload: TransactionPayload::Data { data: vec![] },
             signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
-            gas_limit: 100000,
-            gas_price: 0,
+            gas_limit: 100_000,
+            gas_price: 1,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         tx.hash = tx.calculate_hash().unwrap();
         tx

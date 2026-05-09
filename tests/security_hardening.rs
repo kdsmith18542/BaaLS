@@ -109,6 +109,7 @@ async fn test_incremental_smt_integrity() {
             gas_price: 0,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         tx.hash = tx.calculate_hash().unwrap();
         tx.sign(&sk).unwrap();

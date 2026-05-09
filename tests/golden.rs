@@ -75,6 +75,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             gas_price: 0,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         let h = tx.calculate_hash().unwrap();
         tx.sign(&sk).unwrap();
@@ -105,6 +106,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             gas_price: 0,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         let h = tx.calculate_hash().unwrap();
         tx.sign(&sk2).unwrap();
@@ -134,6 +136,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             gas_price: 0,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         let h = tx.calculate_hash().unwrap();
         tx.sign(&sk).unwrap();
@@ -161,6 +164,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             gas_price: 0,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         let h = tx.calculate_hash().unwrap();
         tx.sign(&sk2).unwrap();
@@ -186,6 +190,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             gas_price: 0,
             priority: 0,
             metadata: Some(BTreeMap::from([("memo".to_string(), "test".to_string())])),
+            chain_id: 1,
         };
         let h = tx.calculate_hash().unwrap();
         tx.sign(&sk).unwrap();
@@ -211,6 +216,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             gas_price: 0,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         let h = tx.calculate_hash().unwrap();
         tx.sign(&sk).unwrap();
@@ -236,6 +242,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             gas_price: 0,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         let h = tx.calculate_hash().unwrap();
         tx.sign(&sk).unwrap();
@@ -261,6 +268,7 @@ pub fn golden_vectors() -> Vec<GoldenTransaction> {
             gas_price: 0,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         let h = tx.calculate_hash().unwrap();
         tx.sign(&sk).unwrap();
@@ -369,6 +377,7 @@ pub fn test_tx_roundtrip_vec_args() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
 
     let hash_before = tx.calculate_hash().unwrap();

@@ -2309,14 +2309,15 @@ fn handle_tx(
                     .duration_since(std::time::UNIX_EPOCH)?
                     .as_secs(),
                 signature: TransactionSignature::from_bytes(&[0u8; 64])?,
-                gas_limit: 100000,
-                gas_price: 0,
+                gas_limit: 100_000,
+                gas_price: 1,
                 priority: 0,
                 metadata: memo.map(|m| {
                     let mut map = std::collections::BTreeMap::new();
                     map.insert("memo".to_string(), m);
                     map
                 }),
+                chain_id: 1,
             };
             tx.hash = tx.calculate_hash()?;
             tx.sign(&signing_key)?;
@@ -2430,10 +2431,11 @@ fn handle_tx(
                     .duration_since(std::time::UNIX_EPOCH)?
                     .as_secs(),
                 signature: TransactionSignature::from_bytes(&[0u8; 64])?,
-                gas_limit: 100000,
-                gas_price: 0,
+                gas_limit: 100_000,
+                gas_price: 1,
                 priority: 0,
                 metadata: None,
+                chain_id: 1,
             };
             tx.hash = tx.calculate_hash()?;
             tx.sign(&signing_key)?;

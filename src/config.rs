@@ -36,6 +36,10 @@ pub struct ConsensusConfig {
     pub max_transactions_per_block: u64,
     #[serde(default = "default_authority_key")]
     pub authority_key: String,
+    #[serde(default = "default_chain_id")]
+    pub chain_id: u64,
+    #[serde(default = "default_min_gas_price")]
+    pub min_gas_price: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +127,12 @@ fn default_max_tx_per_block() -> u64 {
 fn default_authority_key() -> String {
     String::new()
 }
+fn default_chain_id() -> u64 {
+    1
+}
+fn default_min_gas_price() -> u64 {
+    1
+}
 fn default_cache_mb() -> u64 {
     256
 }
@@ -164,6 +174,8 @@ impl Default for Config {
                 block_time_ms: default_block_time_ms(),
                 max_transactions_per_block: default_max_tx_per_block(),
                 authority_key: default_authority_key(),
+                chain_id: default_chain_id(),
+                min_gas_price: default_min_gas_price(),
             },
             storage: StorageConfig {
                 cache_size_mb: default_cache_mb(),

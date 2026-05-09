@@ -566,6 +566,12 @@ pub struct Transaction {
     pub gas_price: u64,
     pub priority: u8,
     pub metadata: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default = "default_chain_id")]
+    pub chain_id: u64,
+}
+
+fn default_chain_id() -> u64 {
+    1
 }
 
 impl Transaction {
@@ -735,6 +741,7 @@ impl Transaction {
         hasher.update(self.gas_limit.to_le_bytes());
         hasher.update(self.gas_price.to_le_bytes());
         hasher.update(self.priority.to_le_bytes());
+        hasher.update(self.chain_id.to_le_bytes());
 
         // Serialize recipient deterministically
         let serialized_recipient =
@@ -802,10 +809,11 @@ mod tests {
             recipient: Address::Wallet(sender_pk),
             payload: TransactionPayload::Data { data: vec![1, 2, 3] },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
-            gas_limit: 0,
-            gas_price: 0,
+            gas_limit: 21_000,
+            gas_price: 1,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         let tx2 = Transaction {
             hash: [0; 32],
@@ -815,10 +823,11 @@ mod tests {
             recipient: Address::Wallet(sender_pk),
             payload: TransactionPayload::Data { data: vec![4, 5, 6] },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
-            gas_limit: 0,
-            gas_price: 0,
+            gas_limit: 21_000,
+            gas_price: 1,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
 
         let block = Block {
@@ -860,10 +869,11 @@ mod tests {
             recipient: Address::Wallet(public_key),
             payload: TransactionPayload::Data { data: vec![1, 2, 3] },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
-            gas_limit: 0,
-            gas_price: 0,
+            gas_limit: 21_000,
+            gas_price: 1,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
 
         // Before signing, hash is default and verification should fail
@@ -1059,10 +1069,11 @@ mod tests {
             recipient: Address::Wallet(pk),
             payload: TransactionPayload::Transfer { amount: 100 },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
-            gas_limit: 100000,
+            gas_limit: 100_000,
             gas_price: 0,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         let mut tx2 = tx1.clone();
         tx2.gas_price = 10;
@@ -1085,15 +1096,16 @@ mod tests {
             recipient: Address::Wallet(pk),
             payload: TransactionPayload::Data { data: vec![1, 2, 3] },
             signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
-            gas_limit: 100000,
+            gas_limit: 100_000,
             gas_price: 42,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         let encoded = bincode::serialize(&tx).unwrap();
         let decoded: Transaction = bincode::deserialize(&encoded).unwrap();
         assert_eq!(decoded.gas_price, 42);
-        assert_eq!(decoded.gas_limit, 100000);
+        assert_eq!(decoded.gas_limit, 100_000);
 
         let json = serde_json::to_string(&tx).unwrap();
         let from_json: Transaction = serde_json::from_str(&json).unwrap();

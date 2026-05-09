@@ -70,6 +70,7 @@ fn test_ledger_state_transition() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     transaction.hash = transaction.calculate_hash().unwrap();
     transaction.sign(&signing_key1).unwrap();
@@ -156,6 +157,7 @@ fn test_transaction_validation_and_mempool() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     valid_tx.hash = valid_tx.calculate_hash().unwrap();
     valid_tx.sign(&signing_key).unwrap();
@@ -163,7 +165,7 @@ fn test_transaction_validation_and_mempool() {
     let result = runtime.submit_transaction(valid_tx);
     assert!(result.is_ok(), "Valid transaction should be accepted");
 
-    // Test invalid transaction (insufficient balance — caught during block application, not submission)
+    // Test invalid transaction (insufficient balance — now rejected at submission)
     let mut overspend_tx = Transaction {
         hash: [0u8; 32],
         sender: public_key,
@@ -175,24 +177,25 @@ fn test_transaction_validation_and_mempool() {
             .unwrap()
             .as_secs(),
         signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
-        gas_limit: 100000,
-        gas_price: 0,
+        gas_limit: 100_000,
+        gas_price: 1,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     overspend_tx.hash = overspend_tx.calculate_hash().unwrap();
     overspend_tx.sign(&signing_key).unwrap();
 
-    // Balance is not checked during submission — only during block application
+    // CQ-3: Balance is now checked at submission time
     let result = runtime.submit_transaction(overspend_tx);
-    assert!(result.is_ok(), "Overspend is caught at block application, not submission");
+    assert!(result.is_err(), "Overspend should be rejected at submission");
 
-    // Test mempool size limit
+    // Only the valid transaction should be in mempool
     let pending_txs = runtime.get_pending_transactions().unwrap();
     assert_eq!(
         pending_txs.len(),
-        2,
-        "Both transactions should be in mempool (balance checked at block application)"
+        1,
+        "Only valid transaction should be in mempool"
     );
 
     info!("[TEST] test_transaction_validation_and_mempool completed successfully");
@@ -234,6 +237,7 @@ fn test_hardened_transaction_validation() {
             gas_price: 0,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         tx.hash = tx.calculate_hash().unwrap();
         tx.sign(&signing_key).unwrap();
@@ -335,6 +339,7 @@ fn test_block_application_is_atomic_on_transaction_failure() {
             gas_price: 0,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         tx.hash = tx.calculate_hash().unwrap();
         tx.sign(&sender_key).unwrap();
@@ -436,6 +441,7 @@ fn test_runtime_health_status_exposes_chain_and_mempool() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx.hash = tx.calculate_hash().unwrap();
     tx.sign(&signer).unwrap();
@@ -486,6 +492,7 @@ fn test_runtime_auto_block_production_from_mempool_threshold() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx.hash = tx.calculate_hash().unwrap();
     tx.sign(&signing_key).unwrap();
@@ -541,6 +548,7 @@ fn test_transaction_merkle_root_in_block() {
             gas_price: 0,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         tx.hash = tx.calculate_hash().unwrap();
         tx.sign(&signing_key).unwrap();
@@ -610,6 +618,7 @@ fn test_block_production_and_chain_state() {
             gas_price: 0,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         tx.hash = tx.calculate_hash().unwrap();
         tx.sign(&signing_key).unwrap();
@@ -714,6 +723,7 @@ fn test_contract_storage_root_tracks_contract_kv_state() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     deploy_tx.hash = deploy_tx.calculate_hash().unwrap();
     deploy_tx.sign(&deployer_key).unwrap();
@@ -750,6 +760,7 @@ fn test_contract_storage_root_tracks_contract_kv_state() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     call_tx.hash = call_tx.calculate_hash().unwrap();
     call_tx.sign(&deployer_key).unwrap();
@@ -888,6 +899,7 @@ fn test_performance_benchmarks() {
                 gas_price: 0,
                 priority: 0,
                 metadata: None,
+                chain_id: 1,
             };
             tx.hash = tx.calculate_hash().unwrap();
             tx.sign(signing_key).unwrap();
@@ -984,6 +996,7 @@ fn test_stress_test() {
                     gas_price: 0,
                     priority: 0,
                     metadata: None,
+                    chain_id: 1,
                 };
                 tx.hash = tx.calculate_hash().unwrap();
                 tx.sign(&signing_key).unwrap();
@@ -1047,6 +1060,7 @@ fn test_security_validation() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx1.hash = tx1.calculate_hash().unwrap();
     tx1.sign(&signing_key).unwrap();
@@ -1066,6 +1080,7 @@ fn test_security_validation() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx2.hash = tx2.calculate_hash().unwrap();
     tx2.sign(&signing_key).unwrap();
@@ -1094,6 +1109,7 @@ fn test_security_validation() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     invalid_tx.hash = invalid_tx.calculate_hash().unwrap();
     // Don't sign the transaction
@@ -1129,6 +1145,7 @@ fn test_storage_advanced_indexing() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
 
     storage.put_transaction(&test_tx).unwrap();
@@ -1237,6 +1254,7 @@ fn test_batch_multi_tree_no_cross_contamination() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     let chain_state = ChainState {
         latest_block_hash: [1u8; 32],
@@ -1329,6 +1347,7 @@ fn test_fork_reorg_with_common_ancestor() {
             gas_price: 0,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         tx.hash = tx.calculate_hash().unwrap();
         tx.sign(&sender_sk).unwrap();
@@ -1499,6 +1518,7 @@ fn test_p2p_auto_announcement_and_import() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx.hash = tx.calculate_hash().unwrap();
     tx.sign(&user_sk).unwrap();
@@ -1619,6 +1639,7 @@ fn test_consensus_signing_verification() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx.hash = tx.calculate_hash().unwrap();
     tx.sign(&sender_sk).unwrap();
@@ -1668,6 +1689,7 @@ fn test_invalid_nonce_rejected() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx.hash = tx.calculate_hash().unwrap();
     tx.sign(&sender_sk).unwrap();
@@ -1689,6 +1711,7 @@ fn test_invalid_nonce_rejected() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx2.hash = tx2.calculate_hash().unwrap();
     tx2.sign(&sender_sk).unwrap();
@@ -1714,7 +1737,7 @@ fn test_insufficient_balance_rejected() {
     let sender_pk = PublicKey::from(sender_sk.verifying_key());
     runtime.create_account(&sender_pk, Account::Wallet { balance: 5, nonce: 0 }).unwrap();
 
-    // Submit transfer for more than balance
+    // Submit transfer for more than balance — now rejected at submission (CQ-3)
     let mut tx = Transaction {
         hash: [0u8; 32],
         sender: sender_pk,
@@ -1727,21 +1750,19 @@ fn test_insufficient_balance_rejected() {
             .as_secs(),
         signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
         gas_limit: 100_000,
-        gas_price: 0,
+        gas_price: 1,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx.hash = tx.calculate_hash().unwrap();
     tx.sign(&sender_sk).unwrap();
-    runtime.submit_transaction(tx).unwrap();
+    let result = runtime.submit_transaction(tx);
+    assert!(result.is_err(), "Overspend should be rejected at submission");
 
-    // Producing block should succeed (failed tx is included but balance unchanged)
-    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
-    let block = tokio_rt.block_on(runtime.produce_block()).unwrap();
-    assert_eq!(block.transactions.len(), 1, "Block should contain 1 failed tx");
-    // Verify balance was NOT deducted (tx failed)
+    // Balance should be unchanged
     let account = runtime.get_account(&sender_pk).unwrap().unwrap();
-    assert_eq!(account.balance(), 5, "Balance should remain 5 since transfer failed");
+    assert_eq!(account.balance(), 5, "Balance should remain 5 since tx was rejected");
 
     info!("[TEST] Insufficient balance rejection passed");
 }
@@ -1794,6 +1815,7 @@ fn test_concurrent_transaction_submission() {
                         gas_price: 0,
                         priority: 0,
                         metadata: None,
+                        chain_id: 1,
                     };
                     tx.hash = tx.calculate_hash().unwrap();
                     tx.sign(&sk).unwrap();
@@ -1866,6 +1888,7 @@ fn test_concurrent_mempool_integrity() {
                     gas_price: 0,
                     priority: 0,
                     metadata: None,
+                    chain_id: 1,
                 };
                 tx.hash = tx.calculate_hash().unwrap();
                 tx.sign(&account_sk).unwrap();
@@ -2157,6 +2180,7 @@ fn test_redb_storage_with_runtime() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx.hash = tx.calculate_hash().unwrap();
     tx.sign(&account_sk).unwrap();
@@ -2262,6 +2286,7 @@ fn test_p2p_block_propagation() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx.hash = tx.calculate_hash().unwrap();
     tx.sign(&user_sk).unwrap();
@@ -2390,6 +2415,7 @@ fn test_p2p_storage_backed_block_serving() {
             gas_price: 0,
             priority: 0,
             metadata: None,
+            chain_id: 1,
         };
         tx.hash = tx.calculate_hash().unwrap();
         tx.sign(&user_sk).unwrap();
@@ -2471,6 +2497,7 @@ fn test_sdk_basic_operations() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx.hash = tx.calculate_hash().unwrap();
     tx.sign(&sk).unwrap();
@@ -2582,6 +2609,7 @@ fn test_inter_contract_result_isolation() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx1.hash = tx1.calculate_hash().unwrap();
     tx1.sign(&caller1_sk).unwrap();
@@ -2606,6 +2634,7 @@ fn test_inter_contract_result_isolation() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx2.hash = tx2.calculate_hash().unwrap();
     tx2.sign(&caller1_sk).unwrap();
@@ -2637,6 +2666,7 @@ fn test_inter_contract_result_isolation() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx3.hash = tx3.calculate_hash().unwrap();
     tx3.sign(&caller1_sk).unwrap();
@@ -2817,6 +2847,7 @@ fn test_reentrancy_guard_correctness() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx_x.hash = tx_x.calculate_hash().unwrap();
     tx_x.sign(&deployer_sk).unwrap();
@@ -2837,6 +2868,7 @@ fn test_reentrancy_guard_correctness() {
         gas_price: 0,
         priority: 0,
         metadata: None,
+        chain_id: 1,
     };
     tx_y.hash = tx_y.calculate_hash().unwrap();
     tx_y.sign(&deployer_sk).unwrap();

@@ -127,12 +127,29 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             return Err(LedgerError::BlockValidation("Invalid previous hash".to_string()));
         }
 
+        // CQ-8: Enforce monotonic timestamps
+        if let Some(prev_block) = self.storage.get_block(&current_chain_state.latest_block_hash)? {
+            if block.timestamp < prev_block.timestamp {
+                return Err(LedgerError::BlockValidation(format!(
+                    "Block timestamp {} is before parent timestamp {}",
+                    block.timestamp, prev_block.timestamp
+                )));
+            }
+        }
+
         let calculated_hash = block.calculate_hash()?;
         if calculated_hash != block.hash {
             return Err(LedgerError::BlockValidation("Invalid block hash".to_string()));
         }
 
+        // CQ-12: Reject transactions already committed to storage
         for tx in &block.transactions {
+            if self.storage.get_transaction(&tx.hash)?.is_some() {
+                return Err(LedgerError::BlockValidation(format!(
+                    "Duplicate transaction {}",
+                    hex::encode(tx.hash)
+                )));
+            }
             if !tx.verify_signature()? {
                 return Err(LedgerError::BlockValidation(
                     "Invalid transaction signature".to_string(),
@@ -344,44 +361,16 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                     if gas_used > tx.gas_limit {
                         warn!("[LEDGER] Contract call exceeded gas limit");
                     } else {
-                        // Transfer value to contract if specified
-                        if let Some(val) = value {
-                            if *val > 0 {
-                                if sender_balance < *val {
-                                    return Err(LedgerError::StateTransition(
-                                        StateTransitionError::InsufficientBalance(
-                                            "Contract call value".to_string(),
-                                        ),
-                                    ));
-                                }
-                                sender_balance = sender_balance.checked_sub(*val).ok_or(
-                                    LedgerError::StateTransition(StateTransitionError::Overflow),
-                                )?;
-
-                                let contract_account_pk = contract_account_public_key(contract_id);
-                                let mut contract_account = self
-                                    .storage
-                                    .get_account(&contract_account_pk)?
-                                    .ok_or(LedgerError::ContractNotFound(hex::encode(
-                                        contract_id.to_bytes(),
-                                    )))?;
-
-                                let new_contract_balance = contract_account
-                                    .balance()
-                                    .checked_add(*val)
-                                    .ok_or(LedgerError::StateTransition(
-                                        StateTransitionError::Overflow,
-                                    ))?;
-
-                                if let Account::Contract { balance, .. } = &mut contract_account {
-                                    *balance = new_contract_balance;
-                                }
-
-                                batch.ops.push(StorageOperation::PutAccount(
-                                    contract_account_pk.to_bytes().to_vec(),
-                                    bincode::serialize(&contract_account)?,
+                        // Validate value transfer is possible, but defer the
+                        // batch write until the call succeeds (CQ-1 fix).
+                        let transfer_val = value.unwrap_or(0);
+                        if transfer_val > 0 {
+                            if sender_balance < transfer_val {
+                                return Err(LedgerError::StateTransition(
+                                    StateTransitionError::InsufficientBalance(
+                                        "Contract call value".to_string(),
+                                    ),
                                 ));
-                                touched_contracts.insert(contract_account_pk.to_bytes());
                             }
                         }
 
@@ -399,6 +388,46 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                         ) {
                             Ok(result) => {
                                 gas_used = gas_used.saturating_add(result.gas_used);
+
+                                // Now commit the value transfer (call succeeded)
+                                if transfer_val > 0 {
+                                    sender_balance =
+                                        sender_balance.checked_sub(transfer_val).ok_or(
+                                            LedgerError::StateTransition(
+                                                StateTransitionError::Overflow,
+                                            ),
+                                        )?;
+
+                                    let contract_account_pk =
+                                        contract_account_public_key(contract_id);
+                                    let mut contract_account = self
+                                        .storage
+                                        .get_account(&contract_account_pk)?
+                                        .ok_or(LedgerError::ContractNotFound(hex::encode(
+                                            contract_id.to_bytes(),
+                                        )))?;
+
+                                    let new_contract_balance = contract_account
+                                        .balance()
+                                        .checked_add(transfer_val)
+                                        .ok_or(LedgerError::StateTransition(
+                                            StateTransitionError::Overflow,
+                                        ))?;
+
+                                    if let Account::Contract { balance, .. } =
+                                        &mut contract_account
+                                    {
+                                        *balance = new_contract_balance;
+                                    }
+
+                                    batch.ops.push(StorageOperation::PutAccount(
+                                        contract_account_pk.to_bytes().to_vec(),
+                                        bincode::serialize(&contract_account)?,
+                                    ));
+                                    touched_contracts
+                                        .insert(contract_account_pk.to_bytes());
+                                }
+
                                 // Merge contract side effects into block batch
                                 for (key, val) in &result.side_effects.storage_updates.writes {
                                     let full_key = format!(
@@ -437,7 +466,6 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                                     .insert(contract_account_public_key(contract_id).to_bytes());
 
                                 // Recompute the contract's storage root to reflect all changes
-
                                 let contract_account_pk = contract_account_public_key(contract_id);
                                 if let Some(mut contract_account) =
                                     self.storage.get_account(&contract_account_pk)?
@@ -475,7 +503,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                                 }
                             }
                             Err(e) => {
-                                warn!("[LEDGER] Contract call failed: {}", e);
+                                warn!("[LEDGER] Contract call failed (value not transferred): {}", e);
                             }
                         }
                     }
@@ -488,10 +516,11 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                 }
             }
 
-            // Deduct gas fee based on actual gas used and gas price
+            // Deduct gas fee — never charge more than the user's gas_limit
+            let billable_gas = gas_used.min(tx.gas_limit);
             let total_fee = tx
                 .gas_price
-                .checked_mul(gas_used)
+                .checked_mul(billable_gas)
                 .ok_or(LedgerError::StateTransition(StateTransitionError::Overflow))?;
             if sender_balance < total_fee {
                 warn!(
