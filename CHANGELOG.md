@@ -7,6 +7,8 @@
 - API endpoint contract smoke tests in `tests/cli_lifecycle.rs`.
 - CQ regression coverage for contract-call value rollback safety (`CQ-1`) in `tests/cq_regression.rs`.
 - Transaction lookup + finality APIs: `/api/v1/transactions/{hash}` and `/api/v1/transactions/{hash}/finality` (legacy `/tx/{hash}` aliases).
+- Total supply query surfaces: `baalsd query supply`, `GET /api/v1/supply` (legacy `/supply` alias).
+- Prometheus-style runtime endpoint: `GET /metrics`.
 - Node.js native SDK entrypoints (`sdk/nodejs-native/index.js`, `index.d.ts`).
 - Release checksum manifest in `RELEASES.md`.
 - Batch tx-index regression tests for both backends in `tests/tx_index_batch_regression.rs`.

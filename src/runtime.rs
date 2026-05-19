@@ -1505,6 +1505,31 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         Ok(mempool.all().iter().map(|tx| (*tx).clone()).collect())
     }
 
+    pub fn get_latest_block_metrics(&self) -> Result<(u64, u64, u64), RuntimeError> {
+        let chain_state = self.get_chain_state()?;
+        let block = self
+            .storage
+            .get_block(&chain_state.latest_block_hash)?
+            .ok_or(StorageError::NotFound)?;
+
+        let mut failed_txs = 0u64;
+        for tx in &block.transactions {
+            if matches!(
+                self.storage.get_transaction_status(&tx.hash)?,
+                Some(crate::types::TransactionStatus::Failed(_))
+            ) {
+                failed_txs = failed_txs.saturating_add(1);
+            }
+        }
+
+        // Until per-tx exact gas usage is stored, expose block gas pressure via
+        // the sum of included tx gas limits.
+        let gas_used_per_block =
+            block.transactions.iter().fold(0u64, |acc, tx| acc.saturating_add(tx.gas_limit));
+
+        Ok((block.index, failed_txs, gas_used_per_block))
+    }
+
     /// Get comprehensive node status information
     pub fn get_comprehensive_node_status(&self) -> Result<RuntimeNodeStatus, RuntimeError> {
         let chain_state = self.get_chain_state()?;

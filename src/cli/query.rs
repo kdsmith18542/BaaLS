@@ -31,6 +31,10 @@ pub enum QueryCommands {
         #[arg(short, long, default_value = "./data")]
         data_dir: PathBuf,
     },
+    Supply {
+        #[arg(short, long, default_value = "./data")]
+        data_dir: PathBuf,
+    },
     ContractState {
         #[arg(short, long)]
         contract_id: String,
@@ -221,6 +225,27 @@ pub fn handle_query(
                 }
                 None => Err("Account not found".into()),
             }
+        }
+        QueryCommands::Supply { data_dir } => {
+            let mut cfg = Config::default();
+            cfg.storage.backend = match backend {
+                "redb" => StorageBackend::Redb,
+                _ => StorageBackend::Sled,
+            };
+            let (runtime, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
+            let chain = runtime.get_chain_state()?;
+            Ok(text_or_json(
+                json,
+                &format!(
+                    "Supply: total_supply={}, height={}",
+                    chain.total_supply, chain.latest_block_index
+                ),
+                serde_json::json!({
+                    "total_supply": chain.total_supply,
+                    "height": chain.latest_block_index,
+                    "latest_block_hash": hex::encode(chain.latest_block_hash)
+                }),
+            ))
         }
         QueryCommands::ContractState { contract_id, key, data_dir } => {
             let mut cfg = Config::default();

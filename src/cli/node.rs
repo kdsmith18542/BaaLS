@@ -379,6 +379,16 @@ fn spawn_health_server(
             let _ = request.respond(response);
         }
 
+        fn respond_text(request: tiny_http::Request, status: u16, body: String) {
+            let mut response = Response::from_string(body).with_status_code(StatusCode(status));
+            if let Ok(header) =
+                Header::from_bytes(b"Content-Type".as_slice(), b"text/plain".as_slice())
+            {
+                response = response.with_header(header);
+            }
+            let _ = request.respond(response);
+        }
+
         let mut rate_limiter = RateLimiter::new(10, 1);
         info!("Health endpoint listening on http://{}/health", bind_addr);
         while runtime.is_running() {
@@ -915,6 +925,63 @@ fn spawn_health_server(
                             }
                         };
                         respond_json(request, status, body);
+                    } else if request.method() == &Method::Get
+                        && matches!(request_url_str, "/supply" | "/api/v1/supply")
+                    {
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let chain = runtime.get_chain_state()?;
+                                Ok(serde_json::json!({
+                                    "total_supply": chain.total_supply,
+                                    "height": chain.latest_block_index,
+                                    "latest_block_hash": hex::encode(chain.latest_block_hash),
+                                }))
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (500, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
+                    } else if request.method() == &Method::Get && request_url_str == "/metrics" {
+                        let response_text = (|| -> Result<String, Box<dyn std::error::Error>> {
+                            let health = runtime.get_health_status()?;
+                            let (chain_height, failed_txs_per_block, gas_used_per_block) =
+                                runtime.get_latest_block_metrics()?;
+                            let block_time_ms = runtime.auto_block_interval_ms;
+                            let metrics = format!(
+                                "# HELP chain_height Current canonical chain height\n\
+# TYPE chain_height gauge\n\
+chain_height {}\n\
+# HELP mempool_size Pending transactions in mempool\n\
+# TYPE mempool_size gauge\n\
+mempool_size {}\n\
+# HELP block_time_ms Configured block production interval in milliseconds\n\
+# TYPE block_time_ms gauge\n\
+block_time_ms {}\n\
+# HELP peer_count Connected peer count\n\
+# TYPE peer_count gauge\n\
+peer_count {}\n\
+# HELP failed_txs_per_block Failed transaction count in latest block\n\
+# TYPE failed_txs_per_block gauge\n\
+failed_txs_per_block {}\n\
+# HELP gas_used_per_block Sum of gas limits included in latest block\n\
+# TYPE gas_used_per_block gauge\n\
+gas_used_per_block {}\n",
+                                chain_height,
+                                health.mempool_size,
+                                block_time_ms,
+                                health.connected_peers,
+                                failed_txs_per_block,
+                                gas_used_per_block
+                            );
+                            Ok(metrics)
+                        })();
+                        match response_text {
+                            Ok(text) => respond_text(request, 200, text),
+                            Err(e) => respond_text(request, 500, format!("error: {}", e)),
+                        }
                     } else {
                         let _ = request.respond(
                             Response::from_string("Not Found").with_status_code(StatusCode(404)),

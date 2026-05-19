@@ -191,6 +191,27 @@ fn test_cli_node_lifecycle_start_status_stop() {
     .expect("GET /api/v1/transactions/{hash}/finality");
     assert_eq!(tx_finality_status, 404, "unknown tx finality lookup should return 404");
 
+    // Avoid triggering per-IP burst limits in the test server.
+    std::thread::sleep(Duration::from_millis(1100));
+
+    let (supply_status, supply_body) =
+        http_request("GET", "127.0.0.1:8080", "/api/v1/supply", None, &[])
+            .expect("GET /api/v1/supply");
+    assert_eq!(supply_status, 200, "/api/v1/supply should return 200");
+    let supply_json: Value = serde_json::from_str(&supply_body).expect("parse supply json");
+    assert!(
+        supply_json.get("total_supply").is_some(),
+        "supply response should include total_supply"
+    );
+
+    let (metrics_status, metrics_body) =
+        http_request("GET", "127.0.0.1:8080", "/metrics", None, &[]).expect("GET /metrics");
+    assert_eq!(metrics_status, 200, "/metrics should return 200");
+    assert!(
+        metrics_body.contains("chain_height"),
+        "/metrics payload should include chain_height gauge"
+    );
+
     let stop_output = Command::new(bin_path)
         .arg("node")
         .arg("stop")
