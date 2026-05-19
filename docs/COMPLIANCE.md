@@ -39,7 +39,7 @@ Implemented canonical endpoints:
 - `POST /api/v1/contracts/call` (read-only)
 - `GET /api/v1/health` (alias of `/health`)
 
-Mutating endpoints require `Authorization: Bearer <BAALS_ADMIN_TOKEN>` and are loopback-restricted.
+Mutating endpoints require `Authorization: Bearer <jwt>` issued by `POST /auth/token` and are loopback-restricted.
 
 ## Notable Deviations / Scope Limits
 

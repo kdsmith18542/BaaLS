@@ -1,3 +1,4 @@
+use ed25519_dalek::Signer;
 use serde_json::Value;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -84,12 +85,19 @@ fn test_cli_node_lifecycle_start_status_stop() {
     let data_dir = temp_dir.path();
     let pid_path = data_dir.join("baals.pid");
     let stop_path = data_dir.join("baals.stop");
+    let node_sk_hex = "1111111111111111111111111111111111111111111111111111111111111111";
+    let node_sk_bytes = hex::decode(node_sk_hex).expect("decode test node private key");
+    let mut node_sk_arr = [0u8; 32];
+    node_sk_arr.copy_from_slice(&node_sk_bytes);
+    let node_sk = ed25519_dalek::SigningKey::from_bytes(&node_sk_arr);
+    let node_pk_hex = hex::encode(node_sk.verifying_key().to_bytes());
 
     let child = Command::new(bin_path)
         .arg("node")
         .arg("start")
         .arg("--data-dir")
         .arg(data_dir)
+        .env("BAALS_CONSENSUS_KEY", node_sk_hex)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -166,8 +174,47 @@ fn test_cli_node_lifecycle_start_status_stop() {
         http_request("POST", "127.0.0.1:8080", "/api/v1/transactions", Some("{}"), &[])
             .expect("POST /api/v1/transactions");
     assert_eq!(
-        tx_submit_status, 503,
-        "mutating endpoint should require BAALS_ADMIN_TOKEN when not configured"
+        tx_submit_status, 401,
+        "mutating endpoint should require a JWT Authorization header"
+    );
+
+    // Avoid triggering per-IP burst limits in the test server.
+    std::thread::sleep(Duration::from_millis(1100));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("unix timestamp")
+        .as_secs();
+    let nonce = "cli_lifecycle_nonce";
+    let challenge = format!("baals-auth-token:{}:{}", now, nonce);
+    let sig = node_sk.sign(challenge.as_bytes());
+    let token_req = serde_json::json!({
+        "timestamp": now,
+        "nonce": nonce,
+        "ttl_seconds": 300,
+        "public_key": node_pk_hex,
+        "signature": hex::encode(sig.to_bytes())
+    });
+    let (token_status, token_body) =
+        http_request("POST", "127.0.0.1:8080", "/auth/token", Some(&token_req.to_string()), &[])
+            .expect("POST /auth/token");
+    assert_eq!(token_status, 200, "/auth/token should return 200");
+    let token_json: Value = serde_json::from_str(&token_body).expect("parse /auth/token json");
+    let token = token_json["token"].as_str().expect("token in /auth/token response");
+    let auth_header = format!("Bearer {}", token);
+
+    // Avoid triggering per-IP burst limits in the test server.
+    std::thread::sleep(Duration::from_millis(1100));
+    let (authed_submit_status, _) = http_request(
+        "POST",
+        "127.0.0.1:8080",
+        "/api/v1/transactions",
+        Some("{}"),
+        &[("Authorization", auth_header.as_str())],
+    )
+    .expect("POST /api/v1/transactions with JWT");
+    assert_eq!(
+        authed_submit_status, 400,
+        "authorized submit with invalid payload should pass auth and fail payload validation"
     );
 
     let missing_tx_hash = "0000000000000000000000000000000000000000000000000000000000000000";

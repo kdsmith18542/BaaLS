@@ -9,6 +9,8 @@
 - Transaction lookup + finality APIs: `/api/v1/transactions/{hash}` and `/api/v1/transactions/{hash}/finality` (legacy `/tx/{hash}` aliases).
 - Total supply query surfaces: `baalsd query supply`, `GET /api/v1/supply` (legacy `/supply` alias).
 - Prometheus-style runtime endpoint: `GET /metrics`.
+- Short-lived JWT admin auth flow: `POST /auth/token` (loopback + node-key signature proof).
+- CLI helper for JWT minting: `baalsd api token --private-key <hex>`.
 - Node.js native SDK entrypoints (`sdk/nodejs-native/index.js`, `index.d.ts`).
 - Release checksum manifest in `RELEASES.md`.
 - Batch tx-index regression tests for both backends in `tests/tx_index_batch_regression.rs`.
@@ -21,6 +23,7 @@
 - Runtime/CLI transaction introspection now includes stored status and confirmation/finality depth metadata.
 - Sled/Redb batch write handling now preserves tx->block reverse mapping for reliable status/finality lookup.
 - Reorg path now enforces common-ancestor discovery with configurable `max_reorg_depth` and rejects divergent forks that would require rollback support not yet present.
+- Mutating HTTP routes now require valid Bearer JWTs (HS256) instead of static admin token strings.
 
 
 ### Security

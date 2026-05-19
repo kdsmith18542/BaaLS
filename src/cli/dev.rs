@@ -203,7 +203,7 @@ pub fn handle_dev(
                 "redb" => StorageBackend::Redb,
                 _ => StorageBackend::Sled,
             };
-            let (runtime, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
+            let (runtime, _, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let metrics = runtime.get_detailed_metrics()?;
             Ok(text_or_json(
                 json,

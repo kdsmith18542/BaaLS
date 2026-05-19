@@ -93,7 +93,7 @@ pub fn handle_query(
                 "redb" => StorageBackend::Redb,
                 _ => StorageBackend::Sled,
             };
-            let (runtime, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
+            let (runtime, _, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let chain = runtime.get_chain_state()?;
             let block = runtime.get_block(&chain.latest_block_hash)?.ok_or("No block found")?;
             Ok(text_or_json(
@@ -113,7 +113,7 @@ pub fn handle_query(
                 "redb" => StorageBackend::Redb,
                 _ => StorageBackend::Sled,
             };
-            let (runtime, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
+            let (runtime, _, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let block = if let Ok(h) = hex::decode(&identifier) {
                 if h.len() == 32 {
                     let mut arr = [0u8; 32];
@@ -153,7 +153,7 @@ pub fn handle_query(
                 "redb" => StorageBackend::Redb,
                 _ => StorageBackend::Sled,
             };
-            let (runtime, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
+            let (runtime, _, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let h = hex::decode(&hash)?;
             if h.len() != 32 {
                 return Err("Hash must be 32 bytes hex".into());
@@ -203,7 +203,7 @@ pub fn handle_query(
                 "redb" => StorageBackend::Redb,
                 _ => StorageBackend::Sled,
             };
-            let (runtime, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
+            let (runtime, _, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let pk = parse_pubkey(&address)?;
             match runtime.get_account(&pk)? {
                 Some(Account::Wallet { balance, nonce }) => Ok(text_or_json(
@@ -232,7 +232,7 @@ pub fn handle_query(
                 "redb" => StorageBackend::Redb,
                 _ => StorageBackend::Sled,
             };
-            let (runtime, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
+            let (runtime, _, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let chain = runtime.get_chain_state()?;
             Ok(text_or_json(
                 json,
@@ -253,7 +253,7 @@ pub fn handle_query(
                 "redb" => StorageBackend::Redb,
                 _ => StorageBackend::Sled,
             };
-            let (runtime, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
+            let (runtime, _, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let cid_bytes = hex::decode(&contract_id)?;
             if cid_bytes.len() != 32 {
                 return Err("CID must be 32 bytes hex".into());
@@ -282,7 +282,7 @@ pub fn handle_query(
                 "redb" => StorageBackend::Redb,
                 _ => StorageBackend::Sled,
             };
-            let (runtime, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
+            let (runtime, _, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let cid_bytes = hex::decode(&contract_id)?;
             if cid_bytes.len() != 32 {
                 return Err("CID must be 32 bytes hex".into());

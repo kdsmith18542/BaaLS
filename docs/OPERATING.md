@@ -265,9 +265,10 @@ baalsd node start --storage-backend redb --data-dir ./redb-data
 
 Health endpoint: `http://localhost:8080/health`
 
-Requires `BAALS_ADMIN_TOKEN` environment variable for mutating endpoints:
+Mutating endpoints require a short-lived JWT Bearer token:
 ```bash
-export BAALS_ADMIN_TOKEN="your-secret-token"
+# Request a JWT token using the node signing key (32-byte private key hex)
+baalsd api token --endpoint http://localhost:8080 --private-key <node_private_key_hex> --json
 ```
 
 ### HTTP API Endpoints
@@ -277,6 +278,7 @@ Canonical routes are under `/api/v1/*`. Legacy routes remain supported for compa
 | Canonical Endpoint | Legacy Alias | Method | Auth | Description |
 |--------------------|--------------|--------|------|-------------|
 | `/health` (or `/api/v1/health`) | - | GET | No | Node health status |
+| `/api/v1/auth/token` | `/auth/token` | POST | Loopback + node key proof | Mint short-lived JWT for mutating endpoints |
 | `/api/v1/blocks/latest` | `/block/latest` | GET | No | Latest block info |
 | `/api/v1/blocks/{h}` | `/block/by_height/{h}` | GET | No | Block by height |
 | `/api/v1/blocks/hash/{hash}` | `/block/by_hash/{hash}` | GET | No | Block by hash |

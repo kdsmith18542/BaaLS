@@ -1,6 +1,10 @@
+use base64::Engine;
 use clap::Subcommand;
+use hmac::{Hmac, Mac};
 use log::{error, info};
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -175,7 +179,7 @@ pub fn build_runtime(
     peers: &[String],
     listen_addr: &str,
     mdns: bool,
-) -> Result<(BaaLSRuntime, PublicKey), Box<dyn std::error::Error>> {
+) -> Result<(BaaLSRuntime, PublicKey, ed25519_dalek::SigningKey), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(data_dir)?;
     log::warn!(
         "BaaLS stores ledger data in cleartext at {:?}. \
@@ -273,7 +277,7 @@ pub fn build_runtime(
         SyncWrapper::Noop(NoopSync)
     } else {
         let mut cs = CustomSync::new(public_key, listen_socket)
-            .with_signing_key(signing_key)
+            .with_signing_key(signing_key.clone())
             .with_storage(storage.clone_storage());
         if config.network.tls_enabled {
             let tls = TlsConfig::load(
@@ -310,7 +314,7 @@ pub fn build_runtime(
     runtime.finality_depth = config.consensus.finality_depth;
     runtime.max_reorg_depth = config.consensus.max_reorg_depth;
     runtime.start()?;
-    Ok((runtime, public_key))
+    Ok((runtime, public_key, signing_key))
 }
 
 struct RateLimiter {
@@ -338,9 +342,139 @@ impl RateLimiter {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct JwtHeader {
+    alg: String,
+    typ: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JwtClaims {
+    sub: String,
+    iss: String,
+    iat: u64,
+    exp: u64,
+    jti: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthTokenRequest {
+    timestamp: u64,
+    nonce: String,
+    ttl_seconds: Option<u64>,
+    public_key: String,
+    signature: String,
+}
+
+type HmacSha256 = Hmac<Sha256>;
+
+fn base64url_encode(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn base64url_decode(input: &str) -> Result<Vec<u8>, String> {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(input).map_err(|e| e.to_string())
+}
+
+fn derive_admin_jwt_secret(signing_key: &ed25519_dalek::SigningKey) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    hasher.update(b"baals-admin-jwt-v1");
+    hasher.update(signing_key.to_bytes());
+    hasher.finalize().into()
+}
+
+fn sign_hs256(input: &str, secret: &[u8]) -> Result<String, String> {
+    let mut mac =
+        HmacSha256::new_from_slice(secret).map_err(|e| format!("HMAC init failed: {}", e))?;
+    mac.update(input.as_bytes());
+    let sig = mac.finalize().into_bytes();
+    Ok(base64url_encode(&sig))
+}
+
+fn issue_admin_jwt(secret: &[u8], ttl_seconds: u64) -> Result<(String, u64), String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock before UNIX_EPOCH".to_string())?
+        .as_secs();
+    let ttl = ttl_seconds.clamp(60, 900);
+    let exp = now.saturating_add(ttl);
+    let mut jti_bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut jti_bytes);
+    let claims = JwtClaims {
+        sub: "admin".to_string(),
+        iss: "baalsd".to_string(),
+        iat: now,
+        exp,
+        jti: hex::encode(jti_bytes),
+    };
+    let header = JwtHeader { alg: "HS256".to_string(), typ: "JWT".to_string() };
+
+    let header_b64 = base64url_encode(
+        serde_json::to_string(&header)
+            .map_err(|e| format!("header serialization failed: {}", e))?
+            .as_bytes(),
+    );
+    let claims_b64 = base64url_encode(
+        serde_json::to_string(&claims)
+            .map_err(|e| format!("claims serialization failed: {}", e))?
+            .as_bytes(),
+    );
+    let signing_input = format!("{}.{}", header_b64, claims_b64);
+    let sig_b64 = sign_hs256(&signing_input, secret)?;
+    Ok((format!("{}.{}", signing_input, sig_b64), exp))
+}
+
+fn verify_admin_jwt(token: &str, secret: &[u8]) -> Result<JwtClaims, String> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err("malformed JWT".to_string());
+    }
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    let expected_sig = sign_hs256(&signing_input, secret)?;
+    if expected_sig != parts[2] {
+        return Err("invalid JWT signature".to_string());
+    }
+
+    let header_bytes = base64url_decode(parts[0])?;
+    let header: JwtHeader =
+        serde_json::from_slice(&header_bytes).map_err(|e| format!("invalid JWT header: {}", e))?;
+    if header.alg != "HS256" {
+        return Err("unsupported JWT algorithm".to_string());
+    }
+
+    let claims_bytes = base64url_decode(parts[1])?;
+    let claims: JwtClaims =
+        serde_json::from_slice(&claims_bytes).map_err(|e| format!("invalid JWT claims: {}", e))?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock before UNIX_EPOCH".to_string())?
+        .as_secs();
+    if claims.exp <= now {
+        return Err("JWT expired".to_string());
+    }
+    if claims.iat > now.saturating_add(60) {
+        return Err("JWT iat too far in the future".to_string());
+    }
+    Ok(claims)
+}
+
+fn extract_bearer_token(request: &tiny_http::Request) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Authorization"))
+        .and_then(|h| h.value.as_str().strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn spawn_health_server(
     runtime: BaaLSRuntime,
     bind_addr: String,
+    node_public_key: PublicKey,
+    node_signing_key: ed25519_dalek::SigningKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let server = Server::http(&bind_addr).map_err(|e| {
         std::io::Error::new(
@@ -350,25 +484,8 @@ fn spawn_health_server(
     })?;
 
     std::thread::spawn(move || {
-        let admin_token =
-            std::env::var("BAALS_ADMIN_TOKEN").ok().filter(|token| !token.trim().is_empty());
-
-        fn is_authorized_request(
-            request: &tiny_http::Request,
-            expected_token: Option<&str>,
-        ) -> bool {
-            if let Some(token) = expected_token {
-                let expected = format!("Bearer {}", token);
-                request
-                    .headers()
-                    .iter()
-                    .find(|h| h.field.equiv("Authorization"))
-                    .map(|h| h.value.as_str() == expected)
-                    .unwrap_or(false)
-            } else {
-                true
-            }
-        }
+        let jwt_secret = derive_admin_jwt_secret(&node_signing_key);
+        let node_public_key_hex = hex::encode(node_public_key.to_bytes());
 
         fn respond_json(request: tiny_http::Request, status: u16, body: String) {
             let mut response = Response::from_string(body).with_status_code(StatusCode(status));
@@ -409,6 +526,8 @@ fn spawn_health_server(
 
                     let is_loopback =
                         request.remote_addr().map(|addr| addr.ip().is_loopback()).unwrap_or(false);
+                    let is_auth_token_endpoint = request.method() == &Method::Post
+                        && matches!(request_url_str, "/auth/token" | "/api/v1/auth/token");
                     let is_mutating_endpoint = request.method() == &Method::Post
                         && matches!(
                             request_url_str,
@@ -421,30 +540,19 @@ fn spawn_health_server(
                                 | "/contract/call"
                                 | "/api/v1/contracts/invoke"
                         );
-                    if is_mutating_endpoint && !is_loopback {
+                    if (is_mutating_endpoint || is_auth_token_endpoint) && !is_loopback {
                         respond_json(
                             request,
                             403,
                             serde_json::json!({
-                                "error": "mutating endpoints are restricted to loopback clients"
+                                "error": "auth and mutating endpoints are restricted to loopback clients"
                             })
                             .to_string(),
                         );
                         continue;
                     }
                     if is_mutating_endpoint {
-                        let Some(expected_token) = admin_token.as_deref() else {
-                            respond_json(
-                                request,
-                                503,
-                                serde_json::json!({
-                                    "error": "mutating endpoints disabled until BAALS_ADMIN_TOKEN is configured"
-                                })
-                                .to_string(),
-                            );
-                            continue;
-                        };
-                        if !is_authorized_request(&request, Some(expected_token)) {
+                        let Some(token) = extract_bearer_token(&request) else {
                             respond_json(
                                 request,
                                 401,
@@ -454,7 +562,75 @@ fn spawn_health_server(
                                 .to_string(),
                             );
                             continue;
+                        };
+                        if verify_admin_jwt(&token, &jwt_secret).is_err() {
+                            respond_json(
+                                request,
+                                401,
+                                serde_json::json!({
+                                    "error": "invalid or expired JWT"
+                                })
+                                .to_string(),
+                            );
+                            continue;
                         }
+                    }
+
+                    if is_auth_token_endpoint {
+                        let mut body = String::new();
+                        let _ = request.as_reader().read_to_string(&mut body);
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let token_req: AuthTokenRequest = serde_json::from_str(&body)?;
+                                if token_req.public_key != node_public_key_hex {
+                                    return Err("public_key does not match this node".into());
+                                }
+
+                                let now = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .map_err(|_| "system clock before UNIX_EPOCH")?
+                                    .as_secs();
+                                let skew = now.abs_diff(token_req.timestamp);
+                                if skew > 60 {
+                                    return Err("timestamp outside allowed skew window".into());
+                                }
+
+                                let sig_bytes = hex::decode(&token_req.signature)
+                                    .map_err(|_| "signature must be hex")?;
+                                if sig_bytes.len() != 64 {
+                                    return Err("signature must be 64 bytes".into());
+                                }
+                                let mut sig_arr = [0u8; 64];
+                                sig_arr.copy_from_slice(&sig_bytes);
+                                let signature = ed25519_dalek::Signature::from_bytes(&sig_arr);
+
+                                let challenge = format!(
+                                    "baals-auth-token:{}:{}",
+                                    token_req.timestamp, token_req.nonce
+                                );
+                                node_public_key
+                                    .verify(challenge.as_bytes(), &signature)
+                                    .map_err(|_| "signature verification failed")?;
+
+                                let ttl = token_req.ttl_seconds.unwrap_or(900);
+                                let (token, expires_at) = issue_admin_jwt(&jwt_secret, ttl)
+                                    .map_err(|e| format!("token issuance failed: {}", e))?;
+
+                                Ok(serde_json::json!({
+                                    "token_type": "Bearer",
+                                    "token": token,
+                                    "expires_at": expires_at,
+                                    "ttl_seconds": ttl.clamp(60, 900),
+                                }))
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (401, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
+                        continue;
                     }
 
                     let is_health = request.method() == &Method::Get
@@ -1099,7 +1275,8 @@ pub fn handle_node(
             write_pid_info(&pid_path, std::process::id(), started_at)?;
 
             #[allow(unused_variables)]
-            let (runtime, node_public_key) = build_runtime(&data_dir, &cfg, &peer, &listen, _mdns)?;
+            let (runtime, node_public_key, node_signing_key) =
+                build_runtime(&data_dir, &cfg, &peer, &listen, _mdns)?;
 
             #[cfg(not(feature = "mdns"))]
             if _mdns {
@@ -1133,7 +1310,7 @@ pub fn handle_node(
             }
 
             let health_bind = format!("127.0.0.1:{}", cfg.node.health_port);
-            spawn_health_server(runtime.clone(), health_bind)?;
+            spawn_health_server(runtime.clone(), health_bind, node_public_key, node_signing_key)?;
             info!("Node started. Press Ctrl+C to stop.");
             let pc_file = data_dir.join("peer_count");
             let mut heartbeat = 0u64;

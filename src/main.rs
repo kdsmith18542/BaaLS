@@ -186,6 +186,44 @@ fn http_post_json(
 
 fn handle_api(action: cli::ApiCommands, json: bool) -> Result<String, Box<dyn std::error::Error>> {
     match action {
+        cli::ApiCommands::Token { endpoint, private_key, ttl_seconds } => {
+            use ed25519_dalek::Signer;
+            use rand::RngCore;
+
+            let key_bytes = hex::decode(&private_key)?;
+            if key_bytes.len() != 32 {
+                return Err("private_key must be 32-byte hex".into());
+            }
+            let mut key_arr = [0u8; 32];
+            key_arr.copy_from_slice(&key_bytes);
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_arr);
+
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+            let mut nonce_bytes = [0u8; 16];
+            rand::rng().fill_bytes(&mut nonce_bytes);
+            let nonce = hex::encode(nonce_bytes);
+            let challenge = format!("baals-auth-token:{}:{}", now, nonce);
+            let signature = signing_key.sign(challenge.as_bytes());
+
+            let api_url = format!("{}/auth/token", api_base(&endpoint));
+            let request_payload = serde_json::json!({
+                "timestamp": now,
+                "nonce": nonce,
+                "ttl_seconds": ttl_seconds,
+                "public_key": hex::encode(signing_key.verifying_key().to_bytes()),
+                "signature": hex::encode(signature.to_bytes()),
+            });
+            let (status, body) = http_post_json(&api_url, &request_payload.to_string(), None)?;
+            Ok(text_or_json(
+                json,
+                &format!("POST {} -> HTTP {}", api_url, status),
+                serde_json::json!({
+                    "endpoint": api_url,
+                    "status": status,
+                    "response": parse_json_or_text(&body),
+                }),
+            ))
+        }
         cli::ApiCommands::Health { endpoint } => {
             let url = format!("{}/health", api_base(&endpoint));
             let (status, body) = http_get(&url, None)?;

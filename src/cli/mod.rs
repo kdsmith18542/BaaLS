@@ -93,6 +93,14 @@ pub enum KeyCommands {
 
 #[derive(Subcommand)]
 pub enum ApiCommands {
+    Token {
+        #[arg(short, long, default_value = "http://localhost:8080")]
+        endpoint: String,
+        #[arg(long)]
+        private_key: String,
+        #[arg(long, default_value_t = 900)]
+        ttl_seconds: u64,
+    },
     Health {
         #[arg(short, long, default_value = "http://localhost:8080")]
         endpoint: String,

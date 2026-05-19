@@ -116,7 +116,7 @@ pub fn handle_tx(
                 "redb" => StorageBackend::Redb,
                 _ => StorageBackend::Sled,
             };
-            let (runtime, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
+            let (runtime, _, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let sender_pk = parse_pubkey(&sender)?;
             let recipient_pk = parse_pubkey(&recipient)?;
 
@@ -178,7 +178,7 @@ pub fn handle_tx(
                 "redb" => StorageBackend::Redb,
                 _ => StorageBackend::Sled,
             };
-            let (runtime, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
+            let (runtime, _, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let sender_pk = parse_pubkey(&sender)?;
             let wasm_bytes = std::fs::read(&wasm)?;
             let _account = runtime
@@ -213,7 +213,7 @@ pub fn handle_tx(
                 "redb" => StorageBackend::Redb,
                 _ => StorageBackend::Sled,
             };
-            let (runtime, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
+            let (runtime, _, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let sender_pk = parse_pubkey(&sender)?;
             let cid_bytes = hex::decode(&contract_id)?;
             if cid_bytes.len() != 32 {
@@ -244,7 +244,7 @@ pub fn handle_tx(
                 "redb" => StorageBackend::Redb,
                 _ => StorageBackend::Sled,
             };
-            let (runtime, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
+            let (runtime, _, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             let sender_pk = parse_pubkey(&sender)?;
             let account = runtime
                 .get_account(&sender_pk)?
@@ -356,7 +356,7 @@ pub fn handle_tx(
                 "redb" => StorageBackend::Redb,
                 _ => StorageBackend::Sled,
             };
-            let (runtime, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
+            let (runtime, _, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
             runtime.submit_transaction(tx.clone())?;
             let tokio_rt = tokio::runtime::Runtime::new()?;
             let block = tokio_rt.block_on(runtime.produce_block())?;

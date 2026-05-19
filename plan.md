@@ -611,3 +611,4 @@ Acceptance criteria:
 - [x] Phase 2.5 surface: `query supply` CLI and `/api/v1/supply` endpoint now expose chain `total_supply`
 - [x] Phase 3.10 surface: Prometheus-style `/metrics` endpoint added (chain height, mempool size, block time, peer count, failed tx count, block gas pressure)
 - [x] Phase 2.1 safety foundation: added common-ancestor detection + `max_reorg_depth` guard; divergent forks now fail closed until rollback logs/snapshots are implemented
+- [x] Phase 2.9 surface: short-lived JWT flow added (`POST /auth/token` with node-key signature proof); mutating endpoints now require valid Bearer JWT

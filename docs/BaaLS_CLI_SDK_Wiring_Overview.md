@@ -260,7 +260,7 @@ GET    /health (or /api/v1/health) Health check
 ```
 
 **Authentication:**
-- Required for mutating endpoints: Bearer token (`BAALS_ADMIN_TOKEN`)
+- Required for mutating endpoints: short-lived Bearer JWT from `POST /auth/token`
 - Mutating endpoints are restricted to loopback clients
 - Read-only endpoints do not require a token
 - Rate limiting is enforced per remote IP address
@@ -347,7 +347,6 @@ Currently implemented environment variables in this repository:
 | `BAALS_CONSENSUS_KEY` | Raw consensus private key (hex) | (none) |
 | `BAALS_CONSENSUS_PASSWORD` | Keystore password for consensus key | (none) |
 | `BAALS_BACKUP_KEY` | AES-256-GCM key for backup encryption | (none) |
-| `BAALS_ADMIN_TOKEN` | Required bearer token for mutating HTTP endpoints | (none) |
 
 ### Config File Format
 
@@ -379,7 +378,7 @@ connection_timeout_ms = 30000
 | Area | Status | Notes |
 |------|--------|-------|
 | Rust SDK (`baals` crate) | GA | Canonical runtime API |
-| HTTP REST API (`/api/v1/*` + legacy aliases) | GA | Mutating routes require bearer token + loopback |
+| HTTP REST API (`/api/v1/*` + legacy aliases) | GA | Mutating routes require JWT bearer token + loopback |
 | CLI core runtime workflows | Beta | Core node/wallet/tx/query/db/proof/dev paths are implemented |
 | CLI `p2p` group | Planned | Explicitly not wired to live sync state yet |
 | CLI advanced `contract`/`admin` subcommands | Planned | Some subcommands intentionally return not implemented |
