@@ -2,6 +2,20 @@
 
 ## [0.1.0] — Unreleased (pre-production)
 
+### Added (2026-05-19 completeness pass)
+- Canonical HTTP API namespace support under `/api/v1/*` with backward-compatible legacy route aliases.
+- API endpoint contract smoke tests in `tests/cli_lifecycle.rs`.
+- CQ regression coverage for contract-call value rollback safety (`CQ-1`) in `tests/cq_regression.rs`.
+- Node.js native SDK entrypoints (`sdk/nodejs-native/index.js`, `index.d.ts`).
+- Release checksum manifest in `RELEASES.md`.
+
+### Changed (2026-05-19 completeness pass)
+- `api` CLI subcommands now execute live HTTP requests instead of printing static examples.
+- Placeholder-success paths in selected `p2p`, `contract`, and `admin` subcommands now return explicit not-implemented errors.
+- Compliance and operating docs updated to align with actual route surface, quality-gate status, and SDK support matrix.
+- Node.js package naming clarified: `sdk/nodejs` renamed to `@baals/sdk-ffi` to avoid package-name collision with native addon metadata.
+
+
 ### Security
 - **P0**: WASM host function gas exhaustion now properly aborts execution instead of silently continuing.
 - **P0**: Contract deployment state changes (code, deployer, init side effects) now committed atomically in block batch.

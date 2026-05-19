@@ -2,6 +2,8 @@ use baals::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
+mod wasm_fixtures;
+
 fn init_logging() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .try_init();
@@ -55,6 +57,38 @@ fn make_transfer_tx(
         sender: sender_pk,
         recipient: Address::Wallet(recipient),
         payload: TransactionPayload::Transfer { amount },
+        nonce,
+        timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+        signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+        gas_limit,
+        gas_price,
+        priority: 0,
+        metadata: None,
+        chain_id,
+    };
+    tx.hash = tx.calculate_hash().unwrap();
+    tx.sign(sender_sk).unwrap();
+    tx
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_contract_call_tx(
+    sender_pk: PublicKey,
+    sender_sk: &ed25519_dalek::SigningKey,
+    contract_id: ContractId,
+    method: &str,
+    args: Vec<Vec<u8>>,
+    value: Option<u64>,
+    nonce: u64,
+    gas_limit: u64,
+    gas_price: u64,
+    chain_id: u64,
+) -> Transaction {
+    let mut tx = Transaction {
+        hash: [0u8; 32],
+        sender: sender_pk,
+        recipient: Address::Contract(contract_id),
+        payload: TransactionPayload::ContractCall { method: method.to_string(), args, value },
         nonce,
         timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
         signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
@@ -385,5 +419,72 @@ fn cq7_authorized_signers_persisted() {
     assert!(
         consensus2.authorized_signers().contains(&pk2),
         "CQ-7: Added signer should be persisted and reloaded"
+    );
+}
+
+// CQ-1: contract call value must not transfer when call fails
+#[test]
+fn cq1_contract_call_value_not_transferred_on_failure() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let (runtime, _consensus_sk, _consensus_pk) = make_runtime(temp_dir.path());
+    let (sk, pk) = make_test_account(&runtime, 1_000_000);
+
+    // Deploy a test module whose exported method list does not include "main".
+    // Calling "does_not_exist" should fail because no fallback export matches.
+    let wasm = wasm_fixtures::make_storage_write_read_module();
+    let contract_id = runtime.deploy_contract(&pk, &wasm, None, 500_000).unwrap();
+    let contract_pk = contract_account_public_key(&contract_id);
+    if runtime.get_account(&contract_pk).unwrap().is_none() {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&wasm);
+        let code_hash: [u8; 32] = hasher.finalize().into();
+        runtime
+            .create_account(
+                &contract_pk,
+                Account::Contract { balance: 0, code_hash, storage_root_hash: [0u8; 32], nonce: 0 },
+            )
+            .unwrap();
+    }
+    let contract_before =
+        runtime.get_account(&contract_pk).unwrap().map(|a| a.balance()).unwrap_or(0);
+
+    let tx = make_contract_call_tx(
+        pk,
+        &sk,
+        contract_id,
+        "does_not_exist",
+        vec![],
+        Some(500_000),
+        1,
+        100_000,
+        1,
+        1,
+    );
+    runtime.submit_transaction(tx.clone()).unwrap();
+
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    let _ = tokio_rt.block_on(runtime.produce_block()).unwrap();
+
+    let status = runtime.storage().get_transaction_status(&tx.hash).unwrap();
+    assert!(
+        matches!(status, Some(TransactionStatus::Failed(_))),
+        "CQ-1: failed contract call should be recorded as Failed, got: {:?}",
+        status
+    );
+
+    let contract_after =
+        runtime.get_account(&contract_pk).unwrap().map(|a| a.balance()).unwrap_or(0);
+    assert_eq!(
+        contract_before, contract_after,
+        "CQ-1: contract balance must not increase when call fails"
+    );
+
+    let sender_after = runtime.get_account(&pk).unwrap().unwrap().balance();
+    assert!(
+        sender_after > 800_000,
+        "CQ-1: sender should not lose call value on failed execution (balance={})",
+        sender_after
     );
 }

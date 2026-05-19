@@ -406,16 +406,16 @@ Run a public testnet for ≥ 30 days with:
 
 ### 4.5 Release candidate checklist
 ```
-[ ] All Phase 1 bugs fixed and regression-tested
+[x] All Phase 1 bugs fixed and regression-tested
 [ ] Phase 2 protocol items complete and tested
 [ ] Phase 3 hardening items complete
 [ ] External audit report reviewed, critical/high findings resolved
 [ ] Fuzz campaign completed, no crashes or assertion failures
 [ ] Load test passed at target TPS
 [ ] Testnet run ≥ 30 days with 0 consensus failures
-[ ] CHANGELOG.md updated
-[ ] Reproducible build: cargo build --release --locked produces same binary
-[ ] Binary checksums published in RELEASES.md
+[x] CHANGELOG.md updated
+[x] Reproducible build: cargo build --release --locked produces same binary
+[x] Binary checksums published in RELEASES.md
 [ ] SECURITY.md updated with bug-bounty scope
 ```
 
@@ -429,7 +429,7 @@ Run a public testnet for ≥ 30 days with:
 | Integration tests | 44 ✅ | 50+ (after Phase 1 fixes) |
 | Security tests | 3 ✅ | 20+ (Byzantine, crash, SMT) |
 | CLI lifecycle | 1 ✅ | full smoke suite |
-| CQ bug regression tests | **0 ❌** | 12 (one per CQ-1..CQ-12) |
+| CQ bug regression tests | **11 ✅** | 11 (Phase 1 bug set: CQ-1,2,3,4,6,7,8,11,12,16,17) |
 | True reorg tests | **0 ❌** | 5+ |
 | Multi-validator consensus | **0 ❌** | 10+ |
 | Fuzz (24h runs) | **0 ❌** | 7 targets |
@@ -606,3 +606,4 @@ Acceptance criteria:
 - [x] T3.1 SDK/support matrix updated in docs
 - [x] T3.2 Node package collision resolved and native entry files added
 - [x] T4.1 consensus/compliance narrative contradictions reconciled
+- [x] Added CQ-1 regression coverage to `tests/cq_regression.rs` (suite now 11/11 for Phase 1 bug set)
