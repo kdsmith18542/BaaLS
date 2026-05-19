@@ -1128,7 +1128,10 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         let chain_snapshot = self.chain_state.lock().unwrap().clone();
         let local_height = chain_snapshot.latest_block_index;
         let local_tip_hash = chain_snapshot.latest_block_hash;
+        let before_state_root = chain_snapshot.accounts_root_hash;
         let fork_tip_height = fork_blocks.last().map(|b| b.index).unwrap_or(0);
+        let fork_tip_state_root =
+            fork_blocks.last().map(|b| b.state_root).unwrap_or(chain_snapshot.accounts_root_hash);
 
         if fork_tip_height <= local_height {
             info!(
@@ -1197,6 +1200,13 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                  Rollback depth {} requires rollback logs/snapshots, which are not implemented yet.",
                 ancestor_height, local_height, rollback_depth
             );
+            warn!(
+                "[CHAIN][REORG] Rejected divergent fork: before_root={}, fork_tip_root={}, local_height={}, fork_tip_height={}",
+                crate::types::format_hex(&before_state_root),
+                crate::types::format_hex(&fork_tip_state_root),
+                local_height,
+                fork_tip_height
+            );
             return Err(RuntimeError::InvalidTransaction(
                 "Divergent fork reorg requires rollback support (RollbackLog/snapshots) and is not implemented yet"
                     .to_string(),
@@ -1248,7 +1258,17 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             }
         }
 
-        Ok(self.chain_state.lock().unwrap().latest_block_index)
+        let final_state = self.chain_state.lock().unwrap().clone();
+        info!(
+            "[CHAIN][REORG] Applied extension fork: ancestor_height={}, from_height={}, to_height={}, before_root={}, after_root={}",
+            ancestor_height,
+            local_height,
+            final_state.latest_block_index,
+            crate::types::format_hex(&before_state_root),
+            crate::types::format_hex(&final_state.accounts_root_hash)
+        );
+
+        Ok(final_state.latest_block_index)
     }
 
     pub fn get_node_status(&self) -> Result<ChainState, RuntimeError> {
