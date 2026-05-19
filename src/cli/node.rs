@@ -308,6 +308,7 @@ pub fn build_runtime(
     runtime.min_gas_price = config.consensus.min_gas_price;
     runtime.chain_id = config.consensus.chain_id;
     runtime.finality_depth = config.consensus.finality_depth;
+    runtime.max_reorg_depth = config.consensus.max_reorg_depth;
     runtime.start()?;
     Ok((runtime, public_key))
 }

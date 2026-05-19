@@ -214,6 +214,7 @@ pub struct Runtime<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> {
     pub min_gas_price: u64,
     pub chain_id: u64,
     pub finality_depth: u64,
+    pub max_reorg_depth: u64,
     metrics: Arc<MetricsCollector>,
     started_at: Arc<Mutex<Option<SystemTime>>>,
     sync_in_flight: Arc<AtomicBool>,
@@ -239,6 +240,7 @@ impl<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> Clone for Runtime<S
             min_gas_price: self.min_gas_price,
             chain_id: self.chain_id,
             finality_depth: self.finality_depth,
+            max_reorg_depth: self.max_reorg_depth,
             metrics: Arc::clone(&self.metrics),
             started_at: Arc::clone(&self.started_at),
             sync_in_flight: Arc::clone(&self.sync_in_flight),
@@ -290,6 +292,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             min_gas_price: 1, // default minimum gas price
             chain_id: 1,      // default chain id
             finality_depth: 12,
+            max_reorg_depth: 50,
             consensus: Arc::new(consensus),
             mempool: Arc::new(Mutex::new(Mempool::new(mempool_size_limit))),
             chain_state: Arc::new(Mutex::new(initial_chain_state)),
@@ -1093,8 +1096,29 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         self.storage.get_block(hash).map_err(RuntimeError::StorageError)
     }
 
+    fn find_local_block_height_by_hash(
+        &self,
+        hash: &[u8; 32],
+        from_height: u64,
+        to_height: u64,
+    ) -> Result<Option<u64>, RuntimeError> {
+        if from_height > to_height {
+            return Ok(None);
+        }
+        for height in (from_height..=to_height).rev() {
+            if let Some(block) = self.storage.get_block_by_height(height)? {
+                if &block.hash == hash {
+                    return Ok(Some(height));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Reorganize the chain by applying a sequence of blocks from a fork.
-    /// Validates each block for continuity and correctness before applying.
+    /// Validates fork continuity and only auto-applies extension forks.
+    /// Divergent forks (that require rollback) are detected and rejected until
+    /// rollback logs/snapshots are implemented.
     /// Returns the new chain height after reorganization.
     pub fn reorganize_chain(&self, fork_blocks: &[Block]) -> Result<u64, RuntimeError> {
         if fork_blocks.is_empty() {
@@ -1103,34 +1127,27 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         let chain_snapshot = self.chain_state.lock().unwrap().clone();
         let local_height = chain_snapshot.latest_block_index;
-        let fork_height = fork_blocks.last().map(|b| b.index).unwrap_or(0);
+        let local_tip_hash = chain_snapshot.latest_block_hash;
+        let fork_tip_height = fork_blocks.last().map(|b| b.index).unwrap_or(0);
 
-        if fork_height <= local_height {
+        if fork_tip_height <= local_height {
             info!(
                 "[CHAIN] Fork not longer, skipping (local={}, fork={})",
-                local_height, fork_height
+                local_height, fork_tip_height
             );
             return Ok(local_height);
         }
 
-        info!(
-            "[CHAIN] Reorganizing from {} to {} ({} blocks)",
-            local_height + 1,
-            fork_height,
-            fork_blocks.len()
-        );
-
-        let mut expected_index = chain_snapshot.latest_block_index + 1;
-        let mut expected_prev_hash = chain_snapshot.latest_block_hash;
-
-        for block in fork_blocks {
+        let mut expected_index = fork_blocks[0].index;
+        let mut expected_prev_hash = fork_blocks[0].prev_hash;
+        for (i, block) in fork_blocks.iter().enumerate() {
             if block.index != expected_index {
                 return Err(RuntimeError::InvalidTransaction(format!(
                     "Fork block index mismatch: expected {}, got {}",
                     expected_index, block.index
                 )));
             }
-            if block.prev_hash != expected_prev_hash {
+            if i > 0 && block.prev_hash != expected_prev_hash {
                 return Err(RuntimeError::InvalidTransaction(format!(
                     "Fork block prev_hash mismatch at index {}",
                     block.index
@@ -1147,7 +1164,73 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                 }
             }
 
-            if let Err(e) = self.consensus.validate_block(block, &chain_snapshot) {
+            expected_index = block.index + 1;
+            expected_prev_hash = block.hash;
+        }
+
+        let first_fork_block = &fork_blocks[0];
+        let search_start = local_height.saturating_sub(self.max_reorg_depth);
+        let ancestor_height = self
+            .find_local_block_height_by_hash(
+                &first_fork_block.prev_hash,
+                search_start,
+                local_height,
+            )?
+            .ok_or_else(|| {
+                RuntimeError::InvalidTransaction(format!(
+                    "Fork ancestor not found within max_reorg_depth={} (local={}, fork_start_index={})",
+                    self.max_reorg_depth, local_height, first_fork_block.index
+                ))
+            })?;
+
+        let rollback_depth = local_height.saturating_sub(ancestor_height);
+        if rollback_depth > self.max_reorg_depth {
+            return Err(RuntimeError::InvalidTransaction(format!(
+                "Fork exceeds max_reorg_depth: rollback depth {} > {}",
+                rollback_depth, self.max_reorg_depth
+            )));
+        }
+
+        if ancestor_height < local_height {
+            warn!(
+                "[CHAIN] Divergent fork detected at ancestor height {} (local tip {}). \
+                 Rollback depth {} requires rollback logs/snapshots, which are not implemented yet.",
+                ancestor_height, local_height, rollback_depth
+            );
+            return Err(RuntimeError::InvalidTransaction(
+                "Divergent fork reorg requires rollback support (RollbackLog/snapshots) and is not implemented yet"
+                    .to_string(),
+            ));
+        }
+
+        if first_fork_block.index != local_height + 1
+            || first_fork_block.prev_hash != local_tip_hash
+        {
+            return Err(RuntimeError::InvalidTransaction(format!(
+                "Fork extension mismatch: expected start index {} with prev_hash {}",
+                local_height + 1,
+                crate::types::format_hex(&local_tip_hash)
+            )));
+        }
+
+        info!(
+            "[CHAIN] Applying extension fork from {} to {} ({} blocks)",
+            local_height + 1,
+            fork_tip_height,
+            fork_blocks.len()
+        );
+
+        let mut expected_prev_hash = local_tip_hash;
+        for block in fork_blocks {
+            if block.prev_hash != expected_prev_hash {
+                return Err(RuntimeError::InvalidTransaction(format!(
+                    "Fork block prev_hash mismatch at index {}",
+                    block.index
+                )));
+            }
+
+            let chain_state_for_validation = self.chain_state.lock().unwrap().clone();
+            if let Err(e) = self.consensus.validate_block(block, &chain_state_for_validation) {
                 return Err(RuntimeError::InvalidTransaction(format!(
                     "Consensus validation failed on fork block #{}: {}",
                     block.index, e
@@ -1157,18 +1240,15 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             self.ledger.validate_block(block)?;
             self.ledger.apply_block(block)?;
 
-            expected_index = block.index + 1;
-            expected_prev_hash = block.hash;
+            if let Ok(Some(new_state)) = self.storage.get_chain_state() {
+                expected_prev_hash = new_state.latest_block_hash;
+                *self.chain_state.lock().unwrap() = new_state;
+            } else {
+                expected_prev_hash = block.hash;
+            }
         }
 
-        if let Ok(Some(new_state)) = self.storage.get_chain_state() {
-            let new_height = new_state.latest_block_index;
-            *self.chain_state.lock().unwrap() = new_state;
-            info!("[CHAIN] Reorganized to height {}", new_height);
-            Ok(new_height)
-        } else {
-            Ok(chain_snapshot.latest_block_index)
-        }
+        Ok(self.chain_state.lock().unwrap().latest_block_index)
     }
 
     pub fn get_node_status(&self) -> Result<ChainState, RuntimeError> {

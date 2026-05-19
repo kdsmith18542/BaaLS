@@ -20,6 +20,7 @@
 - Node.js package naming clarified: `sdk/nodejs` renamed to `@baals/sdk-ffi` to avoid package-name collision with native addon metadata.
 - Runtime/CLI transaction introspection now includes stored status and confirmation/finality depth metadata.
 - Sled/Redb batch write handling now preserves tx->block reverse mapping for reliable status/finality lookup.
+- Reorg path now enforces common-ancestor discovery with configurable `max_reorg_depth` and rejects divergent forks that would require rollback support not yet present.
 
 
 ### Security

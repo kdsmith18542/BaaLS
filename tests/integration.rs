@@ -1437,6 +1437,103 @@ fn test_fork_reorg_with_common_ancestor() {
     info!("[P0-5] Fork/reorg test passed successfully");
 }
 
+#[test]
+fn test_reorg_detects_divergent_fork_and_rejects_without_rollback_support() {
+    init_logging();
+
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+    let storage_a = SledStorage::new(dir_a.path()).unwrap();
+    let storage_b = SledStorage::new(dir_b.path()).unwrap();
+
+    let consensus_sk =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let consensus_pk = PublicKey::from(consensus_sk.verifying_key());
+
+    let ce_a = BaaLSContractEngine::new(storage_a.clone()).unwrap();
+    let ce_b = BaaLSContractEngine::new(storage_b.clone()).unwrap();
+    let consensus_a = PoAConsensus::new(consensus_pk, 1000).with_signing_key(consensus_sk.clone());
+    let consensus_b = PoAConsensus::new(consensus_pk, 1000).with_signing_key(consensus_sk);
+
+    let mut rt_a = Runtime::new(storage_a, consensus_a, ce_a, NoopSync).unwrap();
+    let mut rt_b = Runtime::new(storage_b, consensus_b, ce_b, NoopSync).unwrap();
+    rt_a.max_reorg_depth = 50;
+    rt_b.max_reorg_depth = 50;
+
+    let sender_sk = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let sender_pk = PublicKey::from(sender_sk.verifying_key());
+    let recipient_sk =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let recipient_pk = PublicKey::from(recipient_sk.verifying_key());
+
+    rt_a.create_account(&sender_pk, Account::Wallet { balance: 500_000, nonce: 0 }).unwrap();
+    rt_a.create_account(&recipient_pk, Account::Wallet { balance: 0, nonce: 0 }).unwrap();
+    rt_b.create_account(&sender_pk, Account::Wallet { balance: 500_000, nonce: 0 }).unwrap();
+    rt_b.create_account(&recipient_pk, Account::Wallet { balance: 0, nonce: 0 }).unwrap();
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let make_tx = |nonce: u64, amount: u64| -> Transaction {
+        let mut tx = Transaction {
+            hash: [0u8; 32],
+            sender: sender_pk,
+            recipient: Address::Wallet(recipient_pk),
+            payload: TransactionPayload::Transfer { amount },
+            nonce,
+            timestamp: now,
+            signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+            gas_limit: 21_000,
+            gas_price: 1,
+            priority: 0,
+            metadata: None,
+            chain_id: 1,
+        };
+        tx.hash = tx.calculate_hash().unwrap();
+        tx.sign(&sender_sk).unwrap();
+        tx
+    };
+
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+
+    // Shared ancestor block #1.
+    rt_a.submit_transaction(make_tx(1, 100)).unwrap();
+    let block1 = tokio_rt.block_on(rt_a.produce_block()).unwrap();
+    rt_b.ledger().apply_block(&block1).unwrap();
+    let synced_state = rt_b.storage().get_chain_state().unwrap().unwrap();
+    *rt_b.chain_state_lock().lock().unwrap() = synced_state;
+
+    // Local branch on A: blocks #2a, #3a.
+    rt_a.submit_transaction(make_tx(2, 101)).unwrap();
+    let _block2a = tokio_rt.block_on(rt_a.produce_block()).unwrap();
+    rt_a.submit_transaction(make_tx(3, 102)).unwrap();
+    let block3a = tokio_rt.block_on(rt_a.produce_block()).unwrap();
+
+    // Competing branch on B: blocks #2b, #3b, #4b (longer fork).
+    rt_b.submit_transaction(make_tx(2, 201)).unwrap();
+    let block2b = tokio_rt.block_on(rt_b.produce_block()).unwrap();
+    rt_b.submit_transaction(make_tx(3, 202)).unwrap();
+    let block3b = tokio_rt.block_on(rt_b.produce_block()).unwrap();
+    rt_b.submit_transaction(make_tx(4, 203)).unwrap();
+    let block4b = tokio_rt.block_on(rt_b.produce_block()).unwrap();
+
+    let before = rt_a.get_chain_state().unwrap();
+    assert_eq!(before.latest_block_index, 3);
+    assert_eq!(before.latest_block_hash, block3a.hash);
+
+    let err = rt_a.reorganize_chain(&[block2b, block3b, block4b]).unwrap_err();
+    assert!(
+        format!("{}", err).contains("rollback support"),
+        "expected rollback support error, got: {}",
+        err
+    );
+
+    let after = rt_a.get_chain_state().unwrap();
+    assert_eq!(after.latest_block_index, 3, "divergent fork must not mutate local height");
+    assert_eq!(
+        after.latest_block_hash, block3a.hash,
+        "divergent fork must not replace local tip without rollback implementation"
+    );
+}
+
 // ─── P0-6: Automatic P2P announcement/import test ───
 
 #[test]

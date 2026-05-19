@@ -307,6 +307,7 @@ compression = false
 [consensus]
 block_time_ms = 5000       # Block production interval
 finality_depth = 12        # Confirmations required for finality
+max_reorg_depth = 50       # Reject forks that require rolling back deeper than this
 
 [network]
 tls_enabled = false

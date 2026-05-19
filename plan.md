@@ -610,3 +610,4 @@ Acceptance criteria:
 - [x] Phase 2.3/2.7 progress: transaction status + finality surfaced via runtime, `query tx`, and `/api/v1/transactions/{hash}[ /finality ]`; batch tx->block index mapping repaired for sled/redb
 - [x] Phase 2.5 surface: `query supply` CLI and `/api/v1/supply` endpoint now expose chain `total_supply`
 - [x] Phase 3.10 surface: Prometheus-style `/metrics` endpoint added (chain height, mempool size, block time, peer count, failed tx count, block gas pressure)
+- [x] Phase 2.1 safety foundation: added common-ancestor detection + `max_reorg_depth` guard; divergent forks now fail closed until rollback logs/snapshots are implemented
