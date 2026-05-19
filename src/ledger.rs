@@ -590,6 +590,11 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                 index_key.as_bytes().to_vec(),
                 tx.hash.to_vec(),
             ));
+            let reverse_index_key = format!("tx_block:{}", hex::encode(tx.hash));
+            batch.ops.push(StorageOperation::PutTxIndex(
+                reverse_index_key.as_bytes().to_vec(),
+                block.hash.to_vec(),
+            ));
 
             // Remove from mempool if present
             batch.ops.push(StorageOperation::DeleteMempool(tx.hash.to_vec()));

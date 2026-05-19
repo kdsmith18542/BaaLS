@@ -278,6 +278,8 @@ Canonical routes are under `/api/v1/*`. Legacy routes remain supported for compa
 | `/api/v1/blocks/{h}` | `/block/by_height/{h}` | GET | No | Block by height |
 | `/api/v1/blocks/hash/{hash}` | `/block/by_hash/{hash}` | GET | No | Block by hash |
 | `/api/v1/accounts/{pk}` | - | GET | No | Query account state |
+| `/api/v1/transactions/{hash}` | `/tx/{hash}` | GET | No | Transaction details + status + finality |
+| `/api/v1/transactions/{hash}/finality` | `/tx/{hash}/finality` | GET | No | Transaction confirmation/finality status |
 | `/proof/account/{pk}` | - | GET | No | Account Merkle proof |
 | `/proof/contract/{id}/storage/{key}` | - | GET | No | Contract storage proof |
 | `/api/v1/contracts/call` | `/contract/query` | POST | No | Read-only contract call |
@@ -299,6 +301,7 @@ compression = false
 
 [consensus]
 block_time_ms = 5000       # Block production interval
+finality_depth = 12        # Confirmations required for finality
 
 [network]
 tls_enabled = false

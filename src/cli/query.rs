@@ -156,17 +156,40 @@ pub fn handle_query(
             }
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&h);
-            match runtime.get_transaction(&arr)? {
-                Some(tx) => Ok(text_or_json(
-                    json,
-                    &format!(
-                        "Tx: sender={}, nonce={}, payload={:?}",
-                        hex::encode(&tx.sender.to_bytes()[..8]),
-                        tx.nonce,
-                        tx.payload
-                    ),
-                    serde_json::json!({"hash": hex::encode(tx.hash), "sender": hex::encode(tx.sender.to_bytes()), "nonce": tx.nonce}),
-                )),
+            let mut tx = runtime.get_transaction(&arr)?;
+            if tx.is_none() {
+                tx = runtime.get_pending_transactions()?.into_iter().find(|t| t.hash == arr);
+            }
+            match tx {
+                Some(tx) => {
+                    let status = runtime
+                        .get_transaction_status(&arr)?
+                        .unwrap_or(crate::types::TransactionStatus::Pending);
+                    let finality = runtime.get_transaction_finality(&arr)?;
+                    let finality_text = finality
+                        .as_ref()
+                        .map(|f| format!("confirmations={}/{}", f.confirmations, f.required))
+                        .unwrap_or_else(|| "confirmations=unknown".to_string());
+                    Ok(text_or_json(
+                        json,
+                        &format!(
+                            "Tx: sender={}, nonce={}, status={:?}, {}, payload={:?}",
+                            hex::encode(&tx.sender.to_bytes()[..8]),
+                            tx.nonce,
+                            status,
+                            finality_text,
+                            tx.payload
+                        ),
+                        serde_json::json!({
+                            "hash": hex::encode(tx.hash),
+                            "sender": hex::encode(tx.sender.to_bytes()),
+                            "nonce": tx.nonce,
+                            "status": status,
+                            "finality": finality,
+                            "transaction": tx
+                        }),
+                    ))
+                }
                 None => Err("Transaction not found".into()),
             }
         }

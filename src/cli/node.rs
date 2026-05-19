@@ -307,6 +307,7 @@ pub fn build_runtime(
     runtime.auto_block_mempool_threshold = 10;
     runtime.min_gas_price = config.consensus.min_gas_price;
     runtime.chain_id = config.consensus.chain_id;
+    runtime.finality_depth = config.consensus.finality_depth;
     runtime.start()?;
     Ok((runtime, public_key))
 }
@@ -730,6 +731,81 @@ fn spawn_health_server(
                             Ok(json) => (200, json.to_string()),
                             Err(e) => {
                                 (400, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
+                    } else if request.method() == &Method::Get
+                        && (request_url_str.starts_with("/tx/")
+                            || request_url_str.starts_with("/api/v1/transactions/"))
+                    {
+                        let parsed = if let Some(rest) = request_url_str.strip_prefix("/tx/") {
+                            if let Some(hash_hex) = rest.strip_suffix("/finality") {
+                                Some((hash_hex, true))
+                            } else {
+                                Some((rest, false))
+                            }
+                        } else if let Some(rest) =
+                            request_url_str.strip_prefix("/api/v1/transactions/")
+                        {
+                            if let Some(hash_hex) = rest.strip_suffix("/finality") {
+                                Some((hash_hex, true))
+                            } else {
+                                Some((rest, false))
+                            }
+                        } else {
+                            None
+                        };
+
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let Some((hash_hex, finality_only)) = parsed else {
+                                    return Err("Invalid transaction route".into());
+                                };
+                                if hash_hex.contains('/') || hash_hex.is_empty() {
+                                    return Err("Invalid transaction hash path".into());
+                                }
+                                let hash_bytes = hex::decode(hash_hex)
+                                    .map_err(|_| "Invalid transaction hash hex".to_string())?;
+                                if hash_bytes.len() != 32 {
+                                    return Err("Transaction hash must be 32 bytes".into());
+                                }
+                                let mut hash_arr = [0u8; 32];
+                                hash_arr.copy_from_slice(&hash_bytes);
+
+                                if finality_only {
+                                    let finality = runtime
+                                        .get_transaction_finality(&hash_arr)?
+                                        .ok_or("Transaction not found")?;
+                                    return Ok(serde_json::json!({
+                                        "hash": hash_hex,
+                                        "finality": finality
+                                    }));
+                                }
+
+                                let mut tx = runtime.get_transaction(&hash_arr)?;
+                                if tx.is_none() {
+                                    tx = runtime
+                                        .get_pending_transactions()?
+                                        .into_iter()
+                                        .find(|candidate| candidate.hash == hash_arr);
+                                }
+                                let tx = tx.ok_or("Transaction not found")?;
+                                let status = runtime
+                                    .get_transaction_status(&hash_arr)?
+                                    .unwrap_or(crate::types::TransactionStatus::Pending);
+                                let finality = runtime.get_transaction_finality(&hash_arr)?;
+
+                                Ok(serde_json::json!({
+                                    "hash": hash_hex,
+                                    "status": status,
+                                    "finality": finality,
+                                    "transaction": tx
+                                }))
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (404, serde_json::json!({"error": e.to_string()}).to_string())
                             }
                         };
                         respond_json(request, status, body);

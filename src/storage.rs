@@ -413,6 +413,18 @@ impl SledStorage {
         Ok(())
     }
 
+    fn decode_tx_block_lookup_key(key: &[u8]) -> Option<[u8; 32]> {
+        let key_str = std::str::from_utf8(key).ok()?;
+        let tx_hex = key_str.strip_prefix("tx_block:")?;
+        let bytes = hex::decode(tx_hex).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut tx_hash = [0u8; 32];
+        tx_hash.copy_from_slice(&bytes);
+        Some(tx_hash)
+    }
+
     fn apply_batch_without_wal(&self, batch: StorageBatch) -> Result<(), StorageError> {
         for op in batch.ops {
             match op {
@@ -438,7 +450,12 @@ impl SledStorage {
                     self.state_tree.insert(key, value)?;
                 }
                 StorageOperation::PutTxIndex(key, value) => {
-                    self.tx_by_block_tree.insert(key, value)?;
+                    self.tx_by_block_tree.insert(key.as_slice(), value.as_slice())?;
+                    if let Some(tx_hash) = Self::decode_tx_block_lookup_key(&key) {
+                        if value.len() == 32 {
+                            self.tx_to_block_tree.insert(tx_hash, value.as_slice())?;
+                        }
+                    }
                 }
                 StorageOperation::PutTxStatus(key, value) => {
                     self.tx_by_block_tree.insert(key, value)?;
@@ -737,14 +754,25 @@ impl Storage for SledStorage {
         &self,
         tx_hash: &[u8; 32],
     ) -> Result<Option<(Block, Transaction)>, StorageError> {
-        // Look up block hash for this transaction
+        // Look up block hash for this transaction.
         let block_hash = match self.tx_to_block_tree.get(tx_hash)? {
             Some(bytes) if bytes.len() == 32 => {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&bytes);
                 arr
             }
-            _ => return Ok(None),
+            _ => {
+                // Backward compatibility path for earlier index layouts.
+                let fallback_key = format!("tx_block:{}", hex::encode(tx_hash));
+                match self.tx_by_block_tree.get(fallback_key.as_bytes())? {
+                    Some(bytes) if bytes.len() == 32 => {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&bytes);
+                        arr
+                    }
+                    _ => return Ok(None),
+                }
+            }
         };
         let tx = match self.get_transaction(tx_hash)? {
             Some(t) => t,

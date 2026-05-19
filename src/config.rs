@@ -40,6 +40,8 @@ pub struct ConsensusConfig {
     pub chain_id: u64,
     #[serde(default = "default_min_gas_price")]
     pub min_gas_price: u64,
+    #[serde(default = "default_finality_depth")]
+    pub finality_depth: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +137,9 @@ fn default_chain_id() -> u64 {
 fn default_min_gas_price() -> u64 {
     1
 }
+fn default_finality_depth() -> u64 {
+    12
+}
 fn default_cache_mb() -> u64 {
     256
 }
@@ -178,6 +183,7 @@ impl Default for Config {
                 authority_key: default_authority_key(),
                 chain_id: default_chain_id(),
                 min_gas_price: default_min_gas_price(),
+                finality_depth: default_finality_depth(),
             },
             storage: StorageConfig {
                 cache_size_mb: default_cache_mb(),
@@ -250,6 +256,9 @@ impl Config {
         if self.consensus.block_time_ms < 100 {
             return Err(ConfigError::Invalid("block_time_ms must be >= 100".to_string()));
         }
+        if self.consensus.finality_depth == 0 {
+            return Err(ConfigError::Invalid("finality_depth must be >= 1".to_string()));
+        }
         if !["trace", "debug", "info", "warn", "error"].contains(&self.logging.level.as_str()) {
             return Err(ConfigError::Invalid(format!("Invalid log level: {}", self.logging.level)));
         }
@@ -283,6 +292,11 @@ impl Config {
                 })?
             }
             "consensus.authority_key" => self.consensus.authority_key = value.to_string(),
+            "consensus.finality_depth" => {
+                self.consensus.finality_depth = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid finality_depth".into()))?
+            }
             "network.max_peers" => {
                 self.network.max_peers =
                     value.parse().map_err(|_| ConfigError::Invalid("Invalid max_peers".into()))?

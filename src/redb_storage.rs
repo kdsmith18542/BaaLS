@@ -280,6 +280,16 @@ impl RedbStorage {
                     }
                     StorageOperation::PutTxIndex(k, v) => {
                         txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                        if v.len() == 32 {
+                            if let Ok(key_str) = std::str::from_utf8(k.as_slice()) {
+                                if let Some(tx_hex) = key_str.strip_prefix("tx_block:") {
+                                    let reverse_key = format!("idx:{}:{}", tx_hex, hex::encode(v));
+                                    txs_table
+                                        .insert(reverse_key.as_bytes(), v.as_slice())
+                                        .map_err(map_err)?;
+                                }
+                            }
+                        }
                     }
                     StorageOperation::PutTxStatus(k, v) => {
                         txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
@@ -504,22 +514,35 @@ impl Storage for RedbStorage {
             Some(t) => t,
             None => return Ok(None),
         };
-        // Find block hash from tx index: scan prefix "idx:{tx_hash}:"
-        let prefix = format!("idx:{}:", hex::encode(tx_hash));
+        // Preferred path: direct tx->block lookup key.
+        let direct_key = format!("tx_block:{}", hex::encode(tx_hash));
         let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let table = txn.open_table(TXS_TABLE).map_err(map_err)?;
-        let mut block_hash = None;
-        let iter = table.iter().map_err(map_err)?;
-        for item in iter {
-            let (k, v) = item.map_err(map_err)?;
-            let key_str = String::from_utf8_lossy(k.value());
-            if key_str.starts_with(&prefix) && v.value().len() == 32 {
+        let mut block_hash = match table.get(direct_key.as_bytes()).map_err(map_err)? {
+            Some(v) if v.value().len() == 32 => {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(v.value());
-                block_hash = Some(arr);
-                break;
+                Some(arr)
+            }
+            _ => None,
+        };
+
+        // Backward compatibility: scan older "idx:{tx_hash}:{block_hash}" keys.
+        if block_hash.is_none() {
+            let prefix = format!("idx:{}:", hex::encode(tx_hash));
+            let iter = table.iter().map_err(map_err)?;
+            for item in iter {
+                let (k, v) = item.map_err(map_err)?;
+                let key_str = String::from_utf8_lossy(k.value());
+                if key_str.starts_with(&prefix) && v.value().len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(v.value());
+                    block_hash = Some(arr);
+                    break;
+                }
             }
         }
+
         match block_hash {
             Some(bh) => match self.get_block(&bh)? {
                 Some(block) => Ok(Some((block, tx))),
@@ -1029,6 +1052,17 @@ impl Storage for RedbStorage {
                         }
                         StorageOperation::PutTxIndex(k, v) => {
                             txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                            if v.len() == 32 {
+                                if let Ok(key_str) = std::str::from_utf8(k.as_slice()) {
+                                    if let Some(tx_hex) = key_str.strip_prefix("tx_block:") {
+                                        let reverse_key =
+                                            format!("idx:{}:{}", tx_hex, hex::encode(v));
+                                        txs_table
+                                            .insert(reverse_key.as_bytes(), v.as_slice())
+                                            .map_err(map_err)?;
+                                    }
+                                }
+                            }
                         }
                         StorageOperation::PutTxStatus(k, v) => {
                             txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;

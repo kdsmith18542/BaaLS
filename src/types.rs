@@ -664,6 +664,16 @@ pub enum TransactionStatus {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct TransactionFinality {
+    #[serde(rename = "final")]
+    pub is_final: bool,
+    pub confirmations: u64,
+    pub required: u64,
+    pub block_height: Option<u64>,
+    pub status: TransactionStatus,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub enum TransactionPayload {
     Transfer { amount: u64 },
     ContractDeploy { wasm_bytes: Vec<u8>, init_payload: Option<Vec<u8>> },

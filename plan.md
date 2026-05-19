@@ -607,3 +607,4 @@ Acceptance criteria:
 - [x] T3.2 Node package collision resolved and native entry files added
 - [x] T4.1 consensus/compliance narrative contradictions reconciled
 - [x] Added CQ-1 regression coverage to `tests/cq_regression.rs` (suite now 11/11 for Phase 1 bug set)
+- [x] Phase 2.3/2.7 progress: transaction status + finality surfaced via runtime, `query tx`, and `/api/v1/transactions/{hash}[ /finality ]`; batch tx->block index mapping repaired for sled/redb

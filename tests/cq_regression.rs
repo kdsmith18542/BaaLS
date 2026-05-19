@@ -488,3 +488,35 @@ fn cq1_contract_call_value_not_transferred_on_failure() {
         sender_after
     );
 }
+
+#[test]
+fn phase2_tx_status_and_finality_progress_with_confirmations() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let (mut runtime, _consensus_sk, _consensus_pk) = make_runtime(temp_dir.path());
+    runtime.finality_depth = 2;
+
+    let (sk, pk) = make_test_account(&runtime, 2_000_000);
+    let tx1 = make_transfer_tx(pk, &sk, pk, 1, 1, 21_000, 1, 1);
+    runtime.submit_transaction(tx1.clone()).unwrap();
+
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    let _block1 = tokio_rt.block_on(runtime.produce_block()).unwrap();
+
+    let status1 = runtime.get_transaction_status(&tx1.hash).unwrap();
+    assert_eq!(status1, Some(TransactionStatus::Success));
+    let finality1 = runtime.get_transaction_finality(&tx1.hash).unwrap().unwrap();
+    assert_eq!(finality1.confirmations, 1);
+    assert!(!finality1.is_final);
+    assert_eq!(finality1.status, TransactionStatus::Success);
+    assert!(runtime.storage().get_transaction_by_id(&tx1.hash).unwrap().is_some());
+
+    // Produce one more block so tx1 crosses finality depth.
+    let tx2 = make_transfer_tx(pk, &sk, pk, 1, 2, 21_000, 1, 1);
+    runtime.submit_transaction(tx2).unwrap();
+    let _block2 = tokio_rt.block_on(runtime.produce_block()).unwrap();
+
+    let finality2 = runtime.get_transaction_finality(&tx1.hash).unwrap().unwrap();
+    assert_eq!(finality2.confirmations, 2);
+    assert!(finality2.is_final);
+}

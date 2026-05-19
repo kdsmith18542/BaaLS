@@ -170,6 +170,27 @@ fn test_cli_node_lifecycle_start_status_stop() {
         "mutating endpoint should require BAALS_ADMIN_TOKEN when not configured"
     );
 
+    let missing_tx_hash = "0000000000000000000000000000000000000000000000000000000000000000";
+    let (tx_lookup_status, _) = http_request(
+        "GET",
+        "127.0.0.1:8080",
+        &format!("/api/v1/transactions/{}", missing_tx_hash),
+        None,
+        &[],
+    )
+    .expect("GET /api/v1/transactions/{hash}");
+    assert_eq!(tx_lookup_status, 404, "unknown tx lookup should return 404");
+
+    let (tx_finality_status, _) = http_request(
+        "GET",
+        "127.0.0.1:8080",
+        &format!("/api/v1/transactions/{}/finality", missing_tx_hash),
+        None,
+        &[],
+    )
+    .expect("GET /api/v1/transactions/{hash}/finality");
+    assert_eq!(tx_finality_status, 404, "unknown tx finality lookup should return 404");
+
     let stop_output = Command::new(bin_path)
         .arg("node")
         .arg("stop")

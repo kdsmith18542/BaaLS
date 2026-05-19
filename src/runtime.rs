@@ -213,6 +213,7 @@ pub struct Runtime<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> {
     pub backup_interval_secs: u64,
     pub min_gas_price: u64,
     pub chain_id: u64,
+    pub finality_depth: u64,
     metrics: Arc<MetricsCollector>,
     started_at: Arc<Mutex<Option<SystemTime>>>,
     sync_in_flight: Arc<AtomicBool>,
@@ -237,6 +238,7 @@ impl<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> Clone for Runtime<S
             backup_interval_secs: self.backup_interval_secs,
             min_gas_price: self.min_gas_price,
             chain_id: self.chain_id,
+            finality_depth: self.finality_depth,
             metrics: Arc::clone(&self.metrics),
             started_at: Arc::clone(&self.started_at),
             sync_in_flight: Arc::clone(&self.sync_in_flight),
@@ -287,6 +289,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             backup_interval_secs: 0,
             min_gas_price: 1, // default minimum gas price
             chain_id: 1,      // default chain id
+            finality_depth: 12,
             consensus: Arc::new(consensus),
             mempool: Arc::new(Mutex::new(Mempool::new(mempool_size_limit))),
             chain_state: Arc::new(Mutex::new(initial_chain_state)),
@@ -923,6 +926,79 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
     pub fn get_transaction(&self, tx_hash: &[u8; 32]) -> Result<Option<Transaction>, RuntimeError> {
         Ok(self.storage.get_transaction(tx_hash)?)
+    }
+
+    pub fn get_transaction_status(
+        &self,
+        tx_hash: &[u8; 32],
+    ) -> Result<Option<crate::types::TransactionStatus>, RuntimeError> {
+        if let Some(status) = self.storage.get_transaction_status(tx_hash)? {
+            return Ok(Some(status));
+        }
+
+        let mempool = self.mempool.lock().unwrap();
+        if mempool.get(tx_hash).is_some() {
+            return Ok(Some(crate::types::TransactionStatus::Pending));
+        }
+
+        Ok(None)
+    }
+
+    fn find_transaction_block_height(
+        &self,
+        tx_hash: &[u8; 32],
+    ) -> Result<Option<u64>, RuntimeError> {
+        if let Some((block, _)) = self.storage.get_transaction_by_id(tx_hash)? {
+            return Ok(Some(block.index));
+        }
+
+        let latest = self.get_chain_state()?.latest_block_index;
+        for height in (0..=latest).rev() {
+            if let Some(block) = self.storage.get_block_by_height(height)? {
+                if block.transactions.iter().any(|tx| &tx.hash == tx_hash) {
+                    return Ok(Some(height));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn get_transaction_finality(
+        &self,
+        tx_hash: &[u8; 32],
+    ) -> Result<Option<crate::types::TransactionFinality>, RuntimeError> {
+        let required = self.finality_depth.max(1);
+
+        if let Some(block_height) = self.find_transaction_block_height(tx_hash)? {
+            let latest = self.get_chain_state()?.latest_block_index;
+            let confirmations = latest.saturating_sub(block_height).saturating_add(1);
+            let status = self
+                .get_transaction_status(tx_hash)?
+                .unwrap_or(crate::types::TransactionStatus::Success);
+
+            return Ok(Some(crate::types::TransactionFinality {
+                is_final: confirmations >= required,
+                confirmations,
+                required,
+                block_height: Some(block_height),
+                status,
+            }));
+        }
+
+        if let Some(crate::types::TransactionStatus::Pending) =
+            self.get_transaction_status(tx_hash)?
+        {
+            return Ok(Some(crate::types::TransactionFinality {
+                is_final: false,
+                confirmations: 0,
+                required,
+                block_height: None,
+                status: crate::types::TransactionStatus::Pending,
+            }));
+        }
+
+        Ok(None)
     }
 
     pub fn contract_engine(&self) -> &BaaLSContractEngine<S> {
