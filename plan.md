@@ -416,7 +416,7 @@ Run a public testnet for ≥ 30 days with:
 [x] CHANGELOG.md updated
 [x] Reproducible build: cargo build --release --locked produces same binary
 [x] Binary checksums published in RELEASES.md
-[ ] SECURITY.md updated with bug-bounty scope
+[x] SECURITY.md updated with bug-bounty scope
 ```
 
 ---

@@ -91,3 +91,31 @@ We follow a coordinated disclosure process:
 3. A patch release is prepared
 4. CVE is requested (if applicable)
 5. Public disclosure coordinated with reporter
+
+## Bug Bounty Scope
+
+BaaLS is pre-production. We currently accept high-quality vulnerability reports
+in the following scope:
+
+- Core runtime and ledger validation logic (`src/runtime.rs`, `src/ledger.rs`)
+- Consensus and sync authentication/verification paths (`src/consensus.rs`, `src/sync.rs`)
+- WASM contract host boundary and execution metering (`src/contracts.rs`)
+- Storage integrity and recovery behavior (`src/storage.rs`, `src/redb_storage.rs`)
+- Keystore and key-material handling (`src/keystore.rs`)
+- FFI boundary safety (`src/ffi.rs`)
+- HTTP mutating endpoint authentication and authorization checks (`src/cli/node.rs`)
+
+Out of scope:
+
+- Social engineering or phishing scenarios
+- Physical host compromise
+- Issues that require non-default compiler/runtime UB flags not used in this repo
+- Findings in third-party dependencies without a BaaLS-specific exploit path
+- Denial-of-service claims without a reproducible proof-of-concept
+
+Report quality requirements:
+
+- Clear reproduction steps
+- Expected vs actual behavior
+- Security impact statement
+- Minimal proof-of-concept or test case when feasible
