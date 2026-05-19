@@ -612,3 +612,4 @@ Acceptance criteria:
 - [x] Phase 3.10 surface: Prometheus-style `/metrics` endpoint added (chain height, mempool size, block time, peer count, failed tx count, block gas pressure)
 - [x] Phase 2.1 safety foundation: added common-ancestor detection + `max_reorg_depth` guard; divergent forks now fail closed until rollback logs/snapshots are implemented
 - [x] Phase 2.9 surface: short-lived JWT flow added (`POST /auth/token` with node-key signature proof); mutating endpoints now require valid Bearer JWT
+- [x] Phase 3.4 surface: per-block SHA256 checksums persisted by storage backends and validated by `db verify`

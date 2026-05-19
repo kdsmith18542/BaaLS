@@ -31,6 +31,9 @@ impl Storage for AnyStorage {
     fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>, StorageError> {
         dispatch!(self, get_block, hash)
     }
+    fn get_block_checksum(&self, hash: &[u8; 32]) -> Result<Option<[u8; 32]>, StorageError> {
+        dispatch!(self, get_block_checksum, hash)
+    }
     fn get_latest_block(&self) -> Result<Option<Block>, StorageError> {
         dispatch!(self, get_latest_block)
     }

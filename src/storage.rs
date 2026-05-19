@@ -1,5 +1,6 @@
 use bincode;
 use hex;
+use sha2::Digest;
 use sled::{Db, Tree};
 use std::path::Path;
 use thiserror::Error;
@@ -36,6 +37,7 @@ pub type KVList = Vec<(Vec<u8>, Vec<u8>)>;
 pub trait Storage: Send + Sync {
     fn put_block(&self, block: &Block) -> Result<(), StorageError>;
     fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>, StorageError>;
+    fn get_block_checksum(&self, hash: &[u8; 32]) -> Result<Option<[u8; 32]>, StorageError>;
     fn get_latest_block(&self) -> Result<Option<Block>, StorageError>;
     fn get_chain_height(&self) -> Result<u64, StorageError>;
     fn get_block_by_height(&self, height: u64) -> Result<Option<Block>, StorageError>;
@@ -653,11 +655,16 @@ impl Storage for SledStorage {
         let block_hash = block.hash;
         let block_height = block.index;
         let encoded = bincode::serialize(block)?;
+        let checksum: [u8; 32] = sha2::Sha256::digest(&encoded).into();
 
         let mut key = b"hash:".to_vec();
         key.extend_from_slice(&block_hash);
         self.blocks_tree.insert(key, encoded.clone())?;
         self.blocks_tree.insert(format!("height:{:0>20}", block_height).as_bytes(), encoded)?;
+        self.blocks_tree.insert(
+            format!("checksum:{}", hex::encode(block_hash)).as_bytes(),
+            checksum.as_slice(),
+        )?;
         Ok(())
     }
 
@@ -674,6 +681,19 @@ impl Storage for SledStorage {
             Ok(Some(bincode::deserialize(&encoded)?))
         } else {
             Ok(None)
+        }
+    }
+
+    fn get_block_checksum(&self, hash: &[u8; 32]) -> Result<Option<[u8; 32]>, StorageError> {
+        let key = format!("checksum:{}", hex::encode(hash));
+        match self.blocks_tree.get(key.as_bytes())? {
+            Some(v) if v.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&v);
+                Ok(Some(arr))
+            }
+            Some(_) => Err(StorageError::IndexError("invalid block checksum length".into())),
+            None => Ok(None),
         }
     }
 

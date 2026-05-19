@@ -1,4 +1,5 @@
 use clap::Subcommand;
+use sha2::Digest;
 use std::path::PathBuf;
 
 use crate::{
@@ -197,6 +198,41 @@ pub fn handle_db(
                     "Schema version mismatch: {} (expected {})",
                     schema_version, CURRENT_SCHEMA_VERSION
                 ));
+            }
+
+            for h in 0..=height {
+                if let Some(block) = storage.get_block_by_height(h)? {
+                    let encoded = bincode::serialize(&block)?;
+                    let computed_checksum: [u8; 32] = sha2::Sha256::digest(&encoded).into();
+                    match storage.get_block_checksum(&block.hash)? {
+                        Some(stored) => {
+                            if stored != computed_checksum {
+                                issues.push(format!(
+                                    "Block checksum mismatch at height {} (hash={})",
+                                    h,
+                                    hex::encode(block.hash)
+                                ));
+                            }
+                        }
+                        None => {
+                            issues.push(format!(
+                                "Missing block checksum at height {} (hash={})",
+                                h,
+                                hex::encode(block.hash)
+                            ));
+                        }
+                    }
+
+                    let recalculated = block.calculate_hash()?;
+                    if recalculated != block.hash {
+                        issues.push(format!(
+                            "Block hash mismatch at height {} (stored={}, computed={})",
+                            h,
+                            hex::encode(block.hash),
+                            hex::encode(recalculated)
+                        ));
+                    }
+                }
             }
 
             let total_accounts = storage.get_all_accounts()?.len() as u64;

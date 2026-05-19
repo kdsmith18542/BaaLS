@@ -32,6 +32,7 @@ Canonical namespace is `/api/v1/*` with legacy aliases retained for compatibilit
 Implemented canonical endpoints:
 
 - `POST /api/v1/transactions`
+- `POST /api/v1/auth/token`
 - `GET /api/v1/blocks/{height}`
 - `GET /api/v1/blocks/latest`
 - `GET /api/v1/blocks/hash/{hash}`

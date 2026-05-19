@@ -14,6 +14,7 @@
 - Node.js native SDK entrypoints (`sdk/nodejs-native/index.js`, `index.d.ts`).
 - Release checksum manifest in `RELEASES.md`.
 - Batch tx-index regression tests for both backends in `tests/tx_index_batch_regression.rs`.
+- Storage checksum regression tests for both backends in `tests/storage_checksums.rs`.
 
 ### Changed (2026-05-19 completeness pass)
 - `api` CLI subcommands now execute live HTTP requests instead of printing static examples.
@@ -24,6 +25,7 @@
 - Sled/Redb batch write handling now preserves tx->block reverse mapping for reliable status/finality lookup.
 - Reorg path now enforces common-ancestor discovery with configurable `max_reorg_depth` and rejects divergent forks that would require rollback support not yet present.
 - Mutating HTTP routes now require valid Bearer JWTs (HS256) instead of static admin token strings.
+- Sled/Redb now persist per-block SHA256 checksums; `db verify` recomputes and validates checksums for integrity reporting.
 
 
 ### Security

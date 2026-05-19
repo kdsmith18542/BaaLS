@@ -1,4 +1,5 @@
 use redb::{Database, ReadableTable, TableDefinition};
+use sha2::Digest;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -337,10 +338,13 @@ impl RedbStorage {
 impl Storage for RedbStorage {
     fn put_block(&self, block: &Block) -> Result<(), StorageError> {
         let val = bincode::serialize(block)?;
+        let checksum: [u8; 32] = sha2::Sha256::digest(&val).into();
         let txn = self.db_guard()?.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
             table.insert(block.hash.as_slice(), val.as_slice()).map_err(map_err)?;
+            let checksum_key = format!("checksum:{}", hex::encode(block.hash));
+            table.insert(checksum_key.as_bytes(), checksum.as_slice()).map_err(map_err)?;
             let mut height_table = txn.open_table(HEIGHT_TO_BLOCK_TABLE).map_err(map_err)?;
             let height_key = format!("height:{}", block.index);
             height_table.insert(height_key.as_bytes(), block.hash.as_slice()).map_err(map_err)?;
@@ -362,6 +366,21 @@ impl Storage for RedbStorage {
         let chain = self.get_chain_state()?;
         match chain {
             Some(cs) => self.get_block(&cs.latest_block_hash),
+            None => Ok(None),
+        }
+    }
+
+    fn get_block_checksum(&self, hash: &[u8; 32]) -> Result<Option<[u8; 32]>, StorageError> {
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
+        let table = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
+        let key = format!("checksum:{}", hex::encode(hash));
+        match table.get(key.as_bytes()).map_err(map_err)? {
+            Some(v) if v.value().len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(v.value());
+                Ok(Some(arr))
+            }
+            Some(_) => Err(StorageError::IndexError("invalid block checksum length".into())),
             None => Ok(None),
         }
     }
