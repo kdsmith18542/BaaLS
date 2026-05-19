@@ -1,82 +1,68 @@
 # BaaLS Spec Compliance
 
-> Auto-generated summary from CI artifacts. Last updated: 2026-05-09
+Last verified: 2026-05-19
 
-## CI Status
+## Verification Snapshot
 
-| Check | Status |
-|-------|--------|
-| `cargo fmt --check` | ✅ |
-| `cargo clippy -D warnings` | ✅ |
-| `cargo test --lib` | ✅ 18/18 pass |
-| `cargo test --all-features` | ✅ 63 pass (18 unit + 44 integration + 1 golden) |
-| `cargo test --release` | ✅ |
-| `cargo audit` | ✅ |
-| `cargo deny check` | ✅ |
-| Fuzz targets | 7 targets (4 new) |
-| Golden tests | ✅ |
+The following commands were run on this repository state:
 
-## Resolved Gaps
+- `cargo fmt --all -- --check` -> PASS
+- `cargo clippy --all-targets --all-features -- -D warnings` -> PASS
+- `cargo test --all-features` -> PASS
 
-| Gap | Status | Notes |
-|-----|--------|-------|
-| Block hash uses tx Merkle root | ✅ RESOLVED | `Block::calculate_hash()` computes MerkleTree from tx hashes |
-| ContractDeploy missing init_payload | ✅ RESOLVED | Added `init_payload: Option<Vec<u8>>` |
-| WASI block context always zero | ✅ RESOLVED | Added `block_index`/`block_timestamp` params |
-| baals_call_contract missing value param | ✅ RESOLVED | Added `value: i64` to WASI host function |
-| Config not wired to consensus | ✅ RESOLVED | `build_runtime()` passes `block_time_ms` from config |
-| Block overflow tx allowed | ✅ RESOLVED | Tx exceeding block gas/size limits properly rejected |
-| Auto-block threshold bypass | ✅ RESOLVED | Blocks only auto-produce at configured threshold |
-| Missing wallet delete CLI | ✅ RESOLVED | Added `WalletCommands::Delete` |
-| Config::set() missing keys | ✅ RESOLVED | Added all storage/network config keys |
+## Test Summary (`cargo test --all-features`)
 
-## Production Hardening (P0/P1)
+- Total passed: 77
+- Total failed: 0
+- Total ignored: 1 (`tests/cli_daemon.rs` marked flaky on Windows harness)
 
-| Item | Status | Notes |
-|------|--------|-------|
-| Gas pricing | ✅ | `gas_price` field, fee deducted as `gas_price * gas_used` |
-| Time-windowed rate limiting | ✅ | 10 tx/s per sender + 100 pending cap |
-| Keystore KDF | ✅ | Argon2id v2 (new), PBKDF2 v1 (legacy compat) |
-| Fuzz targets | ✅ | 7 targets covering tx, block, WASM, ledger, sync, merkle |
-| justfile / release infra | ✅ | `just ci`, `just release`, `scripts/test-all.*` |
+Breakdown:
 
-## WONTFIX Deviations
+- Unit tests (`src/lib.rs`): 18 passed
+- CLI lifecycle integration: 1 passed
+- CQ regression suite: 10 passed
+- Golden tests: 1 passed
+- Integration tests: 44 passed
+- Security hardening tests: 3 passed
 
-| ID | Deviation | Rationale |
-|----|-----------|-----------|
-| L1 | Crate named `baals` not `libchain` | Simpler, more recognizable |
-| L2 | Hash fields use `[u8; 32]` not `String` | Type-safe, deterministic layout |
-| L3 | Metadata uses `BTreeMap<String, String>` | Flat, ordered, no serde_json::Value overhead |
-| L4 | `recipient` is `Address` enum not `PublicKey` | Targets both wallets and contracts |
-| L7 | `start()` doesn't auto-produce blocks | Tests/embedded SDK need control |
-| L8 | Single-validator PoA only | Multi-validator deferred |
-| L9 | P2P sync: polling (not push) | Simpler, sufficient for single-validator |
-| L10 | WASM: no WASI preview 2 sockets | Not needed for contract model |
+## HTTP API Status
 
-## CLI Coverage
+Canonical namespace is `/api/v1/*` with legacy aliases retained for compatibility.
 
-| Group | Commands | Status |
-|-------|----------|--------|
-| `node` | start, stop, status, config, backup, restore | ✅ Complete |
-| `wallet` | create, list, show, import, export, export-public, sign, verify, delete, rotate, change-password, recover | ✅ Complete |
-| `tx` | transfer, deploy-contract, call-contract, data, sign, submit, inspect, validate, estimate-fee, decode | ✅ Complete |
-| `query` | head, block, tx, account, contract-state, contract-call, blocks, txs-by-account, txs-by-contract, mempool | ✅ Complete |
-| `db` | version, migrate, verify, compact, backup, restore, check-indexes, rebuild-indexes, export, import | ✅ Complete |
-| `dev` | generate-keys, simulate-contract, validate-tx, storage-stats, performance-report, validate-chain, monitor, dump-state, replay-block, replay-chain, fuzz-wasm, inspect-wasm, verify-merkle-root, repair-indexes | ✅ Complete |
-| `key` | generate, inspect, sign, verify | ✅ Complete |
-| `proof` | account, contract, verify | ✅ Complete |
-| `doctor` | diagnostics | ✅ Complete |
+Implemented canonical endpoints:
 
-## Test Coverage
+- `POST /api/v1/transactions`
+- `GET /api/v1/blocks/{height}`
+- `GET /api/v1/blocks/latest`
+- `GET /api/v1/blocks/hash/{hash}`
+- `GET /api/v1/accounts/{addr}`
+- `POST /api/v1/contracts/call` (read-only)
+- `GET /api/v1/health` (alias of `/health`)
 
-| Area | Status |
-|------|--------|
-| Unit tests (types, ledger, consensus) | ✅ 18 pass |
-| Integration tests (state transitions) | ✅ 44 pass |
-| WASM security tests | ✅ 3 pass |
-| Golden tests | ✅ 1 pass |
-| Fuzz targets | ✅ 7 configured |
-| CLI end-to-end | ✅ 1 pass |
-| P2P multi-node | ✅ Verified in integration suite |
-| Crash recovery | ✅ Verified in integration suite |
-| Load/soak | ✅ Performance benchmarks pass |
+Mutating endpoints require `Authorization: Bearer <BAALS_ADMIN_TOKEN>` and are loopback-restricted.
+
+## Notable Deviations / Scope Limits
+
+- L1: Crate name is `baals` (spec placeholder `libchain`)
+- L2: Hash fields use `[u8; 32]` instead of `String`
+- L3: Metadata uses `BTreeMap<String, String>` instead of `Map<String, Value>`
+- L4: `recipient` uses `Address` enum (wallet or contract)
+- L7: `Runtime::start()` does not auto-produce blocks unless configured
+- L8: Multi-signer authorized key set exists, but quorum-threshold multi-validator PoA is not fully implemented
+- L9: P2P sync model is polling-oriented (not push-streaming)
+- L10: No WASI Preview 2 socket support in contract model
+
+## CLI Coverage (Current)
+
+- Fully implemented core groups: `node`, `wallet`, `tx`, `query`, `db`, `dev`, `key`, `proof`, `doctor`
+- Partially implemented / planned subcommands: selected `p2p`, `contract`, `admin`, `api` advanced flows are explicitly marked not implemented where runtime wiring is missing
+
+## Reproducibility
+
+To regenerate this status:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+```

@@ -190,13 +190,13 @@ let receipt = runtime.apply_transaction(tx)?;
 
 ### 2.2 JavaScript/TypeScript SDK (baals-js)
 
-Provides Node.js and browser-compatible bindings via WebAssembly and FFI.
+Provides Node.js bindings. Current repository state includes two beta tracks.
 
 **Availability:**
-- NPM package: `@baals/sdk`
-- WASM bindings for pure JS execution
-- Native bindings (node-gyp) for performance-critical operations
-- TypeScript definitions included
+- Native addon path (`napi-rs`): `sdk/nodejs-native` (package metadata `@baals/sdk`)
+- Legacy FFI wrapper path (`ffi-napi`): `sdk/nodejs` (package metadata `@baals/sdk-ffi`)
+- TypeScript definition files are present for both SDK directories
+- Browser/WASM packaging is planned, not shipped in this repo
 
 **API:**
 
@@ -220,39 +220,21 @@ const receipt = await runtime.applyTransaction(tx);
 
 ### 2.3 Python SDK (baals-py)
 
-Provides Pythonic bindings for BaaLS via ctypes or PyO3.
-
-**Availability:**
-- PyPI package: `baals`
-- Pure Python with C extension bindings
-- Support for Python 3.8+
-
-**API:**
-
-```python
-from baals import Runtime, Keystore, Transaction
-
-runtime = Runtime(data_dir='./data')
-keystore = Keystore('./keys')
-
-alice = keystore.create_wallet('alice')
-tx = Transaction.transfer(alice, Address.ZERO, 1000)
-receipt = runtime.apply_transaction(tx)
-```
+Status: **Planned, not implemented in this repository**.
 
 ### 2.4 Go SDK (baals-go)
 
 Provides idiomatic Go bindings via cgo and FFI.
 
 **Availability:**
-- Go package: `github.com/anomalyco/baals-go`
-- Pure Go with CGO bindings for cryptography
+- Go package/module path: `github.com/baals/sdk`
+- Pure Go client library (no required CGO linkage to Rust runtime)
 - Support for Go 1.19+
 
 **API:**
 
 ```go
-import "github.com/anomalyco/baals-go"
+import "github.com/baals/sdk"
 
 runtime, _ := baals.NewRuntime(config)
 keystore, _ := baals.NewKeystore("./keys")
@@ -269,21 +251,25 @@ For remote access, BaaLS exposes a REST API via the HTTP server (port 8080 by de
 **Endpoints:**
 
 ```
-POST   /api/v1/transactions      Submit a signed transaction
-GET    /api/v1/blocks/<height>   Fetch block by height
-GET    /api/v1/accounts/<addr>   Query account state
-POST   /api/v1/contracts/call    Execute read-only contract call
-GET    /health                   Health check
+POST   /api/v1/transactions        Submit a signed transaction
+GET    /api/v1/blocks/<height>     Fetch block by height
+GET    /api/v1/accounts/<addr>     Query account state
+POST   /api/v1/contracts/call      Execute read-only contract call
+GET    /api/v1/blocks/latest       Fetch latest block summary
+GET    /health (or /api/v1/health) Health check
 ```
 
 **Authentication:**
-- Optional: Bearer token (JWT or custom)
-- TLS 1.3 for encrypted transport
-- Rate limiting: 100 req/min per IP (configurable)
+- Required for mutating endpoints: Bearer token (`BAALS_ADMIN_TOKEN`)
+- Mutating endpoints are restricted to loopback clients
+- Read-only endpoints do not require a token
+- Rate limiting is enforced per remote IP address
 
 ### 2.6 WebSocket API (Streaming)
 
-For real-time updates, clients can connect via WebSocket.
+Status: **Planned, not implemented in the current codebase**.
+
+For real-time updates, clients will eventually support WebSocket streams.
 
 **Endpoints:**
 
@@ -353,17 +339,15 @@ cargo build --release --features ffi
 
 ### Environment Variables
 
-All SDKs respect these environment variables:
+Currently implemented environment variables in this repository:
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `BAALS_DATA_DIR` | Data directory for storage | `./data` |
-| `BAALS_LOG_LEVEL` | Log level (debug, info, warn, error) | `info` |
+| `BAALS_CONFIG` | Config file path override | (none) |
 | `BAALS_CONSENSUS_KEY` | Raw consensus private key (hex) | (none) |
 | `BAALS_CONSENSUS_PASSWORD` | Keystore password for consensus key | (none) |
 | `BAALS_BACKUP_KEY` | AES-256-GCM key for backup encryption | (none) |
-| `BAALS_TLS_CERT` | Path to TLS certificate | (none) |
-| `BAALS_TLS_KEY` | Path to TLS private key | (none) |
+| `BAALS_ADMIN_TOKEN` | Required bearer token for mutating HTTP endpoints | (none) |
 
 ### Config File Format
 
@@ -390,19 +374,27 @@ connection_timeout_ms = 30000
 
 ## 5. Roadmap
 
-**Current (v0.1):**
-- ✅ CLI (all 63 commands)
-- ✅ Rust SDK (libbaals)
-- ✅ HTTP/REST API
-- 🔶 Stub implementations: p2p, contract, admin, api command groups
+### Current Support Matrix (2026-05-19)
 
-**Near-term (v0.2):**
-- ⬜ JavaScript/TypeScript SDK (baals-js)
-- ⬜ Full P2P, Contract, Admin, API command groups
-- ⬜ WebSocket streaming API
+| Area | Status | Notes |
+|------|--------|-------|
+| Rust SDK (`baals` crate) | GA | Canonical runtime API |
+| HTTP REST API (`/api/v1/*` + legacy aliases) | GA | Mutating routes require bearer token + loopback |
+| CLI core runtime workflows | Beta | Core node/wallet/tx/query/db/proof/dev paths are implemented |
+| CLI `p2p` group | Planned | Explicitly not wired to live sync state yet |
+| CLI advanced `contract`/`admin` subcommands | Planned | Some subcommands intentionally return not implemented |
+| Go SDK (`sdk/go`) | Beta | Pure-Go client wrapper around daemon/API flow |
+| Node.js FFI SDK (`sdk/nodejs`) | Beta | Legacy ffi-napi package |
+| Node.js native SDK (`sdk/nodejs-native`) | Beta | napi-rs addon path |
+| Python SDK (`baals-py`) | Planned | Not present in this repository |
+| WebSocket streaming API | Planned | Not implemented in current runtime |
 
-**Future (v0.3+):**
-- ⬜ Python SDK (baals-py)
-- ⬜ Go SDK (baals-go)
-- ⬜ Mobile SDKs (Swift, Kotlin)
-- ⬜ Formal WASM security audit 
+### Near-term
+- Complete runtime-backed `p2p` CLI actions
+- Fill `contract`/`admin` command gaps
+- Add WebSocket streaming endpoints
+
+### Future
+- Python SDK
+- Mobile SDKs (Swift, Kotlin)
+- Formal WASM security audit

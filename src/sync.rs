@@ -182,6 +182,7 @@ impl PerPeerRateLimiter {
 pub struct CustomSync {
     peer_id: PublicKey,
     known_peers: Arc<tokio::sync::RwLock<HashMap<PublicKey, SocketAddr>>>,
+    authorized_peers: Arc<tokio::sync::RwLock<Option<HashSet<PublicKey>>>>,
     block_cache: Arc<Mutex<HashMap<[u8; 32], Block>>>,
     listen_addr: SocketAddr,
     is_running: Arc<Mutex<bool>>,
@@ -451,6 +452,7 @@ impl CustomSync {
         Self {
             peer_id,
             known_peers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            authorized_peers: Arc::new(tokio::sync::RwLock::new(None)),
             block_cache: Arc::new(Mutex::new(HashMap::new())),
             listen_addr,
             is_running: Arc::new(Mutex::new(false)),
@@ -483,6 +485,19 @@ impl CustomSync {
     pub fn with_tls(mut self, tls_config: TlsConfig) -> Self {
         self.tls_config = Some(Arc::new(tls_config));
         self
+    }
+
+    pub fn with_authorized_peers(self, peers: HashSet<PublicKey>) -> Self {
+        *self.authorized_peers.blocking_write() = Some(peers);
+        self
+    }
+
+    async fn is_peer_authorized(&self, peer_id: &PublicKey) -> bool {
+        let auth_peers = self.authorized_peers.read().await;
+        match &*auth_peers {
+            Some(whitelist) => whitelist.contains(peer_id),
+            None => true, // No whitelist = all peers authorized
+        }
     }
 
     pub async fn cache_block(&self, block: Block) {
@@ -532,6 +547,15 @@ impl CustomSync {
                 let remote_pk = ed25519_dalek::VerifyingKey::from_bytes(&remote_peer_id.to_bytes())
                     .map_err(|_| SyncError::AuthenticationFailed)?;
                 remote_pk.verify(&challenge, &sig).map_err(|_| SyncError::AuthenticationFailed)?;
+
+                // Check if peer is authorized
+                if !self.is_peer_authorized(&remote_peer_id).await {
+                    log::warn!(
+                        "[SYNC] Peer {} is not authorized",
+                        hex::encode(remote_peer_id.to_bytes())
+                    );
+                    return Err(SyncError::AuthenticationFailed);
+                }
 
                 let my_sig = {
                     let sig_key_guard = self.signing_key.lock().await;
@@ -1516,6 +1540,7 @@ impl Clone for SyncWrapper {
             SyncWrapper::Custom(cs) => SyncWrapper::Custom(Box::new(CustomSync {
                 peer_id: cs.peer_id,
                 known_peers: Arc::clone(&cs.known_peers),
+                authorized_peers: Arc::clone(&cs.authorized_peers),
                 block_cache: Arc::clone(&cs.block_cache),
                 listen_addr: cs.listen_addr,
                 is_running: Arc::clone(&cs.is_running),

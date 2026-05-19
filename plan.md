@@ -483,3 +483,126 @@ A financial blockchain is ready for production when:
 | Authorized signers persist | **❌ in-memory** | **Yes** |
 | Monotonic block timestamps | **❌ not enforced** | Partial |
 | Minimum gas price | **❌ always 0** | **Yes** |
+
+---
+
+## 2026-05-19 Completeness Remediation Plan (Spec + Current Status)
+
+Scope: resolve all findings from the latest completeness review comparing `docs/` specs, declared compliance status, and current behavior.
+
+### Priority 0: Restore truthful quality/status reporting
+
+#### T0.1 Fix active quality gate failures
+Problem: `cargo fmt --all -- --check` and `cargo clippy --all-targets --all-features -- -D warnings` fail on current tree.
+Tasks:
+1. Fix clippy violations in `src/cli/contract.rs` and `src/ledger.rs`.
+2. Run and pass:
+   - `cargo fmt --all -- --check`
+   - `cargo clippy --all-targets --all-features -- -D warnings`
+   - `cargo test --all-features`
+Acceptance criteria:
+- All three commands pass on head.
+- CI mirrors the same pass state.
+
+#### T0.2 Reconcile compliance claims with evidence
+Problem: compliance docs claim pass status that can drift from reality.
+Tasks:
+1. Update `docs/COMPLIANCE.md` with a timestamped status section from fresh command output.
+2. Update summary metrics in `docs/Spec_Compliance_Notes.md` to match actual results.
+3. Add a reproducibility note listing exact commands used.
+Acceptance criteria:
+- No stale gate/test counts.
+- No contradictions across compliance docs.
+
+### Priority 1: Align API contract across spec, CLI, and server
+
+#### T1.1 Define canonical endpoint namespace
+Problem: spec/CLI reference `/api/v1/*`; server currently exposes different paths.
+Tasks:
+1. Choose canonical namespace:
+   - recommended: adopt `/api/v1/*` in server
+   - or update docs/CLI to existing routes (if intentionally final)
+2. Publish route mapping table (legacy -> canonical) in `docs/OPERATING.md`.
+3. Keep compatibility aliases for one release if paths change.
+Acceptance criteria:
+- Docs, CLI guidance, and server routes all agree.
+
+#### T1.2 Add endpoint contract tests
+Tasks:
+1. Add tests for published paths covering submit tx, account query, block query, contract read call, and health.
+2. Fail tests when documented path and runtime path diverge.
+Acceptance criteria:
+- Published API works exactly as documented.
+
+### Priority 2: Replace placeholder command behavior with real outcomes
+
+#### T2.1 P2P command group
+Problem: `p2p` commands currently rely on local file placeholders and synthetic responses.
+Tasks:
+1. Wire `peers`, `add-peer`, `remove-peer`, `sync-now` to runtime/sync state.
+2. Remove misleading synthetic success paths.
+3. Return explicit `not implemented` (non-zero) for any remaining placeholders.
+Acceptance criteria:
+- P2P command output reflects live runtime behavior.
+
+#### T2.2 Contract/admin/api command groups
+Problem: several commands are informational stubs but can look complete.
+Tasks:
+1. Implement real behavior for `contract abi`, `contract estimate-gas`, `admin rotate-consensus-key`, `admin tls-generate`, and `api` request flows; or
+2. Mark as explicitly experimental/not implemented with truthful exit semantics.
+Acceptance criteria:
+- No command reports successful execution for non-executed operations.
+
+### Priority 3: SDK/platform completeness reconciliation
+
+#### T3.1 Supported SDK matrix
+Problem: docs imply broader SDK/API availability than current repo implementation.
+Tasks:
+1. Define support tiers (`GA`, `Beta`, `Planned`) in docs.
+2. Mark Python SDK and WebSocket streaming according to actual state.
+3. Align `README.md` and `docs/BaaLS_CLI_SDK_Wiring_Overview.md` to same matrix.
+Acceptance criteria:
+- No availability claim without shipped implementation.
+
+#### T3.2 Node SDK packaging cleanup
+Problem: `sdk/nodejs` and `sdk/nodejs-native` both claim `@baals/sdk` and native package metadata references entry files not present in source tree.
+Tasks:
+1. Resolve package naming/versioning strategy to avoid collision.
+2. Commit required entrypoints or enforce build-generation + CI validation.
+3. Document one clear installation path per variant.
+Acceptance criteria:
+- Deterministic install/publish flow without package confusion.
+
+### Priority 4: Resolve consensus/compliance narrative contradictions
+
+#### T4.1 Consensus status consistency
+Problem: docs conflict on whether multi-validator PoA is deferred or resolved.
+Tasks:
+1. Decide canonical status from code + tests.
+2. Update `docs/Spec_Compliance_Notes.md` and `docs/COMPLIANCE.md` accordingly.
+3. Link status claims to concrete test coverage.
+Acceptance criteria:
+- No contradictory consensus status statements remain.
+
+### Execution order
+1. T0.1 -> T0.2
+2. T1.1 -> T1.2
+3. T2.1 + T2.2
+4. T3.1 -> T3.2
+5. T4.1
+
+### Definition of done for this remediation block
+1. All review findings fixed or truthfully marked deferred.
+2. Published commands/endpoints execute as documented.
+3. Compliance docs are evidence-backed and reproducible.
+
+### Execution status (2026-05-19)
+- [x] T0.1 quality gates fixed (`fmt`/`clippy`/`test` passing)
+- [x] T0.2 compliance docs reconciled with fresh evidence
+- [x] T1.1 canonical `/api/v1/*` API namespace wired with legacy aliases
+- [x] T1.2 endpoint contract checks added to CLI lifecycle test
+- [x] T2.1 `p2p` placeholder success paths removed (explicit not implemented)
+- [x] T2.2 `contract`/`admin` placeholder success paths removed; `api` commands execute live HTTP requests
+- [x] T3.1 SDK/support matrix updated in docs
+- [x] T3.2 Node package collision resolved and native entry files added
+- [x] T4.1 consensus/compliance narrative contradictions reconciled

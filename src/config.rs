@@ -75,6 +75,8 @@ pub struct NetworkConfig {
     pub tls_key_path: String,
     #[serde(default)]
     pub tls_ca_cert_path: String,
+    #[serde(default)]
+    pub allowed_peers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -190,6 +192,7 @@ impl Default for Config {
                 tls_cert_path: String::new(),
                 tls_key_path: String::new(),
                 tls_ca_cert_path: String::new(),
+                allowed_peers: Vec::new(),
             },
             logging: LoggingConfig {
                 level: default_log_level(),

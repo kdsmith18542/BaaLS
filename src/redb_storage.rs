@@ -281,6 +281,9 @@ impl RedbStorage {
                     StorageOperation::PutTxIndex(k, v) => {
                         txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
                     }
+                    StorageOperation::PutTxStatus(k, v) => {
+                        txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                    }
                     StorageOperation::PutContractCode(k, v) => {
                         contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
                     }
@@ -522,6 +525,22 @@ impl Storage for RedbStorage {
                 Some(block) => Ok(Some((block, tx))),
                 None => Ok(None),
             },
+            None => Ok(None),
+        }
+    }
+
+    fn get_transaction_status(
+        &self,
+        tx_hash: &[u8; 32],
+    ) -> Result<Option<crate::types::TransactionStatus>, StorageError> {
+        let key = format!("status:{}", hex::encode(tx_hash));
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
+        let table = txn.open_table(TXS_TABLE).map_err(map_err)?;
+        match table.get(key.as_bytes()).map_err(map_err)? {
+            Some(v) => {
+                let status: crate::types::TransactionStatus = bincode::deserialize(v.value())?;
+                Ok(Some(status))
+            }
             None => Ok(None),
         }
     }
@@ -1009,6 +1028,9 @@ impl Storage for RedbStorage {
                             txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
                         }
                         StorageOperation::PutTxIndex(k, v) => {
+                            txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::PutTxStatus(k, v) => {
                             txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
                         }
                         StorageOperation::PutContractCode(k, v) => {

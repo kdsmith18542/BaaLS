@@ -47,6 +47,12 @@ pub trait Storage: Send + Sync {
     fn put_pending_transaction(&self, tx: &Transaction) -> Result<(), StorageError>;
     fn remove_pending_transaction(&self, tx_hash: &[u8; 32]) -> Result<(), StorageError>;
 
+    // Transaction status (CQ-11)
+    fn get_transaction_status(
+        &self,
+        tx_hash: &[u8; 32],
+    ) -> Result<Option<crate::types::TransactionStatus>, StorageError>;
+
     // Enhanced Transaction indexing for fast lookup
     fn index_transaction(
         &self,
@@ -174,6 +180,23 @@ pub trait Storage: Send + Sync {
     fn get_storage_metadata(&self, key: &str) -> Result<Option<String>, StorageError>;
     fn set_storage_metadata(&self, key: &str, value: &str) -> Result<(), StorageError>;
 
+    // Authorized signers for consensus
+    fn put_authorized_signers(&self, signers: &[PublicKey]) -> Result<(), StorageError> {
+        let json = serde_json::to_string(signers).map_err(|e| {
+            StorageError::IndexError(format!("Failed to serialize authorized_signers: {}", e))
+        })?;
+        self.set_storage_metadata("authorized_signers", &json)
+    }
+
+    fn get_authorized_signers(&self) -> Result<Vec<PublicKey>, StorageError> {
+        match self.get_storage_metadata("authorized_signers")? {
+            Some(json) => serde_json::from_str(&json).map_err(|e| {
+                StorageError::IndexError(format!("Failed to deserialize authorized_signers: {}", e))
+            }),
+            None => Ok(Vec::new()),
+        }
+    }
+
     fn storage_format_version(&self) -> Result<u32, StorageError> {
         Ok(self
             .get_storage_metadata("storage_format_version")?
@@ -212,6 +235,7 @@ pub enum StorageOperation {
     PutChainState(Vec<u8>, Vec<u8>),
     PutTransaction(Vec<u8>, Vec<u8>),
     PutTxIndex(Vec<u8>, Vec<u8>),
+    PutTxStatus(Vec<u8>, Vec<u8>),
     PutContractCode(Vec<u8>, Vec<u8>),
     PutContractDeployer(Vec<u8>, Vec<u8>),
     PutContractStorage(Vec<u8>, Vec<u8>),
@@ -414,6 +438,9 @@ impl SledStorage {
                     self.state_tree.insert(key, value)?;
                 }
                 StorageOperation::PutTxIndex(key, value) => {
+                    self.tx_by_block_tree.insert(key, value)?;
+                }
+                StorageOperation::PutTxStatus(key, value) => {
                     self.tx_by_block_tree.insert(key, value)?;
                 }
                 StorageOperation::PutContractCode(key, value) => {
@@ -728,6 +755,20 @@ impl Storage for SledStorage {
             None => return Ok(None),
         };
         Ok(Some((block, tx)))
+    }
+
+    fn get_transaction_status(
+        &self,
+        tx_hash: &[u8; 32],
+    ) -> Result<Option<crate::types::TransactionStatus>, StorageError> {
+        let key = format!("status:{}", hex::encode(tx_hash));
+        match self.tx_by_block_tree.get(key.as_bytes())? {
+            Some(bytes) => {
+                let status: crate::types::TransactionStatus = bincode::deserialize(&bytes)?;
+                Ok(Some(status))
+            }
+            None => Ok(None),
+        }
     }
 
     fn get_transactions_by_block(

@@ -12,6 +12,8 @@
 //! - CLI & SDK: Command-line tools and Rust SDK
 
 pub mod any_storage;
+/// CLI subcommand handlers
+pub mod cli;
 /// Configuration system (TOML-based)
 pub mod config;
 /// Consensus engine trait and default PoA implementation

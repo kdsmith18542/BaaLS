@@ -11,7 +11,7 @@ BaaLS is designed to be the foundational layer for decentralized applications th
 - **Pluggable Consensus Engine**: Highly modular design allows developers to choose or implement their desired consensus mechanism (e.g., Proof-of-Authority (PoA) by default).
 - **Deterministic WASM Smart Contract Runtime**: Provides a secure, isolated, and predictable environment for executing smart contracts compiled to WebAssembly (WASM), enabling language agnosticism.
 - **Embedded Key-Value Store**: Utilizes `sled` for efficient, reliable, and persistent local data storage.
-- **Comprehensive SDKs & FFI Bindings**: Offers full Software Development Kits for Rust, Go, and JavaScript, alongside Foreign Function Interface (FFI) bindings.
+- **SDKs & FFI Bindings**: Provides a Rust SDK (GA), plus Go and Node.js SDK paths (beta) and FFI bindings.
 - **CLI Tools**: Provides robust command-line utilities for node management, wallet operations, transaction injection, and smart contract deployment.
 
 ## Impact & Use Cases
@@ -32,7 +32,7 @@ The BaaLS Core Blockchain Engine is written in Rust, emphasizing modularity, det
 
 - **Ledger**: Core logic for block validation, state transition, and chain integrity.
 - **Consensus**: Defines `ConsensusEngine` trait and manages block generation/validation (PoA by default).
-- **Storage**: Abstracted persistence layer for blocks, transactions, and state, backed by `sled` or `rocksdb`.
+- **Storage**: Abstracted persistence layer for blocks, transactions, and state, backed by `sled` or `redb`.
 - **Runtime**: The central orchestrator connecting storage, consensus, ledger, and contracts; manages transaction mempool and chain execution.
 - **Types**: Defines canonical data structures (Block, Transaction, ChainState, etc.).
 - **Contracts**: Manages WASM smart contract sandbox and executor via WASI.

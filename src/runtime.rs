@@ -211,6 +211,8 @@ pub struct Runtime<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> {
     pub auto_block_interval_ms: u64,
     pub auto_block_mempool_threshold: usize,
     pub backup_interval_secs: u64,
+    pub min_gas_price: u64,
+    pub chain_id: u64,
     metrics: Arc<MetricsCollector>,
     started_at: Arc<Mutex<Option<SystemTime>>>,
     sync_in_flight: Arc<AtomicBool>,
@@ -233,6 +235,8 @@ impl<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> Clone for Runtime<S
             auto_block_interval_ms: self.auto_block_interval_ms,
             auto_block_mempool_threshold: self.auto_block_mempool_threshold,
             backup_interval_secs: self.backup_interval_secs,
+            min_gas_price: self.min_gas_price,
+            chain_id: self.chain_id,
             metrics: Arc::clone(&self.metrics),
             started_at: Arc::clone(&self.started_at),
             sync_in_flight: Arc::clone(&self.sync_in_flight),
@@ -281,6 +285,8 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             auto_block_interval_ms: 0, // disabled by default; set before start() to enable
             auto_block_mempool_threshold: 100,
             backup_interval_secs: 0,
+            min_gas_price: 1, // default minimum gas price
+            chain_id: 1,      // default chain id
             consensus: Arc::new(consensus),
             mempool: Arc::new(Mutex::new(Mempool::new(mempool_size_limit))),
             chain_state: Arc::new(Mutex::new(initial_chain_state)),
@@ -559,6 +565,22 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                     ));
                 }
 
+                // 3b. Chain ID validation (CQ-4: cross-chain replay protection)
+                if transaction.chain_id != self.chain_id {
+                    return Err(RuntimeError::InvalidTransaction(format!(
+                        "Invalid chain_id: expected {}, got {}",
+                        self.chain_id, transaction.chain_id
+                    )));
+                }
+
+                // 3c. Minimum gas price validation
+                if transaction.gas_price < self.min_gas_price {
+                    return Err(RuntimeError::InvalidTransaction(format!(
+                        "Gas price too low (minimum {})",
+                        self.min_gas_price
+                    )));
+                }
+
                 // 4. Payload format validation
                 match &transaction.payload {
                     crate::types::TransactionPayload::Transfer { amount } => {
@@ -641,9 +663,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                     }
                     _ => 0,
                 };
-                let max_gas_cost = transaction
-                    .gas_price
-                    .saturating_mul(transaction.gas_limit);
+                let max_gas_cost = transaction.gas_price.saturating_mul(transaction.gas_limit);
                 let min_balance_required = max_gas_cost.saturating_add(transfer_amount);
                 if sender_account.balance() < min_balance_required {
                     return Err(RuntimeError::InvalidTransaction(format!(
@@ -1041,6 +1061,16 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                 )));
             }
 
+            // CQ-4: Validate chain_id on all transactions in received blocks
+            for tx in &block.transactions {
+                if tx.chain_id != self.chain_id {
+                    return Err(RuntimeError::InvalidTransaction(format!(
+                        "Invalid chain_id in fork block {}: expected {}, got {}",
+                        block.index, self.chain_id, tx.chain_id
+                    )));
+                }
+            }
+
             if let Err(e) = self.consensus.validate_block(block, &chain_snapshot) {
                 return Err(RuntimeError::InvalidTransaction(format!(
                     "Consensus validation failed on fork block #{}: {}",
@@ -1105,6 +1135,22 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         // Normal sequential block application.
         for block in blocks {
+            // CQ-4: Validate chain_id on all transactions before applying
+            let mut chain_id_valid = true;
+            for tx in &block.transactions {
+                if tx.chain_id != self.chain_id {
+                    warn!(
+                        "[SYNC] Invalid chain_id in block {} tx: expected {}, got {}",
+                        block.index, self.chain_id, tx.chain_id
+                    );
+                    chain_id_valid = false;
+                    break;
+                }
+            }
+            if !chain_id_valid {
+                continue;
+            }
+
             // Scope for consensus validation lock
             let consensus_valid = {
                 let chain_state = self.chain_state.lock().unwrap();

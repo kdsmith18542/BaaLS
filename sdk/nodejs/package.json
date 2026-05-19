@@ -1,5 +1,5 @@
 {
-  "name": "@baals/sdk",
+  "name": "@baals/sdk-ffi",
   "version": "0.1.0",
   "description": "JavaScript/TypeScript SDK for BaaLS blockchain (via Rust FFI)",
   "main": "index.js",

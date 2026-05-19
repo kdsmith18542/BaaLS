@@ -117,6 +117,7 @@ async fn test_incremental_smt_integrity() {
             index: (i + 1) as u64,
             timestamp: 1000,
             prev_hash: chain_state.latest_block_hash,
+            state_root: [0u8; 32],
             hash: [0u8; 32],
             transactions: vec![tx],
             nonce: 0,

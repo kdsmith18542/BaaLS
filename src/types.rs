@@ -547,6 +547,7 @@ pub struct Block {
     pub index: u64,
     pub timestamp: u64,
     pub prev_hash: [u8; 32],
+    pub state_root: [u8; 32],
     pub hash: [u8; 32],
     pub nonce: u64,
     pub transactions: Vec<Transaction>,
@@ -656,6 +657,13 @@ impl std::fmt::Display for Address {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub enum TransactionStatus {
+    Success,
+    Failed(String),
+    Pending,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub enum TransactionPayload {
     Transfer { amount: u64 },
     ContractDeploy { wasm_bytes: Vec<u8>, init_payload: Option<Vec<u8>> },
@@ -714,6 +722,7 @@ impl Block {
         hasher.update(self.index.to_le_bytes());
         hasher.update(self.timestamp.to_le_bytes());
         hasher.update(self.prev_hash);
+        hasher.update(self.state_root);
         hasher.update(self.nonce.to_le_bytes());
 
         // Compute Merkle root of transaction hashes
@@ -834,6 +843,7 @@ mod tests {
             index: 0,
             timestamp: 1234567890,
             prev_hash: [0; 32],
+            state_root: [0; 32],
             hash: [0; 32],
             nonce: 0,
             transactions: vec![tx1.clone(), tx2.clone()],

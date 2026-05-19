@@ -69,6 +69,12 @@ impl Storage for AnyStorage {
     ) -> Result<Option<(Block, Transaction)>, StorageError> {
         dispatch!(self, get_transaction_by_id, tx_hash)
     }
+    fn get_transaction_status(
+        &self,
+        tx_hash: &[u8; 32],
+    ) -> Result<Option<crate::types::TransactionStatus>, StorageError> {
+        dispatch!(self, get_transaction_status, tx_hash)
+    }
     fn get_transactions_by_block(
         &self,
         block_hash: &[u8; 32],

@@ -79,6 +79,25 @@ impl PoAConsensus {
         self.authorized_signers.retain(|k| *k != pk);
     }
 
+    pub fn authorized_signers(&self) -> &[PublicKey] {
+        &self.authorized_signers
+    }
+
+    pub fn load_authorized_signers_from_storage(
+        &mut self,
+        storage: &dyn crate::storage::Storage,
+    ) -> Result<(), crate::storage::StorageError> {
+        self.authorized_signers = storage.get_authorized_signers()?;
+        Ok(())
+    }
+
+    pub fn persist_authorized_signers_to_storage(
+        &self,
+        storage: &dyn crate::storage::Storage,
+    ) -> Result<(), crate::storage::StorageError> {
+        storage.put_authorized_signers(&self.authorized_signers)
+    }
+
     pub fn validate_block(&self, block: &Block) -> Result<(), ConsensusError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -191,7 +210,7 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
         &self,
         pending_transactions: &[Transaction],
         prev_block: &Block,
-        _chain_state: &ChainState,
+        chain_state: &ChainState,
     ) -> Result<Block, ConsensusError> {
         info!("[CONSENSUS] Starting block generation");
         info!(
@@ -235,6 +254,7 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
             index,
             timestamp,
             prev_hash,
+            state_root: chain_state.accounts_root_hash,
             hash: [0u8; 32],
             nonce: 0,
             transactions,

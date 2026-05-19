@@ -44,7 +44,8 @@ fn create_test_transaction(
             .as_secs(),
         signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
         gas_limit: 100000,
-        gas_price: 0,
+        gas_price: 1,
+        chain_id: 1,
         priority: 0,
         metadata: None,
     };
@@ -97,9 +98,19 @@ fn benchmark_block_production(c: &mut Criterion) {
 
     group.bench_function("empty_block", |b| {
         let runtime = setup_runtime();
+        let signing_key =
+            Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+        let public_key = PublicKey::from(signing_key.verifying_key());
+        let account = Account::Wallet { balance: 1000000, nonce: 0 };
+        runtime.create_account(&public_key, account).unwrap();
+        let mut nonce: u64 = 0;
+
         let tokio_runtime = tokio::runtime::Runtime::new().unwrap();
 
         b.iter(|| {
+            nonce += 1;
+            let tx = create_test_transaction(&public_key, &signing_key, nonce);
+            let _ = runtime.submit_transaction(tx);
             let block = tokio_runtime.block_on(async { runtime.produce_block().await.unwrap() });
             std::hint::black_box(block);
         });
@@ -146,6 +157,7 @@ fn benchmark_storage_operations(c: &mut Criterion) {
             hash: [1u8; 32],
             transactions: vec![],
             nonce: 0,
+            state_root: [0u8; 32],
             metadata: None,
         };
 
@@ -191,7 +203,8 @@ fn benchmark_storage_operations(c: &mut Criterion) {
                 .as_secs(),
             signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
             gas_limit: 100000,
-            gas_price: 0,
+            gas_price: 1,
+            chain_id: 1,
             priority: 0,
             metadata: None,
         };
@@ -219,11 +232,20 @@ fn benchmark_contract_operations(c: &mut Criterion) {
         let deployer =
             PublicKey::from(ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]).verifying_key());
 
-        b.iter(|| {
-            let contract_id = contract_engine
+        let _contract_id = {
+            let result = contract_engine
                 .deploy_contract(&deployer, 0, &wasm_bytes, None, &storage, 1_000_000)
                 .unwrap();
-            std::hint::black_box(contract_id);
+            // Store code manually since deploy_contract doesn't write to storage
+            storage.put_contract_code(&result.contract_id, &wasm_bytes).unwrap();
+            result.contract_id
+        };
+
+        b.iter(|| {
+            let result = contract_engine
+                .deploy_contract(&deployer, 0, &wasm_bytes, None, &storage, 1_000_000)
+                .unwrap();
+            std::hint::black_box(result);
         });
     });
 
@@ -231,17 +253,23 @@ fn benchmark_contract_operations(c: &mut Criterion) {
         let temp_dir = TempDir::new().unwrap();
         let storage = SledStorage::new(temp_dir.path()).unwrap();
         let contract_engine = BaaLSContractEngine::new(storage.clone()).unwrap();
-
-        let contract_id = ContractId::from_bytes(&[1u8; 32]);
-        let caller =
+        let wasm_bytes = create_test_wasm_module();
+        let deployer =
             PublicKey::from(ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]).verifying_key());
+
+        // Pre-deploy and store the contract so it exists in storage
+        let deploy_result = contract_engine
+            .deploy_contract(&deployer, 0, &wasm_bytes, None, &storage, 1_000_000)
+            .unwrap();
+        let contract_id = deploy_result.contract_id;
+        storage.put_contract_code(&contract_id, &wasm_bytes).unwrap();
 
         b.iter(|| {
             let result = contract_engine
                 .call_contract(
-                    &caller,
+                    &deployer,
                     &contract_id,
-                    "test_method",
+                    "test",
                     &[],
                     None,
                     &storage,
@@ -277,7 +305,8 @@ fn benchmark_cryptographic_operations(c: &mut Criterion) {
                 .as_secs(),
             signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
             gas_limit: 100000,
-            gas_price: 0,
+            gas_price: 1,
+            chain_id: 1,
             priority: 0,
             metadata: None,
         };
@@ -361,6 +390,7 @@ fn benchmark_consensus_operations(c: &mut Criterion) {
             hash: [1u8; 32],
             transactions: vec![],
             nonce: 0,
+            state_root: [0u8; 32],
             metadata: None,
         };
 
@@ -377,9 +407,17 @@ fn create_test_wasm_module() -> Vec<u8> {
     vec![
         0x00, 0x61, 0x73, 0x6d, // WASM magic number
         0x01, 0x00, 0x00, 0x00, // WASM version
-        0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // Type section
-        0x03, 0x02, 0x01, 0x00, // Function section
-        0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b, // Code section
+        // Type section: 1 type (i32, i32) -> i32
+        0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,
+        // Function section: 1 function with type 0
+        0x03, 0x02, 0x01, 0x00, // Memory section: 1 memory, no max, min=1 page
+        0x05, 0x03, 0x01, 0x00, 0x01, // Export section: 2 exports
+        0x07, 0x11, 0x02, // export "memory" as memory index 0 (kind=0x02)
+        0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00,
+        // export "test" as func index 0 (kind=0x00)
+        0x04, 0x74, 0x65, 0x73, 0x74, 0x00, 0x00,
+        // Code section: 1 function body returning i32.const 0
+        0x0a, 0x06, 0x01, 0x04, 0x00, 0x41, 0x00, 0x0b,
     ]
 }
 

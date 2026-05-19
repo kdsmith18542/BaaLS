@@ -269,19 +269,22 @@ export BAALS_ADMIN_TOKEN="your-secret-token"
 
 ### HTTP API Endpoints
 
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/health` | GET | No | Node health status |
-| `/block/latest` | GET | No | Latest block info |
-| `/block/by_height/{h}` | GET | No | Block by height |
-| `/block/by_hash/{hash}` | GET | No | Block by hash |
-| `/proof/account/{pk}` | GET | No | Account Merkle proof |
-| `/proof/contract/{id}/storage/{key}` | GET | No | Contract storage proof |
-| `/contract/query` | POST | No | Read-only contract call |
-| `/tx/submit` | POST | Bearer | Submit transaction |
-| `/account` | POST | Bearer | Create account |
-| `/contract/deploy` | POST | Bearer | Deploy contract |
-| `/contract/call` | POST | Bearer | Call contract |
+Canonical routes are under `/api/v1/*`. Legacy routes remain supported for compatibility.
+
+| Canonical Endpoint | Legacy Alias | Method | Auth | Description |
+|--------------------|--------------|--------|------|-------------|
+| `/health` (or `/api/v1/health`) | - | GET | No | Node health status |
+| `/api/v1/blocks/latest` | `/block/latest` | GET | No | Latest block info |
+| `/api/v1/blocks/{h}` | `/block/by_height/{h}` | GET | No | Block by height |
+| `/api/v1/blocks/hash/{hash}` | `/block/by_hash/{hash}` | GET | No | Block by hash |
+| `/api/v1/accounts/{pk}` | - | GET | No | Query account state |
+| `/proof/account/{pk}` | - | GET | No | Account Merkle proof |
+| `/proof/contract/{id}/storage/{key}` | - | GET | No | Contract storage proof |
+| `/api/v1/contracts/call` | `/contract/query` | POST | No | Read-only contract call |
+| `/api/v1/transactions` | `/tx/submit` | POST | Bearer | Submit transaction |
+| `/api/v1/accounts` | `/account` | POST | Bearer | Create account |
+| `/api/v1/contracts/deploy` | `/contract/deploy` | POST | Bearer | Deploy contract |
+| `/api/v1/contracts/invoke` | `/contract/call` | POST | Bearer | State-changing contract call |
 
 ## Configuration
 
