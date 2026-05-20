@@ -165,20 +165,12 @@ impl PoAConsensus {
                 return Err(ConsensusError::UnauthorizedSigner);
             }
 
-            // Calculate block hash if not already set
-            if block.hash == [0u8; 32] {
-                block.hash = block
-                    .calculate_hash()
-                    .map_err(|e| ConsensusError::BlockSigningFailed(e.to_string()))?;
-            }
-
-            // Sign the block hash
+            // Sign the block hash (which now includes signer identity from metadata)
             let signature = signing_key.sign(&block.hash);
 
-            // Add signature to block metadata
+            // Add signature and timestamp to block metadata
+            // Signer should already be in metadata from generate_block
             let mut metadata = block.metadata.clone().unwrap_or_default();
-            metadata
-                .insert("signer".to_string(), hex::encode(self.authorized_signer_key.to_bytes()));
             metadata.insert("signature".to_string(), hex::encode(signature.to_bytes()));
             metadata.insert(
                 "signed_at".to_string(),
@@ -250,6 +242,11 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
             total_size.min(self.block_size_limit)
         );
 
+        // Set signer in metadata BEFORE calculating hash
+        // This ensures the block hash covers signer identity
+        let mut metadata = std::collections::BTreeMap::new();
+        metadata.insert("signer".to_string(), hex::encode(self.authorized_signer_key.to_bytes()));
+
         let mut block = Block {
             index,
             timestamp,
@@ -258,17 +255,17 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
             hash: [0u8; 32],
             nonce: 0,
             transactions,
-            metadata: None,
+            metadata: Some(metadata),
         };
 
         debug!("[CONSENSUS] Created block structure, calculating hash");
-        // Calculate block hash
+        // Calculate block hash (now includes signer)
         block.hash = block
             .calculate_hash()
             .map_err(|e| ConsensusError::ValidationFailed(format!("Hash error: {:?}", e)))?;
         debug!("[CONSENSUS] Block hash calculated: {}", hex::encode(block.hash));
 
-        // Sign the block — mandatory for PoA
+        // Sign the block hash — mandatory for PoA
         if let Some(ref _signing_key) = self.signing_key {
             debug!("[CONSENSUS] Signing block with authorized key");
             self.sign_block(&mut block)?;

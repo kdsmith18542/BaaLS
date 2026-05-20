@@ -747,6 +747,13 @@ impl Block {
         };
         hasher.update(tx_root);
 
+        // Include signer from metadata in hash — ensures hash covers signer identity
+        if let Some(metadata) = &self.metadata {
+            if let Some(signer_hex) = metadata.get("signer") {
+                hasher.update(signer_hex.as_bytes());
+            }
+        }
+
         Ok(hasher.finalize().into())
     }
 }
