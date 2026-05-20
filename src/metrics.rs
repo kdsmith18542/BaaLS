@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use sysinfo::System;
+use sysinfo::{Pid, ProcessRefreshKind, System};
 use tokio::time::interval;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,9 +429,17 @@ impl MetricsCollector {
 
     pub fn health_check(&self) -> HealthStatus {
         let metrics = self.get_metrics();
+        let pid = Pid::from_u32(std::process::id());
         let mut sys = System::new();
-        sys.refresh_memory();
-        let used_memory = sys.used_memory() as f64 / (1024.0 * 1024.0);
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            false,
+            ProcessRefreshKind::nothing().with_memory(),
+        );
+        let used_memory = sys
+            .process(pid)
+            .map(|p| p.memory() as f64 / (1024.0 * 1024.0))
+            .unwrap_or(0.0);
 
         let (storage_healthy, latest_block_index, latest_block_hash, mempool_size) = {
             let m = self.metrics.lock().unwrap();

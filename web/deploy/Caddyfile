@@ -1,4 +1,4 @@
-baals.online, www.baals.online {
+baals.network, www.baals.network {
     encode zstd gzip
     root * /var/www/baals/web
     file_server

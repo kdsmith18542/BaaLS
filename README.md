@@ -128,7 +128,7 @@ Canonical API routes are under `/api/v1/*` with legacy aliases preserved.
 - Supported channels: `blocks`, `transactions`, `mempool`.
 - Event frames use envelope: `{"type":"event","channel":"...","event":{...}}`.
 
-## Project Web (baals.online)
+## Project Web (baals.network)
 
 The repository now includes a `web/` project for the public website and block explorer UI.
 
@@ -188,7 +188,7 @@ BAALS_NODE_INTEGRATION=1 npm run test:integration
 
 - `src/`: core runtime, ledger, consensus, storage, sync, CLI, FFI
 - `docs/`: operational and architecture documentation
-- `web/`: baals.online website + block explorer frontend
+- `web/`: baals.network website + block explorer frontend
 - `sdk/go`: Go SDK path
 - `sdk/nodejs`: Node FFI SDK path
 - `sdk/nodejs-native`: Node native addon SDK path

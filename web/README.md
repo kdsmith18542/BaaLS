@@ -1,6 +1,6 @@
 # BaaLS Web
 
-This folder is the project web app for `baals.online`. It includes:
+This folder is the project web app for `baals.network`. It includes:
 
 - A public website shell for BaaLS.
 - A built-in block explorer.
@@ -42,17 +42,17 @@ Default node endpoints expected by the explorer:
 
 You can override both in the UI and save to browser local storage.
 
-## Deploy to baals.online
+## Deploy to baals.network
 
 Any static host works (Cloudflare Pages, Netlify, Vercel static, S3+CloudFront, etc.).
 
-Deploy the contents of this `web/` folder as a static site root and point `baals.online` DNS to the selected host.
+Deploy the contents of this `web/` folder as a static site root and point `baals.network` DNS to the selected host.
 
 If the BaaLS node API is on a different origin than the website domain, configure CORS/reverse proxy rules so browser requests to `/api/v1/*` and WS traffic are allowed.
 
 ### Included Deployment Assets
 
-- `CNAME`: custom domain target (`baals.online`) for GitHub Pages-style hosting.
+- `CNAME`: custom domain target (`baals.network`) for GitHub Pages-style hosting.
 - `.github/workflows/pages.yml`: GitHub Pages deploy workflow from `web/`.
 - `deploy/nginx.conf`: reverse proxy + TLS + security headers example.
 - `deploy/Caddyfile`: reverse proxy + security headers example.
@@ -62,6 +62,6 @@ If the BaaLS node API is on a different origin than the website domain, configur
 The app defaults are automatic:
 
 - Localhost: API `http://127.0.0.1:8080`, WS `ws://127.0.0.1:8081`
-- Non-localhost: API same-origin (`https://baals.online`), WS same-origin `/ws` (`wss://baals.online/ws`)
+- Non-localhost: API same-origin (`https://baals.network`), WS same-origin `/ws` (`wss://baals.network/ws`)
 
 That means if you use the provided reverse-proxy configs, the explorer works without manual endpoint edits.
