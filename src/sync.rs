@@ -644,12 +644,45 @@ impl CustomSync {
             _ => return Err(SyncError::AuthenticationFailed),
         }
 
-        let common_height = local_chain_state.latest_block_index;
+        // Walk backwards to find common ancestor
+        let local_height = local_chain_state.latest_block_index;
+        let peer_height = peer_chain_state.latest_block_index;
+        let search_from = std::cmp::min(local_height, peer_height);
+        let search_limit = search_from.saturating_sub(MAX_BLOCK_RANGE);
+        let mut common_ancestor_height = 0u64;
+
+        for h in (search_limit..=search_from).rev() {
+            Self::send_message(
+                &mut stream,
+                NetworkMessage::GetBlocks { from_height: h, to_height: h },
+            )
+            .await?;
+            let resp = Self::receive_message(&mut stream).await?;
+            let peer_block_hash = match resp {
+                NetworkMessage::BlocksResponse { ref blocks } if !blocks.is_empty() => {
+                    blocks[0].hash
+                }
+                _ => continue,
+            };
+            let local_block = {
+                let storage_guard = self.storage.lock().await;
+                storage_guard.as_ref().and_then(|s| s.get_block_by_height(h).ok().flatten())
+            };
+            if let Some(local_block) = local_block {
+                if local_block.hash == peer_block_hash {
+                    common_ancestor_height = h;
+                    log::info!("Fork common ancestor at height {}", h);
+                    break;
+                }
+            }
+        }
+
+        let fetch_from = common_ancestor_height + 1;
         Self::send_message(
             &mut stream,
             NetworkMessage::GetForkBlocks {
-                from_height: common_height + 1,
-                to_height: peer_chain_state.latest_block_index,
+                from_height: fetch_from,
+                to_height: peer_height,
             },
         )
         .await?;
@@ -657,6 +690,7 @@ impl CustomSync {
         let fork_response = Self::receive_message(&mut stream).await?;
         match fork_response {
             NetworkMessage::ForkBlocksResponse { blocks, total_height: _ } => {
+                log::info!("Received {} fork blocks (heights {}-{})", blocks.len(), fetch_from, peer_height);
                 for block in &blocks {
                     self.cache_block(block.clone()).await;
                 }
@@ -896,8 +930,8 @@ impl CustomSync {
                 NetworkMessage::BlockResponse { block } => {
                     Self::handle_block_response_full(block, &block_cache, &received_blocks).await;
                 }
-                NetworkMessage::NewBlockAnnouncement { block_hash, height: _ } => {
-                    // Check if we already have this block
+                NetworkMessage::NewBlockAnnouncement { block_hash, height } => {
+                    // Check if we already have the announced block.
                     let have_it = {
                         let cache = block_cache.lock().await;
                         cache.contains_key(&block_hash)
@@ -907,7 +941,86 @@ impl CustomSync {
                             .as_ref()
                             .is_some_and(|s| s.get_block(&block_hash).ok().flatten().is_some())
                     };
-                    if !have_it {
+                    if have_it {
+                        continue;
+                    }
+
+                    let (local_head_hash, local_height) =
+                        Self::chain_head_from_storage(&block_cache, &storage).await;
+
+                    // If the peer is several blocks ahead, request a contiguous range
+                    // instead of only the tip block hash.
+                    if height > local_height.saturating_add(1) {
+                        // Include local height to allow fork recovery when chains
+                        // diverged at the current tip (same height, different hash).
+                        // We'll drop the first block if it is identical to local head.
+                        let from_height = if local_height > 0 {
+                            local_height
+                        } else {
+                            local_height.saturating_add(1)
+                        };
+                        let to_height = height;
+                        log::info!(
+                            "Peer announced block at height {} while local height is {}. Requesting backfill [{}..={}]",
+                            height,
+                            local_height,
+                            from_height,
+                            to_height
+                        );
+                        let _ = Self::send_message(
+                            &mut socket,
+                            NetworkMessage::GetBlocks { from_height, to_height },
+                        )
+                        .await;
+
+                        match timeout(Duration::from_secs(2), Self::receive_message(&mut socket))
+                            .await
+                        {
+                            Ok(Ok(NetworkMessage::BlocksResponse { mut blocks })) => {
+                                blocks.sort_by_key(|b| b.index);
+
+                                if blocks
+                                    .first()
+                                    .is_some_and(|b| {
+                                        b.index == local_height
+                                            && b.hash == local_head_hash
+                                    })
+                                {
+                                    let _ = blocks.remove(0);
+                                }
+
+                                let mut accepted = 0usize;
+                                for block in blocks {
+                                    Self::handle_block_response_full(
+                                        Some(block),
+                                        &block_cache,
+                                        &received_blocks,
+                                    )
+                                    .await;
+                                    accepted = accepted.saturating_add(1);
+                                }
+                                log::info!(
+                                    "Queued {} announced backfill blocks from peer",
+                                    accepted
+                                );
+                            }
+                            Ok(Ok(other)) => {
+                                log::debug!(
+                                    "Unexpected response while requesting announced backfill: {:?}",
+                                    other
+                                );
+                            }
+                            Ok(Err(e)) => {
+                                log::debug!(
+                                    "Failed receiving announced backfill response: {}",
+                                    e
+                                );
+                            }
+                            Err(_) => {
+                                log::debug!("Timed out waiting for announced backfill response");
+                            }
+                        }
+                    } else {
                         log::info!(
                             "Received announcement for unknown block {}, requesting it",
                             hex::encode(block_hash)
@@ -1218,16 +1331,64 @@ impl CustomSync {
         local_chain_state: &ChainState,
         peer_height: u64,
     ) -> Result<Block, SyncError> {
+        let local_height = local_chain_state.latest_block_index;
         log::warn!(
             "Resolving fork: local height={}, peer height={}",
-            local_chain_state.latest_block_index,
+            local_height,
             peer_height
         );
-        let common_height = local_chain_state.latest_block_index;
+
+        // Walk backwards from min(local, peer) to find the common ancestor.
+        // At each height, request that block from the peer and compare its hash
+        // against our local block at the same height.
+        let search_from = std::cmp::min(local_height, peer_height);
+        let search_limit = search_from.saturating_sub(MAX_BLOCK_RANGE); // cap search depth
+        let mut common_ancestor_height = 0u64; // genesis if nothing matches
+
+        for h in (search_limit..=search_from).rev() {
+            // Get the peer's block at this height
+            Self::send_message(
+                stream,
+                NetworkMessage::GetBlocks { from_height: h, to_height: h },
+            )
+            .await?;
+            let resp = Self::receive_message(stream).await?;
+            let peer_block_hash = match resp {
+                NetworkMessage::BlocksResponse { ref blocks } if !blocks.is_empty() => {
+                    blocks[0].hash
+                }
+                _ => continue,
+            };
+
+            // Compare with our local block at the same height
+            let local_block = {
+                let storage_guard = self.storage.lock().await;
+                storage_guard.as_ref().and_then(|s| s.get_block_by_height(h).ok().flatten())
+            };
+            if let Some(local_block) = local_block {
+                if local_block.hash == peer_block_hash {
+                    common_ancestor_height = h;
+                    log::info!(
+                        "Fork common ancestor found at height {} (hash={})",
+                        h,
+                        crate::types::format_hex(&peer_block_hash)
+                    );
+                    break;
+                }
+            }
+        }
+
+        // Now fetch all peer blocks from common_ancestor+1 to peer_height
+        let fetch_from = common_ancestor_height + 1;
+        log::info!(
+            "Fetching fork blocks from height {} to {} from peer",
+            fetch_from,
+            peer_height
+        );
         Self::send_message(
             stream,
             NetworkMessage::GetForkBlocks {
-                from_height: common_height + 1,
+                from_height: fetch_from,
                 to_height: peer_height,
             },
         )
@@ -1236,7 +1397,8 @@ impl CustomSync {
         let response = Self::receive_message(stream).await?;
         match response {
             NetworkMessage::ForkBlocksResponse { blocks, .. } => {
-                log::info!("Received {} fork blocks from peer", blocks.len());
+                log::info!("Received {} fork blocks from peer (heights {}-{})",
+                    blocks.len(), fetch_from, peer_height);
                 for block in &blocks {
                     let mut cache = self.block_cache.lock().await;
                     cache.insert(block.hash, block.clone());
@@ -1542,18 +1704,83 @@ impl SyncLayer for CustomSync {
                         }
                     }
                 }
-                // Handle the peer's block request with a short timeout
-                if let Ok(Ok(NetworkMessage::RequestBlock { hash })) =
-                    timeout(Duration::from_secs(2), Self::receive_message(&mut stream)).await
-                {
-                    Self::handle_block_request_full(
-                        &mut stream,
-                        hash,
-                        &self.block_cache,
-                        &self.storage,
-                    )
-                    .await
-                    .ok();
+                // Serve a small set of follow-up sync requests for a short window.
+                // This allows a lagging peer to backfill missing ranges immediately
+                // after receiving our announcement on this connection.
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                loop {
+                    let now = tokio::time::Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    let remaining = deadline.saturating_duration_since(now);
+                    let incoming =
+                        timeout(remaining, Self::receive_message(&mut stream)).await;
+
+                    match incoming {
+                        Ok(Ok(NetworkMessage::RequestBlock { hash })) => {
+                            let _ = Self::handle_block_request_full(
+                                &mut stream,
+                                hash,
+                                &self.block_cache,
+                                &self.storage,
+                            )
+                            .await;
+                        }
+                        Ok(Ok(NetworkMessage::GetChainHead)) => {
+                            let (latest_hash, latest_height) =
+                                Self::chain_head_from_storage(&self.block_cache, &self.storage)
+                                    .await;
+                            let _ = Self::send_message(
+                                &mut stream,
+                                NetworkMessage::ChainHeadResponse {
+                                    latest_block_hash: latest_hash,
+                                    height: latest_height,
+                                },
+                            )
+                            .await;
+                        }
+                        Ok(Ok(NetworkMessage::GetBlocks { from_height, to_height })) => {
+                            let clamped_to =
+                                to_height.min(from_height.saturating_add(MAX_BLOCK_RANGE));
+                            let blocks = Self::blocks_in_range(
+                                &self.block_cache,
+                                &self.storage,
+                                from_height,
+                                clamped_to,
+                            )
+                            .await;
+                            let _ = Self::send_message(
+                                &mut stream,
+                                NetworkMessage::BlocksResponse { blocks },
+                            )
+                            .await;
+                        }
+                        Ok(Ok(NetworkMessage::GetForkBlocks { from_height, to_height })) => {
+                            let clamped_to =
+                                to_height.min(from_height.saturating_add(MAX_BLOCK_RANGE));
+                            let blocks = Self::blocks_in_range(
+                                &self.block_cache,
+                                &self.storage,
+                                from_height,
+                                clamped_to,
+                            )
+                            .await;
+                            let (_, total_height) =
+                                Self::chain_head_from_storage(&self.block_cache, &self.storage)
+                                    .await;
+                            let _ = Self::send_message(
+                                &mut stream,
+                                NetworkMessage::ForkBlocksResponse { blocks, total_height },
+                            )
+                            .await;
+                        }
+                        Ok(Ok(NetworkMessage::Ping)) => {
+                            let _ = Self::send_message(&mut stream, NetworkMessage::Pong).await;
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(_)) | Err(_) => break,
+                    }
                 }
             }
         }
@@ -1839,6 +2066,27 @@ impl SyncLayer for SyncWrapper {
         match self {
             SyncWrapper::Noop(n) => n.add_peer_by_address(addr),
             SyncWrapper::Custom(c) => c.add_peer_by_address(addr),
+        }
+    }
+
+    fn remove_peer(&self, addr: &str) -> Result<(), SyncError> {
+        match self {
+            SyncWrapper::Noop(n) => n.remove_peer(addr),
+            SyncWrapper::Custom(c) => c.remove_peer(addr),
+        }
+    }
+
+    fn known_peers(&self) -> Vec<String> {
+        match self {
+            SyncWrapper::Noop(n) => n.known_peers(),
+            SyncWrapper::Custom(c) => c.known_peers(),
+        }
+    }
+
+    fn trigger_sync(&self) -> Result<(), SyncError> {
+        match self {
+            SyncWrapper::Noop(n) => n.trigger_sync(),
+            SyncWrapper::Custom(c) => c.trigger_sync(),
         }
     }
 
