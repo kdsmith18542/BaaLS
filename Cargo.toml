@@ -55,6 +55,7 @@ base64 = "0.22"
 hmac = "0.12"
 tempfile = "3.8"
 lru = "0.12"
+libc = "0.2"
 
 [dev-dependencies]
 criterion = "0.8"

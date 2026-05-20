@@ -241,6 +241,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "libc",
  "log",
  "lru",
  "mdns-sd",
