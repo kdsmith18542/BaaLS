@@ -1,5 +1,3 @@
-ALL CODE MUST BE PRODUCTION GRADE AND ABSOLUTELY NO STUBS WITH OUT ASKING!!
-
 Blueprint: BaaLS - Blockchain as a Local Service
 Project Name: Blockchain as a Local Service (BaaLS)
 Slogan: The Embeddable Ledger. Local First, Trust Always.
@@ -17,7 +15,7 @@ Pluggable Consensus Engine: Highly modular design allows developers to choose or
 
 Deterministic WASM Smart Contract Runtime: Provides a secure, isolated, and predictable environment for executing smart contracts compiled to WebAssembly (WASM). This is a cornerstone for language agnosticism, allowing contracts written in Rust, Go, C#, F#, and others to run on BaaLS.
 
-Embedded Key-Value Store: Utilizes sled (or rocksdb) for efficient, reliable, and persistent local data storage. The abstraction allows for flexibility if storage needs change.
+Embedded Key-Value Store: Utilizes sled (or redb) for efficient, reliable, and persistent local data storage. The abstraction allows for flexibility if storage needs change.
 
 Comprehensive SDKs & FFI Bindings: Offers full Software Development Kits for Rust, Go, and JavaScript, alongside Foreign Function Interface (FFI) bindings for integration with virtually any programming language. This broadens its adoption potential.
 
@@ -38,3 +36,4 @@ Gaming & Simulations: Create deterministic, verifiable game states or simulation
 Personal Data Wallets: Empower users with self-sovereign control over their data, stored and managed on a personal, auditable ledger, giving them more transparency and ownership.
 
 Enterprise Micro-ledgers: Departments or small business units can maintain their own immutable audit trails for specific processes or data, without needing to integrate with a large, complex, public blockchain. 
+

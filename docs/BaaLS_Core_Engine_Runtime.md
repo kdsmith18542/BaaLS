@@ -1,5 +1,3 @@
-ALL CODE MUST BE PRODUCTION GRADE AND ABSOLUTELY NO STUBS WITH OUT ASKING!!
-
 Blueprint #1: BaaLS - Core Blockchain Engine Runtime
 Purpose: To define the foundational, local-first, embeddable blockchain engine written in Rust, emphasizing its modularity, determinism, and WASM smart contract execution capabilities.
 
@@ -19,7 +17,7 @@ Defines the ConsensusEngine trait and provides implementations (PoA default, wit
 
 storage
 
-Abstracted persistence layer for blocks, transactions, and global/contract state. Backed by an embedded key-value store (sled or rocksdb).
+Abstracted persistence layer for blocks, transactions, and global/contract state. Backed by an embedded key-value store (sled or redb).
 
 runtime
 
@@ -61,7 +59,7 @@ graph TD
     E -- Reads / Writes State & Blocks --> F[Storage]
     E -- Executes Contract Logic --> G(Contracts Engine)
     G -- Reads / Writes Contract State --> F
-    F -- Persists Data --> H[Embedded DB (sled)]
+    F -- Persists Data --> H[Embedded DB (sled/redb)]
     E --> I[State Transition]
     I --> F
     B -- (Optional) Syncs Blocks --> J[Sync Layer]
@@ -141,7 +139,7 @@ pub trait Storage {
     fn index_transaction(&self, tx_hash: &str, block_hash: &str, tx_index_in_block: u32) -> Result<(), StorageError>;
     fn get_transaction_by_id(&self, tx_hash: &str) -> Result<Option<(Block, Transaction)>, StorageError>;
 }
-Backed by: sled (default in-process, embedded KV store), with potential for rocksdb as an alternative for larger scale or specific performance needs. The Storage trait makes this swap seamless.
+Backed by: sled (default in-process, embedded KV store), with potential for redb as an alternative for larger scale or specific performance needs. The Storage trait makes this swap seamless.
 
 ⚖️ Consensus Interface:
 
@@ -240,7 +238,7 @@ All state transitions are pure functions of the previous state and the current t
 
 Locality: Designed for zero-network mode by default. Network syncing is an opt-in feature, not a core dependency. This allows BaaLS to run in isolated environments.
 
-Embeddability: Built as a Rust crate (libchain) that can be easily linked into other Rust applications or compiled into a shared library (.so, .dll, .dylib) or even WASM itself (for browser environments) for integration with other languages.
+Embeddability: Built as a Rust crate (baals) that can be easily linked into other Rust applications or compiled into a shared library (.so, .dll, .dylib) or even WASM itself (for browser environments) for integration with other languages.
 
 Simplicity: The core ledger logic is kept minimal: 1 block = 1 atomic state update. Avoids unnecessary complexity to maintain high performance and auditability.
 
@@ -321,3 +319,5 @@ Mapping of SDK functions to the Runtime interfaces.
 FFI binding strategy for Go/JS.
 
 This comprehensive blueprint should give you a solid roadmap for developing BaaLS, and clearly illustrates its powerful synergy with Canvas Contracts. 
+
+

@@ -1,10 +1,8 @@
-ALL CODE MUST BE PRODUCTION GRADE AND ABSOLUTELY NO STUBS WITH OUT ASKING!!
-
 Deep Dive Blueprint: BaaLS Storage Layer
 Purpose: To define the persistent data storage mechanisms for BaaLS, including the choice of embedded database, the key-value schema for various blockchain entities, indexing strategies for efficient data retrieval, and how state integrity is maintained through Merkle roots.
 
 Relationship to BaaLS Core:
-The storage module (likely libchain/src/storage.rs and libchain/src/storage/sled_impl.rs) provides the concrete implementation of the Storage trait, which is consumed by the Runtime, Ledger, and ContractEngine. It acts as the interface between BaaLS's in-memory logic and its durable, on-disk data.
+The storage layer is implemented in `src/storage.rs` (trait + sled backend) and `src/redb_storage.rs` (redb backend). It provides the concrete `Storage` implementations consumed by the Runtime, Ledger, and ContractEngine.
 
 Core Principles:
 
@@ -12,14 +10,14 @@ Durability & Crash-Safety: Data must be safely persisted to disk, resilient to a
 
 Efficiency: High-performance reads and writes are crucial, especially for an embedded solution. sled's lock-free Bw-Tree, log-structured storage, and in-memory page cache contribute to this.
 
-Modularity: The design adheres to the Storage trait, allowing for future swapping of the underlying database (e.g., to RocksDB) if specific needs arise without affecting higher-level BaaLS logic.
+Modularity: The design adheres to the Storage trait, allowing for future swapping of the underlying database (e.g., to redb) if specific needs arise without affecting higher-level BaaLS logic.
 
 Integrity: Support for verifiable state and data consistency, specifically through the integration with Merkle roots for accounts and contract storage.
 
 Compactness: Efficient storage of data to minimize disk footprint, important for resource-constrained environments like IoT or mobile.
 
-1. Choice of Embedded Database: sled
-Primary Selection: sled
+1. Choice of Embedded Database: sled and redb
+Primary Selection: sled (default), with redb also supported
 
 Rationale:
 
@@ -202,3 +200,5 @@ The StorageError enum provides specific error types for database failures, seria
 These errors propagate up to the Ledger and Runtime to ensure proper handling and potential block rejection.
 
 This detailed blueprint for the BaaLS Storage Layer defines a robust, efficient, and verifiable persistence mechanism, leveraging sled for its embedded capabilities and strong guarantees. The strategic use of key schemas and Merkle trees provides the foundational integrity required for a reliable blockchain, whether operating locally or in an optionally synced peer-to-peer environment. 
+
+

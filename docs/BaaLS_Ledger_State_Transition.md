@@ -1,10 +1,8 @@
-ALL CODE MUST BE PRODUCTION GRADE AND ABSOLUTELY NO STUBS WITH OUT ASKING!!
-
 Deep Dive Blueprint: BaaLS Ledger & State Transition Model
 Purpose: To precisely define how BaaLS manages the chain of blocks, validates new blocks and transactions, and deterministically updates the blockchain's state. This blueprint covers the core immutable ledger and the mechanisms for state change.
 
 Relationship to BaaLS Core:
-This module (ledger.rs in the libchain crate) is central to the Runtime. The Runtime orchestrates when the Ledger processes blocks, and the Ledger relies on Storage to persist the state and Contracts to execute smart contract logic.
+This module (ledger.rs in the baals crate) is central to the Runtime. The Runtime orchestrates when the Ledger processes blocks, and the Ledger relies on Storage to persist the state and Contracts to execute smart contract logic.
 
 Core Principles:
 
@@ -186,3 +184,5 @@ The accounts_root_hash and storage_root_hash will be derived from a Merkle tree 
 Atomic Block Processing: The apply_block function should be atomic. If any step fails (e.g., a contract call reverts, an invalid transaction is found during re-execution), the entire block is considered invalid, and no state changes are committed for that block. This ensures the ledger never enters an inconsistent state.
 
 Error Types: Define a clear hierarchy of LedgerError and StateTransitionError to communicate specific failures back to the Runtime. 
+
+

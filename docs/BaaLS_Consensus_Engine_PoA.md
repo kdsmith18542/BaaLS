@@ -1,10 +1,8 @@
-ALL CODE MUST BE PRODUCTION GRADE AND ABSOLUTELY NO STUBS WITH OUT ASKING!!
-
 Deep Dive Blueprint: BaaLS Consensus Engine (Proof-of-Authority - PoA)
 Purpose: To define the design and implementation of BaaLS's pluggable ConsensusEngine trait, with a primary focus on the default Proof-of-Authority (PoA) mechanism. This blueprint details how blocks are generated, validated, and how the chain progresses in a trusted, controlled environment.
 
 Relationship to BaaLS Core:
-The Consensus module (likely libchain/src/consensus.rs and libchain/src/consensus/poa.rs) is a core component owned by the Runtime. It dictates when and how new blocks are created and validated before being passed to the Ledger for state transition. It does not directly interact with Storage or Contracts; its role is purely block acceptance/generation.
+The consensus implementation lives in `src/consensus.rs` and is owned by the Runtime. It dictates when and how new blocks are created and validated before being passed to the Ledger for state transition. It does not directly interact with Storage or Contracts; its role is purely block acceptance/generation.
 
 Core Principles of BaaLS PoA:
 
@@ -168,3 +166,5 @@ Proof-of-Work (PoW) Plugin: For extremely permissionless, local-only scenarios (
 CRDT-based Consensus: For eventual consistency models where strong leader election isn't strictly necessary, but convergent data structures are key (e.g., collaborative document editing on a local BaaLS instance).
 
 This deep dive lays out how BaaLS's PoA consensus engine will enable efficient, predictable, and trustworthy block processing, perfectly aligning with its mission as a lightweight, embeddable blockchain. 
+
+

@@ -303,8 +303,8 @@ Key settings:
 ```toml
 [storage]
 backend = "sled"           # sled or redb
-cache_size_mb = 128
-compression = false
+cache_size_mb = 256
+compression = true
 
 [consensus]
 block_time_ms = 5000       # Block production interval

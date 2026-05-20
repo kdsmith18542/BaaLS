@@ -1,10 +1,8 @@
-ALL CODE MUST BE PRODUCTION GRADE AND ABSOLUTELY NO STUBS WITH OUT ASKING!!
-
 Deep Dive Blueprint: BaaLS Smart Contract Module
 Purpose: To define the architecture and functionality of BaaLS's deterministic WASM smart contract runtime. This module is responsible for loading, sandboxing, executing, and managing the state interactions of WebAssembly smart contracts. It's the secure engine that runs the "logic painted" by Canvas Contracts.
 
 Relationship to BaaLS Core:
-The contracts module (likely libchain/src/contracts.rs and sub-modules) is used by the Ledger during StateTransition to execute contract-related transactions. It relies heavily on the Storage trait to persist and retrieve contract code and state.
+The contracts module is implemented in `src/contracts.rs` and is used by the Ledger during state transition to execute contract-related transactions. It relies heavily on the Storage trait to persist and retrieve contract code and state.
 
 Core Principles:
 
@@ -202,3 +200,5 @@ WASI-based Nodes: The visual nodes in Canvas Contracts that perform blockchain i
 Developer Experience: A developer using Canvas Contracts would "build" their contract visually, click "Compile & Deploy to BaaLS," and Canvas Contracts' CLI/IDE would handle the WASM compilation, signing, and submission of the Transaction to a local or synced BaaLS node. BaaLS then takes over, executing the compiled WASM.
 
 This deep dive into the BaaLS Smart Contract Module outlines how BaaLS will provide a robust, secure, and flexible environment for smart contracts, making it the ideal runtime for the visually-designed contracts from Canvas Contracts. 
+
+

@@ -1,5 +1,3 @@
-ALL CODE MUST BE PRODUCTION GRADE AND ABSOLUTELY NO STUBS WITH OUT ASKING!!
-
 Deep Dive Blueprint: BaaLS Transaction & Mempool
 Purpose: To define the structure, cryptographic integrity, validation rules, and lifecycle of transactions within BaaLS, and to detail the design and management of the mempool (transaction pool) where unconfirmed transactions reside.
 
