@@ -614,3 +614,4 @@ Acceptance criteria:
 - [x] Phase 2.9 surface: short-lived JWT flow added (`POST /auth/token` with node-key signature proof); mutating endpoints now require valid Bearer JWT
 - [x] Phase 3.4 surface: per-block SHA256 checksums persisted by storage backends and validated by `db verify`
 - [x] Phase 3.2 observability slice: reorg events now log ancestor/height transitions and before/after state roots; divergent-fork rejection logs include fork tip state root
+- [x] Phase 2.8 surface: HTTPS API listener enabled via `network.tls_enabled`; plain HTTP can be restricted to `/health` on `node.health_port` when API TLS is active

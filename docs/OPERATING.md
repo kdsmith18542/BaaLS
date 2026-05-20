@@ -317,3 +317,7 @@ tls_cert_path = ""
 tls_key_path = ""
 tls_ca_cert_path = ""
 ```
+
+TLS API note:
+- When `network.tls_enabled = true`, configure `node.port` and `node.health_port` to different values.
+- `node.health_port` serves loopback HTTP health checks (`/health`), and `node.port` serves the HTTPS API.

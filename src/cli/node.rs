@@ -475,13 +475,24 @@ fn spawn_health_server(
     bind_addr: String,
     node_public_key: PublicKey,
     node_signing_key: ed25519_dalek::SigningKey,
+    tls: Option<tiny_http::SslConfig>,
+    health_only: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let server = Server::http(&bind_addr).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::AddrInUse,
-            format!("failed to bind health endpoint on {}: {}", bind_addr, e),
-        )
-    })?;
+    let server = if let Some(ssl_cfg) = tls {
+        Server::https(&bind_addr, ssl_cfg).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                format!("failed to bind HTTPS endpoint on {}: {}", bind_addr, e),
+            )
+        })?
+    } else {
+        Server::http(&bind_addr).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                format!("failed to bind HTTP endpoint on {}: {}", bind_addr, e),
+            )
+        })?
+    };
 
     std::thread::spawn(move || {
         let jwt_secret = derive_admin_jwt_secret(&node_signing_key);
@@ -508,12 +519,18 @@ fn spawn_health_server(
         }
 
         let mut rate_limiter = RateLimiter::new(10, 1);
-        info!("Health endpoint listening on http://{}/health", bind_addr);
+        if health_only {
+            info!("HTTP health endpoint listening on http://{}/health", bind_addr);
+        } else {
+            info!("API endpoint listener active on {}", bind_addr);
+        }
         while runtime.is_running() {
             match server.recv_timeout(std::time::Duration::from_millis(250)) {
                 Ok(Some(mut request)) => {
                     let request_url = request.url().to_string();
                     let request_url_str = request_url.as_str();
+                    let is_health = request.method() == &Method::Get
+                        && matches!(request_url_str, "/health" | "/api/v1/health");
                     let client_ip =
                         request.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default();
                     if !rate_limiter.check_and_record(&client_ip) {
@@ -521,6 +538,34 @@ fn spawn_health_server(
                             Response::from_string("Too Many Requests")
                                 .with_status_code(StatusCode(429)),
                         );
+                        continue;
+                    }
+
+                    if health_only {
+                        if is_health {
+                            match runtime.get_health_status() {
+                                Ok(health) => {
+                                    let body =
+                                        serde_json::to_string(&health).unwrap_or_else(|_| {
+                                            "{\"status\":\"unhealthy\"}".to_string()
+                                        });
+                                    respond_json(request, 200, body);
+                                }
+                                Err(e) => {
+                                    let body = serde_json::json!({
+                                        "status": "unhealthy",
+                                        "error": e.to_string()
+                                    })
+                                    .to_string();
+                                    respond_json(request, 500, body);
+                                }
+                            }
+                        } else {
+                            let _ = request.respond(
+                                Response::from_string("Not Found")
+                                    .with_status_code(StatusCode(404)),
+                            );
+                        }
                         continue;
                     }
 
@@ -633,8 +678,6 @@ fn spawn_health_server(
                         continue;
                     }
 
-                    let is_health = request.method() == &Method::Get
-                        && matches!(request_url_str, "/health" | "/api/v1/health");
                     if is_health {
                         match runtime.get_health_status() {
                             Ok(health) => {
@@ -1310,7 +1353,51 @@ pub fn handle_node(
             }
 
             let health_bind = format!("127.0.0.1:{}", cfg.node.health_port);
-            spawn_health_server(runtime.clone(), health_bind, node_public_key, node_signing_key)?;
+            if cfg.network.tls_enabled {
+                if cfg.node.health_port == port {
+                    return Err(
+                        "When TLS is enabled, node.port and node.health_port must differ so HTTP /health can remain separate from HTTPS API".into()
+                    );
+                }
+
+                let cert_bytes = std::fs::read(&cfg.network.tls_cert_path).map_err(|e| {
+                    format!(
+                        "Failed to read TLS certificate at {}: {}",
+                        cfg.network.tls_cert_path, e
+                    )
+                })?;
+                let key_bytes = std::fs::read(&cfg.network.tls_key_path).map_err(|e| {
+                    format!("Failed to read TLS private key at {}: {}", cfg.network.tls_key_path, e)
+                })?;
+                let api_bind = format!("0.0.0.0:{}", port);
+
+                spawn_health_server(
+                    runtime.clone(),
+                    health_bind,
+                    node_public_key,
+                    node_signing_key.clone(),
+                    None,
+                    true,
+                )?;
+                spawn_health_server(
+                    runtime.clone(),
+                    api_bind.clone(),
+                    node_public_key,
+                    node_signing_key,
+                    Some(tiny_http::SslConfig { certificate: cert_bytes, private_key: key_bytes }),
+                    false,
+                )?;
+                info!("HTTPS API endpoint listening on https://{}", api_bind);
+            } else {
+                spawn_health_server(
+                    runtime.clone(),
+                    health_bind,
+                    node_public_key,
+                    node_signing_key,
+                    None,
+                    false,
+                )?;
+            }
             info!("Node started. Press Ctrl+C to stop.");
             let pc_file = data_dir.join("peer_count");
             let mut heartbeat = 0u64;
