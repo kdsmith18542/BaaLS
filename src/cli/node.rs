@@ -1203,6 +1203,75 @@ gas_used_per_block {}\n",
                             Ok(text) => respond_text(request, 200, text),
                             Err(e) => respond_text(request, 500, format!("error: {}", e)),
                         }
+                    } else if request.method() == &Method::Get
+                        && matches!(request_url_str, "/api/v1/peers")
+                    {
+                        let peers = runtime.get_peers();
+                        respond_json(request, 200, serde_json::json!({"peers": peers}).to_string());
+                    } else if request.method() == &Method::Post
+                        && matches!(request_url_str, "/api/v1/peers")
+                    {
+                        let mut body = String::new();
+                        let _ = request.as_reader().read_to_string(&mut body);
+                        let result: Result<serde_json::Value, _> = serde_json::from_str(&body);
+                        match result.and_then(|v| {
+                            v["address"]
+                                .as_str()
+                                .map(|a| a.to_string())
+                                .ok_or_else(|| serde_json::from_str::<()>("null").unwrap_err())
+                        }) {
+                            Ok(addr) => {
+                                match runtime.add_peer(&addr) {
+                                    Ok(_) => respond_json(
+                                        request,
+                                        200,
+                                        serde_json::json!({"added": addr}).to_string(),
+                                    ),
+                                    Err(e) => respond_json(
+                                        request,
+                                        500,
+                                        serde_json::json!({"error": e.to_string()}).to_string(),
+                                    ),
+                                }
+                            }
+                            Err(_) => respond_json(
+                                request,
+                                400,
+                                serde_json::json!({"error": "missing 'address' field"})
+                                    .to_string(),
+                            ),
+                        }
+                    } else if request.method() == &Method::Post
+                        && matches!(request_url_str, "/api/v1/sync/trigger")
+                    {
+                        match runtime.trigger_sync() {
+                            Ok(_) => respond_json(
+                                request,
+                                200,
+                                serde_json::json!({"status": "sync_triggered"}).to_string(),
+                            ),
+                            Err(e) => respond_json(
+                                request,
+                                500,
+                                serde_json::json!({"error": e.to_string()}).to_string(),
+                            ),
+                        }
+                    } else if request.method() == &Method::Delete
+                        && request_url_str.starts_with("/api/v1/peers/")
+                    {
+                        let addr = &request_url_str["/api/v1/peers/".len()..];
+                        match runtime.remove_peer(addr) {
+                            Ok(_) => respond_json(
+                                request,
+                                200,
+                                serde_json::json!({"removed": addr}).to_string(),
+                            ),
+                            Err(e) => respond_json(
+                                request,
+                                500,
+                                serde_json::json!({"error": e.to_string()}).to_string(),
+                            ),
+                        }
                     } else {
                         let _ = request.respond(
                             Response::from_string("Not Found").with_status_code(StatusCode(404)),

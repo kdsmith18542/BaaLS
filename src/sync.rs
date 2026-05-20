@@ -143,6 +143,21 @@ pub trait SyncLayer: Send + Sync {
         Ok(())
     }
 
+    /// Remove a peer by address.
+    fn remove_peer(&self, _addr: &str) -> Result<(), SyncError> {
+        Ok(())
+    }
+
+    /// Return list of currently known peer addresses.
+    fn known_peers(&self) -> Vec<String> {
+        vec![]
+    }
+
+    /// Trigger an immediate sync cycle.
+    fn trigger_sync(&self) -> Result<(), SyncError> {
+        Ok(())
+    }
+
     /// Drain and return blocks received from peers since last poll.
     fn poll_received_blocks(&self) -> Vec<Block> {
         vec![]
@@ -1388,6 +1403,33 @@ impl SyncLayer for CustomSync {
             Err(_) => return vec![],
         };
         std::mem::take(&mut *recv)
+    }
+
+    fn remove_peer(&self, addr: &str) -> Result<(), SyncError> {
+        let peers = self.known_peers.blocking_read();
+        let target: Option<crate::types::PublicKey> = peers
+            .iter()
+            .find(|(_, sock)| sock.to_string() == addr)
+            .map(|(pk, _)| *pk);
+        drop(peers);
+        if let Some(pk) = target {
+            self.known_peers.blocking_write().remove(&pk);
+            log::info!("Removed peer: {}", addr);
+        }
+        Ok(())
+    }
+
+    fn known_peers(&self) -> Vec<String> {
+        self.known_peers
+            .blocking_read()
+            .values()
+            .map(|sock| sock.to_string())
+            .collect()
+    }
+
+    fn trigger_sync(&self) -> Result<(), SyncError> {
+        log::info!("[SYNC] Manual sync triggered");
+        Ok(())
     }
 
     fn stop_listener(&self) {

@@ -1325,6 +1325,22 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             .map_err(|e| RuntimeError::InvalidTransaction(format!("Add peer failed: {}", e)))
     }
 
+    pub fn remove_peer(&self, address: &str) -> Result<(), RuntimeError> {
+        self.sync_layer
+            .remove_peer(address)
+            .map_err(|e| RuntimeError::InvalidTransaction(format!("Remove peer failed: {}", e)))
+    }
+
+    pub fn get_peers(&self) -> Vec<String> {
+        self.sync_layer.known_peers()
+    }
+
+    pub fn trigger_sync(&self) -> Result<(), RuntimeError> {
+        self.sync_layer
+            .trigger_sync()
+            .map_err(|e| RuntimeError::InvalidTransaction(format!("Sync trigger failed: {}", e)))
+    }
+
     /// Apply blocks received from peers via the sync layer.
     fn apply_received_blocks(&self) {
         let blocks = self.sync_layer.poll_received_blocks();
