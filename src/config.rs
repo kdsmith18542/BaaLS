@@ -44,6 +44,8 @@ pub struct ConsensusConfig {
     pub finality_depth: u64,
     #[serde(default = "default_max_reorg_depth")]
     pub max_reorg_depth: u64,
+    #[serde(default = "default_quorum_threshold")]
+    pub quorum_threshold: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +147,9 @@ fn default_finality_depth() -> u64 {
 fn default_max_reorg_depth() -> u64 {
     50
 }
+fn default_quorum_threshold() -> usize {
+    1
+}
 fn default_cache_mb() -> u64 {
     256
 }
@@ -190,6 +195,7 @@ impl Default for Config {
                 min_gas_price: default_min_gas_price(),
                 finality_depth: default_finality_depth(),
                 max_reorg_depth: default_max_reorg_depth(),
+                quorum_threshold: default_quorum_threshold(),
             },
             storage: StorageConfig {
                 cache_size_mb: default_cache_mb(),

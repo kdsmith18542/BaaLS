@@ -199,6 +199,22 @@ pub trait Storage: Send + Sync {
         }
     }
 
+    fn put_validator_set(&self, vs: &crate::types::ValidatorSet) -> Result<(), StorageError> {
+        let json = serde_json::to_string(vs).map_err(|e| {
+            StorageError::IndexError(format!("Failed to serialize validator_set: {}", e))
+        })?;
+        self.set_storage_metadata("validator_set", &json)
+    }
+
+    fn get_validator_set(&self) -> Result<Option<crate::types::ValidatorSet>, StorageError> {
+        match self.get_storage_metadata("validator_set")? {
+            Some(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(|e| StorageError::IndexError(format!("Failed to deserialize validator_set: {}", e))),
+            None => Ok(None),
+        }
+    }
+
     fn storage_format_version(&self) -> Result<u32, StorageError> {
         Ok(self
             .get_storage_metadata("storage_format_version")?

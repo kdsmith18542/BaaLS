@@ -49,6 +49,7 @@ pub struct PoAConsensus {
     signing_key: Option<SigningKey>,
     pub block_gas_limit: u64,
     pub block_size_limit: usize,
+    pub quorum_threshold: usize,
 }
 
 impl PoAConsensus {
@@ -61,7 +62,13 @@ impl PoAConsensus {
             signing_key: None,
             block_gas_limit: 30_000_000,        // 30M gas per block
             block_size_limit: 10 * 1024 * 1024, // 10MB per block
+            quorum_threshold: 1,                 // default: single-signer
         }
+    }
+
+    pub fn with_quorum_threshold(mut self, threshold: usize) -> Self {
+        self.quorum_threshold = threshold.max(1);
+        self
     }
 
     pub fn with_signing_key(mut self, signing_key: SigningKey) -> Self {
@@ -153,6 +160,43 @@ impl PoAConsensus {
         // Nonce check — for PoA, nonce should be 0
         if block.nonce != 0 {
             return Err(ConsensusError::InvalidNonce);
+        }
+
+        // Quorum check — if threshold > 1, validate additional signatures
+        if self.quorum_threshold > 1 {
+            let all_signers: Vec<&PublicKey> = std::iter::once(&self.authorized_signer_key)
+                .chain(self.authorized_signers.iter())
+                .collect();
+
+            let mut valid_count = 1usize; // primary signer already verified above
+
+            for (extra_signer_hex, extra_sig_bytes) in &block.quorum_signatures {
+                let signer_pk = match all_signers
+                    .iter()
+                    .find(|pk| hex::encode(pk.to_bytes()) == *extra_signer_hex)
+                {
+                    Some(pk) => *pk,
+                    None => continue, // ignore unknown signers
+                };
+                // Skip the primary signer if listed again in quorum_signatures
+                if hex::encode(signer_pk.to_bytes()) == *signer_hex {
+                    continue;
+                }
+                if extra_sig_bytes.len() == 64 {
+                    if let Ok(sig) = ed25519_dalek::Signature::from_slice(extra_sig_bytes) {
+                        if signer_pk.verify(&block.hash, &sig).is_ok() {
+                            valid_count += 1;
+                        }
+                    }
+                }
+            }
+
+            if valid_count < self.quorum_threshold {
+                return Err(ConsensusError::ValidationFailed(format!(
+                    "Quorum not met: {} valid signatures, {} required",
+                    valid_count, self.quorum_threshold
+                )));
+            }
         }
 
         Ok(())

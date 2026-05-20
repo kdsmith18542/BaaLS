@@ -689,6 +689,13 @@ pub enum TransactionPayload {
     Data { data: Vec<u8> },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorSet {
+    pub signers: Vec<PublicKey>,
+    pub quorum: usize,
+    pub effective_height: u64,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct ChainState {
     pub latest_block_hash: [u8; 32],

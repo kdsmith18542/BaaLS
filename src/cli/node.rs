@@ -262,7 +262,8 @@ pub fn build_runtime(
         }
         let pk = PublicKey::from(signing_key.verifying_key());
         let consensus = PoAConsensus::new(pk, config.consensus.block_time_ms)
-            .with_signing_key(signing_key.clone());
+            .with_signing_key(signing_key.clone())
+            .with_quorum_threshold(config.consensus.quorum_threshold);
         (pk, consensus, signing_key)
     };
 
