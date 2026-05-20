@@ -50,6 +50,7 @@ pub struct PoAConsensus {
     pub block_gas_limit: u64,
     pub block_size_limit: usize,
     pub quorum_threshold: usize,
+    pub round_robin: bool,
 }
 
 impl PoAConsensus {
@@ -63,12 +64,28 @@ impl PoAConsensus {
             block_gas_limit: 30_000_000,        // 30M gas per block
             block_size_limit: 10 * 1024 * 1024, // 10MB per block
             quorum_threshold: 1,                 // default: single-signer
+            round_robin: false,
         }
     }
 
     pub fn with_quorum_threshold(mut self, threshold: usize) -> Self {
         self.quorum_threshold = threshold.max(1);
         self
+    }
+
+    pub fn with_round_robin(mut self, enabled: bool) -> Self {
+        self.round_robin = enabled;
+        self
+    }
+
+    /// Returns the expected signer public key for the given block index
+    /// under round-robin scheduling. All signers (primary + authorized) are
+    /// included in the rotation.
+    pub fn expected_signer_for_index(&self, block_index: u64) -> PublicKey {
+        let all: Vec<&PublicKey> = std::iter::once(&self.authorized_signer_key)
+            .chain(self.authorized_signers.iter())
+            .collect();
+        *all[(block_index as usize) % all.len()]
     }
 
     pub fn with_signing_key(mut self, signing_key: SigningKey) -> Self {
@@ -138,6 +155,28 @@ impl PoAConsensus {
                 None => return Err(ConsensusError::UnauthorizedSigner),
             }
         };
+
+        // Round-robin check — with a 1-block grace window for liveness
+        if self.round_robin && !self.authorized_signers.is_empty() {
+            let expected = self.expected_signer_for_index(block.index);
+            let expected_hex = hex::encode(expected.to_bytes());
+            // Also allow the previous slot signer (grace window)
+            let prev_expected = self.expected_signer_for_index(block.index.saturating_sub(1));
+            let prev_hex = hex::encode(prev_expected.to_bytes());
+            if *signer_hex != expected_hex && *signer_hex != prev_hex {
+                return Err(ConsensusError::ValidationFailed(format!(
+                    "Round-robin violation: block {} expected signer {}, got {}",
+                    block.index,
+                    &expected_hex[..8],
+                    &signer_hex[..8.min(signer_hex.len())]
+                )));
+            }
+            info!(
+                "[CONSENSUS] Round-robin slot {}: signer {}",
+                block.index,
+                &signer_hex[..8.min(signer_hex.len())]
+            );
+        }
 
         // Verify signature cryptographically
         let signature_hex = metadata.get("signature").ok_or_else(|| {
@@ -298,10 +337,23 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
             total_size.min(self.block_size_limit)
         );
 
+        // Determine signer: round-robin from all authorized keys, or primary
+        let block_signer_pk = if self.round_robin && !self.authorized_signers.is_empty() {
+            let chosen = self.expected_signer_for_index(index);
+            info!(
+                "[CONSENSUS] Round-robin: block {} assigned to signer {}",
+                index,
+                &hex::encode(chosen.to_bytes())[..8]
+            );
+            chosen
+        } else {
+            self.authorized_signer_key
+        };
+
         // Set signer in metadata BEFORE calculating hash
         // This ensures the block hash covers signer identity
         let mut metadata = std::collections::BTreeMap::new();
-        metadata.insert("signer".to_string(), hex::encode(self.authorized_signer_key.to_bytes()));
+        metadata.insert("signer".to_string(), hex::encode(block_signer_pk.to_bytes()));
 
         let mut block = Block {
             index,
@@ -313,7 +365,7 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
             transactions,
             metadata: Some(metadata),
             total_gas_used: 0,
-            signer: Some(hex::encode(self.authorized_signer_key.to_bytes())),
+            signer: Some(hex::encode(block_signer_pk.to_bytes())),
             signature: None,
             quorum_signatures: Vec::new(),
         };
