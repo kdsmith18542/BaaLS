@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BaaLS Online | Local-First Chain + Explorer</title>
+    <meta
+      name="description"
+      content="BaaLS online presence with a built-in block explorer for local and hosted nodes."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb bg-orb-1" aria-hidden="true"></div>
+    <div class="bg-orb bg-orb-2" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <div class="brand">BaaLS</div>
+      <div class="tag">baals.online</div>
+    </header>
+
+    <main class="shell">
+      <section class="hero">
+        <p class="kicker">Blockchain As A Local Service</p>
+        <h1>Project Web + Block Explorer</h1>
+        <p class="subtext">
+          This site is the public web surface for BaaLS and includes a chain explorer
+          wired to the node HTTP and WebSocket APIs.
+        </p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title-row">
+          <h2>Endpoint Config</h2>
+          <span id="statusBadge" class="status-badge status-idle">Not Checked</span>
+        </div>
+        <div class="controls-grid">
+          <label>
+            API Base URL
+            <input id="apiBase" type="url" placeholder="http://127.0.0.1:8080" />
+          </label>
+          <label>
+            WS URL
+            <input id="wsBase" type="url" placeholder="ws://127.0.0.1:8081" />
+          </label>
+        </div>
+        <div class="button-row">
+          <button id="saveConfigBtn" class="btn">Save Config</button>
+          <button id="refreshBtn" class="btn btn-ghost">Refresh Snapshot</button>
+          <button id="clearLogBtn" class="btn btn-ghost">Clear Event Log</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Chain Snapshot</h2>
+        <div class="metric-grid">
+          <article class="metric-card">
+            <h3>Health</h3>
+            <p id="healthValue">-</p>
+          </article>
+          <article class="metric-card">
+            <h3>Height</h3>
+            <p id="heightValue">-</p>
+          </article>
+          <article class="metric-card">
+            <h3>Latest Hash</h3>
+            <p id="hashValue" class="mono">-</p>
+          </article>
+          <article class="metric-card">
+            <h3>Latest Tx Count</h3>
+            <p id="txCountValue">-</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Explorer Search</h2>
+        <form id="searchForm" class="search-row">
+          <select id="queryType" aria-label="Query type">
+            <option value="block-height">Block by Height</option>
+            <option value="block-hash">Block by Hash</option>
+            <option value="tx-hash">Transaction by Hash</option>
+            <option value="tx-address">Transactions by Address</option>
+            <option value="account">Account by Public Key</option>
+          </select>
+          <input
+            id="queryValue"
+            type="text"
+            required
+            placeholder="Enter height, hash, or address/public key"
+          />
+          <button type="submit" class="btn">Run Query</button>
+        </form>
+        <pre id="queryOutput" class="code-block">Run a query to inspect chain objects.</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Latest Blocks</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Height</th>
+                <th>Hash</th>
+                <th>Timestamp</th>
+                <th>Tx Count</th>
+              </tr>
+            </thead>
+            <tbody id="blocksTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title-row">
+          <h2>Live Event Stream</h2>
+          <div class="button-row compact">
+            <button id="wsConnectBtn" class="btn">Connect WS</button>
+            <button id="wsDisconnectBtn" class="btn btn-ghost">Disconnect</button>
+          </div>
+        </div>
+        <p class="subtext small">
+          Subscribes to <code>blocks</code>, <code>transactions</code>, and <code>mempool</code>.
+        </p>
+        <div id="eventLog" class="log"></div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>Built from the BaaLS project web folder for baals.online.</p>
+    </footer>
+
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>
