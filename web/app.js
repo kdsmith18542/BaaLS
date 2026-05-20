@@ -1,5 +1,14 @@
-const defaultApiBase = "http://127.0.0.1:8080";
-const defaultWsBase = "ws://127.0.0.1:8081";
+const isLocalHost =
+  window.location.hostname === "localhost" ||
+  window.location.hostname === "127.0.0.1";
+
+const defaultApiBase = isLocalHost
+  ? "http://127.0.0.1:8080"
+  : window.location.origin;
+
+const defaultWsBase = isLocalHost
+  ? "ws://127.0.0.1:8081"
+  : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws`;
 const configKey = "baals-web-config-v1";
 
 const el = {

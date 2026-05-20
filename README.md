@@ -148,6 +148,12 @@ The explorer is wired to:
 
 Both endpoints are configurable in the UI and persisted in browser local storage.
 
+Deployment helpers included:
+
+- GitHub Pages workflow: `.github/workflows/pages.yml`
+- Domain file: `web/CNAME`
+- Reverse-proxy templates: `web/deploy/nginx.conf`, `web/deploy/Caddyfile`
+
 ## Storage Backends
 
 - `sled` (default): mature embedded KV engine.

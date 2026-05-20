@@ -49,3 +49,19 @@ Any static host works (Cloudflare Pages, Netlify, Vercel static, S3+CloudFront, 
 Deploy the contents of this `web/` folder as a static site root and point `baals.online` DNS to the selected host.
 
 If the BaaLS node API is on a different origin than the website domain, configure CORS/reverse proxy rules so browser requests to `/api/v1/*` and WS traffic are allowed.
+
+### Included Deployment Assets
+
+- `CNAME`: custom domain target (`baals.online`) for GitHub Pages-style hosting.
+- `.github/workflows/pages.yml`: GitHub Pages deploy workflow from `web/`.
+- `deploy/nginx.conf`: reverse proxy + TLS + security headers example.
+- `deploy/Caddyfile`: reverse proxy + security headers example.
+
+### Production Endpoint Behavior
+
+The app defaults are automatic:
+
+- Localhost: API `http://127.0.0.1:8080`, WS `ws://127.0.0.1:8081`
+- Non-localhost: API same-origin (`https://baals.online`), WS same-origin `/ws` (`wss://baals.online/ws`)
+
+That means if you use the provided reverse-proxy configs, the explorer works without manual endpoint edits.
