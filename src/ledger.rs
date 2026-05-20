@@ -665,6 +665,36 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                 status_key.as_bytes().to_vec(),
                 bincode::serialize(&status)?,
             ));
+
+            // Record transaction receipt
+            let contract_address = match &tx.payload {
+                TransactionPayload::ContractDeploy { wasm_bytes, init_payload } => {
+                    let mut hasher = sha2::Sha256::new();
+                    hasher.update(tx.sender.to_bytes());
+                    hasher.update(tx.nonce.to_be_bytes());
+                    hasher.update(wasm_bytes);
+                    if let Some(payload) = init_payload {
+                        hasher.update(payload);
+                    }
+                    let hash: [u8; 32] = hasher.finalize().into();
+                    Some(crate::types::ContractId::from_bytes(&hash))
+                }
+                _ => None,
+            };
+            let receipt = crate::types::TransactionReceipt {
+                tx_hash: tx.hash,
+                block_hash: block.hash,
+                block_height: block.index,
+                index_in_block: tx_idx as u32,
+                success: tx_status.success,
+                gas_used: billable_gas,
+                contract_address,
+                error_message: tx_status.error_message.clone(),
+            };
+            batch.ops.push(StorageOperation::PutReceipt(
+                hex::encode(tx.hash).as_bytes().to_vec(),
+                bincode::serialize(&receipt)?,
+            ));
         }
 
         // 3. Finalize State Merkle Root and compute total supply.

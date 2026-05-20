@@ -113,7 +113,7 @@ Optimize memory usage for high-throughput applications:
 Optimize network performance for distributed deployments:
 - Configure P2P peers via `--peer` flag in config.toml
 - Enable TLS for encrypted communication
-- Monitor peer connections via `baalsd p2p peers`
+- Monitor peer connections via `baalsd p2p peers --data-dir ./data`
 - Adjust timeout intervals in config.toml
 
 ## Monitoring and Observability
@@ -184,7 +184,7 @@ For simple use cases, deploy as a single node:
 ```bash
 # Build and run
 cargo build --release
-./target/release/baalsd dev start --data-dir ./data
+./target/release/baalsd node start --data-dir ./data
 ```
 
 ### Multi-Node Deployment
@@ -193,10 +193,10 @@ For distributed deployments, configure multiple nodes:
 
 ```bash
 # Node 1
-./target/release/baalsd dev start --data-dir ./node1 --port 8080
+./target/release/baalsd node start --data-dir ./node1 --port 8080
 
 # Node 2
-./target/release/baalsd dev start --data-dir ./node2 --port 8081 --peer 127.0.0.1:8080
+./target/release/baalsd node start --data-dir ./node2 --port 8081 --peer 127.0.0.1:8080
 ```
 
 ### Container Deployment
@@ -213,7 +213,7 @@ FROM debian:bullseye-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/baals /usr/local/bin/
 EXPOSE 8080
-CMD ["baals", "dev", "start", "--data-dir", "/data"]
+CMD ["baalsd", "node", "start", "--data-dir", "/data"]
 ```
 
 ### Kubernetes Deployment

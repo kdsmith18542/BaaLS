@@ -5,8 +5,11 @@ use thiserror::Error;
 use ed25519_dalek::SigningKey;
 use sha2::Digest;
 
+use crate::any_storage::AnyStorage;
+use crate::config::StorageBackend;
 use crate::consensus::PoAConsensus;
 use crate::contracts::{BaaLSContractEngine, ContractEngine};
+use crate::redb_storage::RedbStorage;
 use crate::runtime::{MempoolStats, Runtime};
 use crate::storage::{SledStorage, Storage};
 use crate::sync::NoopSync;
@@ -28,14 +31,28 @@ pub enum SdkError {
 
 /// High-level SDK for BaaLS blockchain
 pub struct BaaLSSdk {
-    runtime: Arc<Runtime<SledStorage, PoAConsensus, NoopSync>>,
+    runtime: Arc<Runtime<AnyStorage, PoAConsensus, NoopSync>>,
     data_dir: PathBuf,
 }
 
 impl BaaLSSdk {
     /// Create a new BaaLS SDK instance
     pub fn new(data_dir: PathBuf) -> Result<Self, SdkError> {
-        let storage = SledStorage::new(&data_dir)?;
+        Self::with_backend(data_dir, None)
+    }
+
+    /// Create a new BaaLS SDK instance with a specific storage backend
+    pub fn with_backend(
+        data_dir: PathBuf,
+        backend: Option<StorageBackend>,
+    ) -> Result<Self, SdkError> {
+        let backend = backend.unwrap_or_default();
+        let storage: AnyStorage = match backend {
+            StorageBackend::Redb => {
+                AnyStorage::Redb(RedbStorage::new(&data_dir).map_err(|e| SdkError::InvalidConfiguration(e.to_string()))?)
+            }
+            _ => AnyStorage::Sled(SledStorage::new(&data_dir)?),
+        };
         let mut secret = [0u8; 32];
         use rand::RngCore;
         rand::rng().fill_bytes(&mut secret);
@@ -55,7 +72,22 @@ impl BaaLSSdk {
         data_dir: PathBuf,
         mempool_size_limit: usize,
     ) -> Result<Self, SdkError> {
-        let storage = SledStorage::new(&data_dir)?;
+        Self::with_mempool_limit_backend(data_dir, mempool_size_limit, None)
+    }
+
+    /// Create a new BaaLS SDK instance with custom mempool size limit and storage backend
+    pub fn with_mempool_limit_backend(
+        data_dir: PathBuf,
+        mempool_size_limit: usize,
+        backend: Option<StorageBackend>,
+    ) -> Result<Self, SdkError> {
+        let backend = backend.unwrap_or_default();
+        let storage: AnyStorage = match backend {
+            StorageBackend::Redb => {
+                AnyStorage::Redb(RedbStorage::new(&data_dir).map_err(|e| SdkError::InvalidConfiguration(e.to_string()))?)
+            }
+            _ => AnyStorage::Sled(SledStorage::new(&data_dir)?),
+        };
         let mut secret = [0u8; 32];
         use rand::RngCore;
         rand::rng().fill_bytes(&mut secret);
@@ -274,17 +306,38 @@ impl BaaLSSdk {
     pub fn data_dir(&self) -> &PathBuf {
         &self.data_dir
     }
+
+    /// Add a peer address
+    pub fn add_peer(&self, address: &str) -> Result<(), SdkError> {
+        self.runtime.add_peer(address).map_err(|e| SdkError::InvalidConfiguration(e.to_string()))
+    }
+
+    /// Remove a peer address
+    pub fn remove_peer(&self, address: &str) -> Result<(), SdkError> {
+        self.runtime.remove_peer(address).map_err(|e| SdkError::InvalidConfiguration(e.to_string()))
+    }
+
+    /// Get known peer addresses
+    pub fn known_peers(&self) -> Vec<String> {
+        self.runtime.get_peers()
+    }
+
+    /// Trigger sync now
+    pub fn trigger_sync(&self) -> Result<(), SdkError> {
+        self.runtime.trigger_sync().map_err(|e| SdkError::RuntimeError(e))
+    }
 }
 
 /// Builder pattern for BaaLSSdk configuration
 pub struct BaaLSSdkBuilder {
     data_dir: Option<PathBuf>,
     mempool_size_limit: Option<usize>,
+    backend: Option<StorageBackend>,
 }
 
 impl BaaLSSdkBuilder {
     pub fn new() -> Self {
-        Self { data_dir: None, mempool_size_limit: None }
+        Self { data_dir: None, mempool_size_limit: None, backend: None }
     }
 
     pub fn data_dir(mut self, data_dir: PathBuf) -> Self {
@@ -297,12 +350,17 @@ impl BaaLSSdkBuilder {
         self
     }
 
+    pub fn backend(mut self, backend: StorageBackend) -> Self {
+        self.backend = Some(backend);
+        self
+    }
+
     pub fn build(self) -> Result<BaaLSSdk, SdkError> {
         let data_dir = self.data_dir.unwrap_or_else(|| PathBuf::from("./data"));
 
         match self.mempool_size_limit {
-            Some(limit) => BaaLSSdk::with_mempool_limit(data_dir, limit),
-            None => BaaLSSdk::new(data_dir),
+            Some(limit) => BaaLSSdk::with_mempool_limit_backend(data_dir, limit, self.backend),
+            None => BaaLSSdk::with_backend(data_dir, self.backend),
         }
     }
 }

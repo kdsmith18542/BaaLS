@@ -34,6 +34,10 @@ pub enum DbCommands {
         data_dir: PathBuf,
         #[arg(short, long, default_value = "backup.baals")]
         output: PathBuf,
+        #[arg(long)]
+        incremental: bool,
+        #[arg(long)]
+        incremental_base: Option<PathBuf>,
     },
     Restore {
         #[arg(short, long, default_value = "./data")]
@@ -295,17 +299,31 @@ pub fn handle_db(
                 serde_json::json!({"status": "compacted"}),
             ))
         }
-        DbCommands::Backup { data_dir, output } => {
+        DbCommands::Backup { data_dir, output, incremental, incremental_base } => {
             let storage: AnyStorage = match backend {
                 "redb" => AnyStorage::Redb(RedbStorage::new(&data_dir).map_err(|e| e.to_string())?),
                 _ => AnyStorage::Sled(SledStorage::new(&data_dir)?),
             };
-            storage.backup_to(&output)?;
-            Ok(text_or_json(
-                json,
-                &format!("Backup saved to {:?}", output),
-                serde_json::json!({"status": "backup_complete", "output": output.to_string_lossy().to_string()}),
-            ))
+            if incremental {
+                let base = incremental_base.unwrap_or_else(|| {
+                    let mut base = output.clone();
+                    base.pop();
+                    base.join("full_backup")
+                });
+                storage.backup_incremental(&base, &output)?;
+                Ok(text_or_json(
+                    json,
+                    &format!("Incremental backup saved to {:?} (base: {:?})", output, base),
+                    serde_json::json!({"status": "incremental_backup_complete", "output": output.to_string_lossy().to_string(), "base": base.to_string_lossy().to_string()}),
+                ))
+            } else {
+                storage.backup_to(&output)?;
+                Ok(text_or_json(
+                    json,
+                    &format!("Backup saved to {:?}", output),
+                    serde_json::json!({"status": "backup_complete", "output": output.to_string_lossy().to_string()}),
+                ))
+            }
         }
         DbCommands::Restore { data_dir, input } => {
             let storage: AnyStorage = match backend {

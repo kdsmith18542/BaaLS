@@ -2,11 +2,20 @@
 
 ## Overview
 
-BaaLS supports TLS encryption for P2P node-to-node communication. When enabled, all sync traffic between peers is encrypted and authenticated using mutual TLS (mTLS).
+BaaLS supports TLS encryption for P2P node-to-node communication and HTTPS API serving. When enabled, all sync traffic between peers is encrypted and authenticated using mutual TLS (mTLS).
 
 ## Quick Start
 
-### Generate a self-signed CA and node certificate
+### Option A: Use the built-in CLI command
+
+```bash
+# Generate a self-signed certificate and key
+baalsd admin tls-generate --output ./certs --cn "node1.baals.local"
+```
+
+This produces `./certs/server.crt` and `./certs/server.key` ready for use.
+
+### Option B: Manual generation with OpenSSL
 
 ```bash
 # Generate CA key and certificate

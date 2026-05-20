@@ -220,6 +220,7 @@ pub struct Runtime<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> {
     sync_in_flight: Arc<AtomicBool>,
     block_production_shutdown: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
     backup_shutdown: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
+    event_sender: Arc<Mutex<Option<tokio::sync::broadcast::Sender<crate::ws_server::ChainEvent>>>>,
 }
 
 impl<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> Clone for Runtime<S, C, Y> {
@@ -246,6 +247,7 @@ impl<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> Clone for Runtime<S
             sync_in_flight: Arc::clone(&self.sync_in_flight),
             block_production_shutdown: Arc::clone(&self.block_production_shutdown),
             backup_shutdown: Arc::clone(&self.backup_shutdown),
+            event_sender: Arc::clone(&self.event_sender),
         }
     }
 }
@@ -305,6 +307,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             sync_in_flight: Arc::new(AtomicBool::new(false)),
             block_production_shutdown: Arc::new(Mutex::new(None)),
             backup_shutdown: Arc::new(Mutex::new(None)),
+            event_sender: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -313,6 +316,16 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         let mut secret_key_bytes = [0u8; 32];
         rand::rng().fill_bytes(&mut secret_key_bytes);
         Ok(SigningKey::from_bytes(&secret_key_bytes))
+    }
+
+    pub fn set_event_sender(&self, sender: tokio::sync::broadcast::Sender<crate::ws_server::ChainEvent>) {
+        *self.event_sender.lock().unwrap() = Some(sender);
+    }
+
+    fn broadcast_event(&self, event: crate::ws_server::ChainEvent) {
+        if let Some(sender) = self.event_sender.lock().unwrap().as_ref() {
+            let _ = sender.send(event);
+        }
     }
 
     pub fn start(&self) -> Result<(), RuntimeError> {
@@ -528,6 +541,10 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         *self.started_at.lock().unwrap() = None;
         info!("BaaLS Runtime stopped");
         Ok(())
+    }
+
+    pub fn is_running_handle(&self) -> Arc<Mutex<bool>> {
+        Arc::clone(&self.is_running)
     }
 
     pub fn is_running(&self) -> bool {
@@ -838,6 +855,13 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         );
 
         processing_result?;
+
+        self.broadcast_event(crate::ws_server::ChainEvent::NewBlock {
+            hash: crate::types::format_hex(&new_block.hash),
+            height: new_block.index,
+            timestamp: new_block.timestamp,
+            tx_count: new_block.transactions.len(),
+        });
 
         // Reload chain state from storage after block application
         if let Ok(Some(new_state)) = self.storage.get_chain_state() {
@@ -1294,6 +1318,13 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             self.ledger.validate_block(block)?;
             self.ledger.apply_block(block)?;
 
+            self.broadcast_event(crate::ws_server::ChainEvent::NewBlock {
+                hash: crate::types::format_hex(&block.hash),
+                height: block.index,
+                timestamp: block.timestamp,
+                tx_count: block.transactions.len(),
+            });
+
             if let Ok(Some(new_state)) = self.storage.get_chain_state() {
                 expected_prev_hash = new_state.latest_block_hash;
                 *self.chain_state.lock().unwrap() = new_state;
@@ -1410,6 +1441,12 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             // Apply block
             match self.ledger.apply_block(&block) {
                 Ok(()) => {
+                    self.broadcast_event(crate::ws_server::ChainEvent::NewBlock {
+                        hash: crate::types::format_hex(&block.hash),
+                        height: block.index,
+                        timestamp: block.timestamp,
+                        tx_count: block.transactions.len(),
+                    });
                     info!(
                         "[SYNC] Applied received block #{} ({} txns)",
                         block.index,
@@ -1619,6 +1656,17 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         info!("[RUNTIME] Contract call completed successfully");
         Ok(result.output)
+    }
+
+    pub fn estimate_contract_gas(
+        &self,
+        contract_id: &ContractId,
+        method_name: &str,
+        args: &[Vec<u8>],
+    ) -> Result<crate::contracts::GasEstimate, RuntimeError> {
+        self.contract_engine_arc
+            .estimate_gas_usage(contract_id, method_name, args, &*self.storage)
+            .map_err(|e| RuntimeError::InvalidTransaction(format!("Gas estimation failed: {}", e)))
     }
 
     /// Query a smart contract (read-only)

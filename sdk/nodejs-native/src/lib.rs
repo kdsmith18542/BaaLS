@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf, Component};
 
+use baals::config::StorageBackend;
 use baals::sdk::BaaLSSdk;
 use baals::types::{Account, PublicKey, Transaction};
 use napi_derive::napi;
@@ -12,12 +13,15 @@ pub struct BaalsClient {
 #[napi]
 impl BaalsClient {
     #[napi(constructor)]
-    pub fn new(data_dir: String) -> napi::Result<Self> {
+    pub fn new(data_dir: String, backend: Option<String>) -> napi::Result<Self> {
         let path = Path::new(&data_dir);
         if path.components().any(|c| c == Component::ParentDir) {
             return Err(napi::Error::from_reason(format!("Invalid input: {}", path.display())));
         }
-        let sdk = BaaLSSdk::new(PathBuf::from(data_dir))
+        let backend = backend.as_deref().and_then(|s| {
+            if s.eq_ignore_ascii_case("redb") { Some(StorageBackend::Redb) } else { None }
+        });
+        let sdk = BaaLSSdk::with_backend(PathBuf::from(data_dir), backend)
             .map_err(|e| napi::Error::from_reason(format!("{}", e)))?;
         Ok(Self { inner: sdk })
     }
@@ -104,6 +108,29 @@ impl BaalsClient {
             .map_err(|e| napi::Error::from_reason(format!("{}", e)))?;
         let account = Account::Wallet { balance: balance as u64, nonce: 0 };
         self.inner.create_account(&pk, account)
+            .map_err(|e| napi::Error::from_reason(format!("{}", e)))
+    }
+
+    #[napi]
+    pub fn add_peer(&self, address: String) -> napi::Result<()> {
+        self.inner.add_peer(&address)
+            .map_err(|e| napi::Error::from_reason(format!("{}", e)))
+    }
+
+    #[napi]
+    pub fn remove_peer(&self, address: String) -> napi::Result<()> {
+        self.inner.remove_peer(&address)
+            .map_err(|e| napi::Error::from_reason(format!("{}", e)))
+    }
+
+    #[napi]
+    pub fn known_peers(&self) -> Vec<String> {
+        self.inner.known_peers()
+    }
+
+    #[napi]
+    pub fn trigger_sync(&self) -> napi::Result<()> {
+        self.inner.trigger_sync()
             .map_err(|e| napi::Error::from_reason(format!("{}", e)))
     }
 }

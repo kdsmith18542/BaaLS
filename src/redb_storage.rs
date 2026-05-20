@@ -4,7 +4,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::storage::{
-    ContractEvents, Storage, StorageBatch, StorageError, StorageOperation, StorageStats,
+    BackupManifest, BackupType, ContractEvents, Storage, StorageBatch, StorageError,
+    StorageOperation, StorageStats, BACKUP_MANIFEST_FILENAME,
 };
 use crate::types::{Account, Block, ChainState, ContractId, PublicKey, Transaction};
 
@@ -22,6 +23,9 @@ const CONTRACT_TO_TX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new
 const TX_COUNT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tx_count");
 const META_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("meta");
 const STATE_NODES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("state_nodes");
+
+const ABI_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("contract_abi");
+const RECEIPT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("receipts");
 
 const ENCRYPTED_BACKUP_MAGIC: &str = "BAALSENC1\n";
 
@@ -112,7 +116,7 @@ impl RedbStorage {
     fn read_all_tables(db: &Database) -> Result<Vec<(String, Vec<u8>, Vec<u8>)>, StorageError> {
         let txn = db.begin_read().map_err(map_err)?;
         #[allow(clippy::type_complexity)]
-        let tables: [(&str, TableDefinition<&[u8], &[u8]>); 11] = [
+        let tables: [(&str, TableDefinition<&[u8], &[u8]>); 13] = [
             ("blocks", BLOCKS_TABLE),
             ("txs", TXS_TABLE),
             ("pending", PENDING_TABLE),
@@ -124,6 +128,8 @@ impl RedbStorage {
             ("contract_to_tx", CONTRACT_TO_TX_TABLE),
             ("tx_count", TX_COUNT_TABLE),
             ("meta", META_TABLE),
+            ("abi", ABI_TABLE),
+            ("receipts", RECEIPT_TABLE),
         ];
         let mut data = Vec::new();
         for (name, def) in &tables {
@@ -155,6 +161,8 @@ impl RedbStorage {
             let mut tx_count = txn.open_table(TX_COUNT_TABLE).map_err(map_err)?;
             let mut meta = txn.open_table(META_TABLE).map_err(map_err)?;
             let mut state_nodes = txn.open_table(STATE_NODES_TABLE).map_err(map_err)?;
+            let mut abi_table = txn.open_table(ABI_TABLE).map_err(map_err)?;
+            let mut receipts_table = txn.open_table(RECEIPT_TABLE).map_err(map_err)?;
 
             for (table_name, key, value) in data {
                 match table_name.as_str() {
@@ -196,6 +204,12 @@ impl RedbStorage {
                     "state_nodes" => {
                         state_nodes.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
                     }
+                    "abi" => {
+                        abi_table.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
+                    }
+                    "receipts" => {
+                        receipts_table.insert(key.as_slice(), value.as_slice()).map_err(map_err)?;
+                    }
                     _ => {}
                 }
             }
@@ -219,6 +233,8 @@ impl RedbStorage {
             txn.open_table(TX_COUNT_TABLE).map_err(map_err)?;
             txn.open_table(META_TABLE).map_err(map_err)?;
             txn.open_table(STATE_NODES_TABLE).map_err(map_err)?;
+            txn.open_table(ABI_TABLE).map_err(map_err)?;
+            txn.open_table(RECEIPT_TABLE).map_err(map_err)?;
         }
         txn.commit().map_err(map_err)?;
         Ok(())
@@ -295,8 +311,16 @@ impl RedbStorage {
                     StorageOperation::PutTxStatus(k, v) => {
                         txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
                     }
+                    StorageOperation::PutReceipt(k, v) => {
+                        let mut receipts_table = txn.open_table(RECEIPT_TABLE).map_err(map_err)?;
+                        receipts_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                    }
                     StorageOperation::PutContractCode(k, v) => {
                         contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                    }
+                    StorageOperation::PutContractAbi(k, v) => {
+                        let mut abi_table = txn.open_table(ABI_TABLE).map_err(map_err)?;
+                        abi_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
                     }
                     StorageOperation::PutContractDeployer(k, v) => {
                         contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
@@ -582,6 +606,31 @@ impl Storage for RedbStorage {
             Some(v) => {
                 let status: crate::types::TransactionStatus = bincode::deserialize(v.value())?;
                 Ok(Some(status))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn put_receipt(&self, receipt: &crate::types::TransactionReceipt) -> Result<(), StorageError> {
+        let key = hex::encode(receipt.tx_hash);
+        let val = bincode::serialize(receipt)?;
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
+        {
+            let mut table = txn.open_table(RECEIPT_TABLE).map_err(map_err)?;
+            table.insert(key.as_bytes(), val.as_slice()).map_err(map_err)?;
+        }
+        txn.commit().map_err(map_err)?;
+        Ok(())
+    }
+
+    fn get_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<crate::types::TransactionReceipt>, StorageError> {
+        let key = hex::encode(tx_hash);
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
+        let table = txn.open_table(RECEIPT_TABLE).map_err(map_err)?;
+        match table.get(key.as_bytes()).map_err(map_err)? {
+            Some(v) => {
+                let receipt: crate::types::TransactionReceipt = bincode::deserialize(v.value())?;
+                Ok(Some(receipt))
             }
             None => Ok(None),
         }
@@ -873,6 +922,25 @@ impl Storage for RedbStorage {
         }
     }
 
+    fn put_contract_abi(&self, contract_id: &ContractId, abi: &[u8]) -> Result<(), StorageError> {
+        let key = format!("abi:{}", hex::encode(contract_id.to_bytes()));
+        let txn = self.db_guard()?.begin_write().map_err(map_err)?;
+        {
+            let mut table = txn.open_table(ABI_TABLE).map_err(map_err)?;
+            table.insert(key.as_bytes(), abi).map_err(map_err)?;
+        }
+        txn.commit().map_err(map_err)?;
+        Ok(())
+    }
+
+    fn get_contract_abi(&self, contract_id: &ContractId) -> Result<Option<Vec<u8>>, StorageError> {
+        let key = format!("abi:{}", hex::encode(contract_id.to_bytes()));
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
+        let table = txn.open_table(ABI_TABLE).map_err(map_err)?;
+        let result = table.get(key.as_bytes()).map_err(map_err)?;
+        Ok(result.map(|v| v.value().to_vec()))
+    }
+
     fn contract_storage_read(
         &self,
         contract_id: &ContractId,
@@ -1086,8 +1154,16 @@ impl Storage for RedbStorage {
                         StorageOperation::PutTxStatus(k, v) => {
                             txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
                         }
+                        StorageOperation::PutReceipt(k, v) => {
+                            let mut receipts_table = txn.open_table(RECEIPT_TABLE).map_err(map_err)?;
+                            receipts_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                        }
                         StorageOperation::PutContractCode(k, v) => {
                             contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
+                        }
+                        StorageOperation::PutContractAbi(k, v) => {
+                            let mut abi_table = txn.open_table(ABI_TABLE).map_err(map_err)?;
+                            abi_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
                         }
                         StorageOperation::PutContractDeployer(k, v) => {
                             contracts.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
@@ -1298,6 +1374,7 @@ impl Storage for RedbStorage {
             ("contract_to_tx", CONTRACT_TO_TX_TABLE),
             ("tx_count", TX_COUNT_TABLE),
             ("meta", META_TABLE),
+            ("receipts", RECEIPT_TABLE),
         ];
         for (name, def) in &tables {
             let table = txn.open_table(*def).map_err(map_err)?;
@@ -1314,6 +1391,34 @@ impl Storage for RedbStorage {
                 .map_err(map_err)?;
             }
         }
+
+        // Write backup manifest alongside the backup file
+        let chain_state = self.get_chain_state()?;
+        let manifest = BackupManifest {
+            version: 1,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            last_block_height: chain_state.as_ref().map(|cs| cs.latest_block_index).unwrap_or(0),
+            last_block_hash: chain_state.as_ref().map(|cs| cs.latest_block_hash).unwrap_or([0u8; 32]),
+            backup_type: BackupType::Full,
+            previous_manifest: None,
+        };
+        // If path has no extension, treat as directory (sled-style), otherwise write manifest beside it
+        let manifest_path = if path.extension().is_none() {
+            path.join(BACKUP_MANIFEST_FILENAME)
+        } else {
+            let mut mp = path.to_path_buf();
+            mp.set_extension("manifest.json");
+            mp
+        };
+        if let Some(parent) = manifest_path.parent() {
+            std::fs::create_dir_all(parent).map_err(map_err)?;
+        }
+        let manifest_json = serde_json::to_string_pretty(&manifest)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+        std::fs::write(&manifest_path, manifest_json).map_err(map_err)?;
 
         // Encrypt backup with BAALS_BACKUP_KEY env var (AES-256-GCM) if available
         if let Ok(key_hex) = std::env::var("BAALS_BACKUP_KEY") {
@@ -1358,6 +1463,270 @@ impl Storage for RedbStorage {
         Ok(())
     }
 
+    fn backup_incremental(&self, base_path: &std::path::Path, output_path: &std::path::Path) -> Result<(), StorageError> {
+        use std::io::Write;
+        let base_manifest_path = if base_path.extension().is_none() {
+            base_path.join(BACKUP_MANIFEST_FILENAME)
+        } else {
+            let mut mp = base_path.to_path_buf();
+            mp.set_extension("manifest.json");
+            mp
+        };
+        if !base_manifest_path.exists() {
+            return Err(StorageError::IndexError(
+                "No manifest found at base backup path. Run a full backup first.".to_string(),
+            ));
+        }
+        let manifest_data = std::fs::read_to_string(&base_manifest_path).map_err(map_err)?;
+        let base_manifest: BackupManifest = serde_json::from_str(&manifest_data).map_err(map_err)?;
+
+        let current_height = self.get_chain_height()?;
+        if current_height <= base_manifest.last_block_height {
+            return Err(StorageError::IndexError(
+                "No new blocks since last backup; nothing to incrementally backup.".to_string(),
+            ));
+        }
+
+        let txn = self.db_guard()?.begin_read().map_err(map_err)?;
+        let mut plaintext = Vec::new();
+
+        // Write new blocks (by height range) and their txns
+        let blocks_table = txn.open_table(BLOCKS_TABLE).map_err(map_err)?;
+        let txs_table = txn.open_table(TXS_TABLE).map_err(map_err)?;
+        let height_table = txn.open_table(HEIGHT_TO_BLOCK_TABLE).map_err(map_err)?;
+        let addr_table = txn.open_table(ADDR_TO_TX_TABLE).map_err(map_err)?;
+        let contract_table = txn.open_table(CONTRACT_TO_TX_TABLE).map_err(map_err)?;
+        let tx_count_table = txn.open_table(TX_COUNT_TABLE).map_err(map_err)?;
+        let receipts_table = txn.open_table(RECEIPT_TABLE).map_err(map_err)?;
+
+        let mut new_tx_hashes: Vec<Vec<u8>> = Vec::new();
+
+        // Iterate through height_to_block to find blocks in range
+        let height_iter = height_table.iter().map_err(map_err)?;
+        for item in height_iter {
+            let (k, v) = item.map_err(map_err)?;
+            let key_str = String::from_utf8_lossy(k.value());
+            if let Some(height_str) = key_str.strip_prefix("height:") {
+                if let Ok(height) = height_str.parse::<u64>() {
+                    if height > base_manifest.last_block_height && height <= current_height {
+                        // Write height_to_block entry
+                        writeln!(
+                            plaintext,
+                            "height_to_block.{}.{}",
+                            hex::encode(k.value()),
+                            hex::encode(v.value())
+                        ).map_err(map_err)?;
+
+                        // Write block data (fetch original key from blocks table)
+                        let block_hash = v.value();
+                        if let Some(block_val) = blocks_table.get(block_hash).map_err(map_err)? {
+                            let block: Block = bincode::deserialize(block_val.value())?;
+                            writeln!(
+                                plaintext,
+                                "blocks.{}.{}",
+                                hex::encode(block_hash),
+                                hex::encode(block_val.value())
+                            ).map_err(map_err)?;
+
+                            // Write checksum
+                            let checksum: [u8; 32] = sha2::Sha256::digest(block_val.value()).into();
+                            let checksum_key = format!("checksum:{}", hex::encode(block_hash));
+                            writeln!(
+                                plaintext,
+                                "blocks.{}.{}",
+                                hex::encode(checksum_key.as_bytes()),
+                                hex::encode(checksum)
+                            ).map_err(map_err)?;
+
+                            for tx in &block.transactions {
+                                new_tx_hashes.push(tx.hash.to_vec());
+                                // Write tx_by_block indexes
+                                let prefix = format!("idx:{}:", hex::encode(tx.hash));
+                                let idx_iter = txs_table.iter().map_err(map_err)?;
+                                for idx_item in idx_iter {
+                                    let (ik, iv) = idx_item.map_err(map_err)?;
+                                    let ikey = String::from_utf8_lossy(ik.value());
+                                    if ikey.starts_with(&prefix) {
+                                        writeln!(
+                                            plaintext,
+                                            "txs.{}.{}",
+                                            hex::encode(ik.value()),
+                                            hex::encode(iv.value())
+                                        ).map_err(map_err)?;
+                                    }
+                                }
+                                // Write tx-to-block reverse index
+                                let rev_key = format!("tx_block:{}", hex::encode(tx.hash));
+                                if let Some(rev_val) = txs_table.get(rev_key.as_bytes()).map_err(map_err)? {
+                                    writeln!(
+                                        plaintext,
+                                        "txs.{}.{}",
+                                        hex::encode(rev_key.as_bytes()),
+                                        hex::encode(rev_val.value())
+                                    ).map_err(map_err)?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Write transactions for new blocks
+        for tx_hash in &new_tx_hashes {
+            if let Some(tx_val) = txs_table.get(tx_hash.as_slice()).map_err(map_err)? {
+                writeln!(
+                    plaintext,
+                    "txs.{}.{}",
+                    hex::encode(tx_hash),
+                    hex::encode(tx_val.value())
+                ).map_err(map_err)?;
+
+                // Write receipt
+                let receipt_key = hex::encode(tx_hash);
+                if let Some(rec_val) = receipts_table.get(receipt_key.as_bytes()).map_err(map_err)? {
+                    writeln!(
+                        plaintext,
+                        "receipts.{}.{}",
+                        hex::encode(receipt_key.as_bytes()),
+                        hex::encode(rec_val.value())
+                    ).map_err(map_err)?;
+                }
+            }
+        }
+
+        drop(receipts_table);
+        drop(tx_count_table);
+        drop(contract_table);
+        drop(addr_table);
+        drop(height_table);
+        drop(txs_table);
+        drop(blocks_table);
+
+        // Write full current accounts
+        let accounts_table = txn.open_table(ACCOUNTS_TABLE).map_err(map_err)?;
+        let accounts_iter = accounts_table.iter().map_err(map_err)?;
+        for item in accounts_iter {
+            let (k, v) = item.map_err(map_err)?;
+            writeln!(
+                plaintext,
+                "accounts.{}.{}",
+                hex::encode(k.value()),
+                hex::encode(v.value())
+            ).map_err(map_err)?;
+        }
+
+        // Write full contracts table (code, storage, deployer)
+        let contracts_table = txn.open_table(CONTRACTS_TABLE).map_err(map_err)?;
+        let contracts_iter = contracts_table.iter().map_err(map_err)?;
+        for item in contracts_iter {
+            let (k, v) = item.map_err(map_err)?;
+            writeln!(
+                plaintext,
+                "contracts.{}.{}",
+                hex::encode(k.value()),
+                hex::encode(v.value())
+            ).map_err(map_err)?;
+        }
+
+        // Write ABI table
+        let abi_table = txn.open_table(ABI_TABLE).map_err(map_err)?;
+        let abi_iter = abi_table.iter().map_err(map_err)?;
+        for item in abi_iter {
+            let (k, v) = item.map_err(map_err)?;
+            writeln!(
+                plaintext,
+                "abi.{}.{}",
+                hex::encode(k.value()),
+                hex::encode(v.value())
+            ).map_err(map_err)?;
+        }
+
+        // Write events
+        let events_table = txn.open_table(EVENTS_TABLE).map_err(map_err)?;
+        let events_iter = events_table.iter().map_err(map_err)?;
+        for item in events_iter {
+            let (k, v) = item.map_err(map_err)?;
+            writeln!(
+                plaintext,
+                "events.{}.{}",
+                hex::encode(k.value()),
+                hex::encode(v.value())
+            ).map_err(map_err)?;
+        }
+
+        // Write meta table
+        let meta_table = txn.open_table(META_TABLE).map_err(map_err)?;
+        let meta_iter = meta_table.iter().map_err(map_err)?;
+        for item in meta_iter {
+            let (k, v) = item.map_err(map_err)?;
+            writeln!(
+                plaintext,
+                "meta.{}.{}",
+                hex::encode(k.value()),
+                hex::encode(v.value())
+            ).map_err(map_err)?;
+        }
+
+        drop(txn);
+
+        // Write the incremental backup file
+        let mut file = std::fs::File::create(output_path).map_err(map_err)?;
+        file.write_all(&plaintext).map_err(map_err)?;
+
+        // Write manifest
+        let chain_state = self.get_chain_state()?;
+        let manifest = BackupManifest {
+            version: 1,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            last_block_height: chain_state.as_ref().map(|cs| cs.latest_block_index).unwrap_or(0),
+            last_block_hash: chain_state.as_ref().map(|cs| cs.latest_block_hash).unwrap_or([0u8; 32]),
+            backup_type: BackupType::Incremental,
+            previous_manifest: Some(base_manifest_path.to_string_lossy().to_string()),
+        };
+        let manifest_path = if output_path.extension().is_none() {
+            output_path.join(BACKUP_MANIFEST_FILENAME)
+        } else {
+            let mut mp = output_path.to_path_buf();
+            mp.set_extension("manifest.json");
+            mp
+        };
+        if let Some(parent) = manifest_path.parent() {
+            std::fs::create_dir_all(parent).map_err(map_err)?;
+        }
+        let manifest_json = serde_json::to_string_pretty(&manifest)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+        std::fs::write(&manifest_path, manifest_json).map_err(map_err)?;
+
+        log::info!(
+            "Incremental backup: blocks {}..={} backed up to {:?}",
+            base_manifest.last_block_height + 1,
+            current_height,
+            output_path
+        );
+        Ok(())
+    }
+
+    fn get_backup_manifest(&self, path: &std::path::Path) -> Result<Option<BackupManifest>, StorageError> {
+        let manifest_path = if path.extension().is_none() {
+            path.join(BACKUP_MANIFEST_FILENAME)
+        } else {
+            let mut mp = path.to_path_buf();
+            mp.set_extension("manifest.json");
+            mp
+        };
+        if !manifest_path.exists() {
+            return Ok(None);
+        }
+        let data = std::fs::read_to_string(&manifest_path).map_err(map_err)?;
+        serde_json::from_str(&data)
+            .map(Some)
+            .map_err(|e| StorageError::IndexError(e.to_string()))
+    }
+
     fn restore_from(&self, path: &std::path::Path) -> Result<(), StorageError> {
         let content = if detect_encrypted_backup(path) {
             decrypt_backup(path)?
@@ -1384,6 +1753,7 @@ impl Storage for RedbStorage {
                 "contract_to_tx" => CONTRACT_TO_TX_TABLE,
                 "tx_count" => TX_COUNT_TABLE,
                 "meta" => META_TABLE,
+                "receipts" => RECEIPT_TABLE,
                 _ => continue,
             };
             let mut table = txn.open_table(table_def).map_err(map_err)?;

@@ -6,6 +6,7 @@ use ed25519_dalek::Signature as Ed25519Signature;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use lru::LruCache;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -300,6 +301,7 @@ pub struct BaaLSContractEngine<S: Storage> {
     _storage_marker: std::marker::PhantomData<S>,
     wasm_engine: Engine,
     resource_limits: ResourceLimits,
+    module_cache: Arc<Mutex<LruCache<ContractId, Module>>>,
     contract_metrics: Arc<Mutex<HashMap<ContractId, ContractMetrics>>>,
     call_depth: Arc<AtomicU32>,
     executing_contracts: Arc<Mutex<HashMap<ContractId, u32>>>,
@@ -322,6 +324,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
             _storage_marker: std::marker::PhantomData,
             wasm_engine,
             resource_limits: limits,
+            module_cache: Arc::new(Mutex::new(LruCache::new(100.try_into().unwrap()))),
             contract_metrics: Arc::new(Mutex::new(HashMap::new())),
             call_depth: Arc::new(AtomicU32::new(0)),
             executing_contracts: Arc::new(Mutex::new(HashMap::new())),
@@ -390,8 +393,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
         block_index: u64,
         block_timestamp: u64,
     ) -> Result<WasmResult, ContractError> {
-        let module = Module::new(&self.wasm_engine, wasm_bytes)
-            .map_err(|e| ContractError::InvalidWasm(e.to_string()))?;
+        let module = self.get_or_compile_module(contract_id, wasm_bytes)?;
 
         let engine = module.engine();
 
@@ -1197,6 +1199,21 @@ impl<S: Storage> BaaLSContractEngine<S> {
         let hash = hasher.finalize();
         hash.into()
     }
+
+    fn get_or_compile_module(
+        &self,
+        contract_id: &ContractId,
+        wasm_bytes: &[u8],
+    ) -> Result<Module, ContractError> {
+        let mut cache = self.module_cache.lock().unwrap();
+        if let Some(module) = cache.get(contract_id) {
+            return Ok(module.clone());
+        }
+        let module = Module::new(&self.wasm_engine, wasm_bytes)
+            .map_err(|e| ContractError::InvalidWasm(e.to_string()))?;
+        cache.put(contract_id.clone(), module.clone());
+        Ok(module)
+    }
 }
 
 // ─── WasmRuntime trait impl ───
@@ -1280,8 +1297,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         // Ban non-deterministic float opcodes
         Self::scan_for_float_opcodes(wasm_bytes)
             .map_err(ContractError::BytecodeValidationFailed)?;
-        let engine = Engine::default();
-        let module = Module::new(&engine, wasm_bytes)
+        let module = Module::new(&self.wasm_engine, wasm_bytes)
             .map_err(|e| ContractError::InvalidWasm(e.to_string()))?;
 
         // Deep WASM validation
@@ -1364,6 +1380,12 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
             }
         }
 
+        // Clear cache entry in case it was previously cached from a different version
+        {
+            let mut cache = self.module_cache.lock().unwrap();
+            cache.pop(&contract_id);
+        }
+
         // Do NOT write contract code or deployer to storage here.
         // The caller (ledger) must store these atomically in its batch.
         info!("[CONTRACTS] Contract deployed: {}", hex::encode(contract_id.to_bytes()));
@@ -1438,8 +1460,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
         // All arguments are serialized into a flat buffer (ptr, len) via bincode.
         // The return value is the byte length written back to WASM memory at offset 0.
         {
-            let module = wasmtime::Module::new(&self.wasm_engine, &wasm_bytes)
-                .map_err(|e| ContractError::InvalidWasm(e.to_string()))?;
+            let module = self.get_or_compile_module(contract_id, &wasm_bytes)?;
 
             let export = module
                 .exports()

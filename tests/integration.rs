@@ -2583,7 +2583,7 @@ fn test_sdk_basic_operations() {
     let temp_dir = TempDir::new().unwrap();
     let data_dir = temp_dir.path().to_path_buf();
 
-    let sdk = BaaLSSdk::new(data_dir.clone()).unwrap();
+    let sdk = BaaLSSdk::with_backend(data_dir.clone(), None).unwrap();
     sdk.start().unwrap();
 
     // Create an account

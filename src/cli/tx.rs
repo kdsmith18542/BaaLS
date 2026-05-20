@@ -61,7 +61,9 @@ pub enum TxCommands {
         data_dir: PathBuf,
     },
     Inspect {
-        file: PathBuf,
+        hash: String,
+        #[arg(short, long, default_value = "./data")]
+        data_dir: PathBuf,
     },
     EstimateFee {
         #[arg(short, long)]
@@ -280,25 +282,78 @@ pub fn handle_tx(
                 serde_json::json!({"tx_hash": hex::encode(tx.hash)}),
             ))
         }
-        TxCommands::Inspect { file } => {
-            let data = std::fs::read(&file)?;
-            match bincode::deserialize::<Transaction>(&data) {
-                Ok(tx) => Ok(text_or_json(
-                    json,
-                    &format!(
-                        "Tx: hash={}, sender={}, nonce={}, amount={:?}",
-                        hex::encode(tx.hash),
-                        hex::encode(&tx.sender.to_bytes()[..8]),
-                        tx.nonce,
-                        tx.payload
-                    ),
-                    serde_json::to_value(serde_json::json!({
-                        "hash": hex::encode(tx.hash),
-                        "sender": hex::encode(tx.sender.to_bytes()),
-                        "nonce": tx.nonce,
-                    }))?,
-                )),
-                Err(e) => Err(format!("Failed to parse transaction: {}", e).into()),
+        TxCommands::Inspect { hash, .. } => {
+            let url = format!("http://127.0.0.1:8080/api/v1/transactions/{}", hash);
+            let resp = ureq::get(&url).call();
+            match resp {
+                Ok(response) => {
+                    let text = response.into_string().unwrap_or_default();
+                    let val: serde_json::Value =
+                        serde_json::from_str(&text).unwrap_or(serde_json::json!({"raw": text}));
+                    let tx = &val["transaction"];
+                    let status = &val["status"];
+                    let status_text = match status.as_str() {
+                        Some(s) => s.to_string(),
+                        None => format!("{:?}", status),
+                    };
+                    let finality = &val["finality"];
+                    let confirmations = finality["confirmations"].as_u64().unwrap_or(0);
+                    let required = finality["required"].as_u64().unwrap_or(0);
+                    let block_height = finality["block_height"].as_u64();
+                    let block_text = block_height
+                        .map(|h| format!(", block={}", h))
+                        .unwrap_or_default();
+
+                    let hash_str = tx["hash"].as_str().unwrap_or(&hash);
+                    let sender = tx["sender"].as_str().unwrap_or("unknown");
+                    let nonce = tx["nonce"].as_u64().unwrap_or(0);
+                    let gas_limit = tx["gas_limit"].as_u64().unwrap_or(0);
+                    let gas_price = tx["gas_price"].as_u64().unwrap_or(0);
+                    let chain_id = tx["chain_id"].as_u64().unwrap_or(0);
+                    let payload = &tx["payload"];
+                    let payload_type = match payload {
+                        serde_json::Value::Object(m) => {
+                            m.keys().next().map(|k| k.clone()).unwrap_or_else(|| "unknown".to_string())
+                        }
+                        _ => "unknown".to_string(),
+                    };
+                    let signature = tx["signature"].as_str().unwrap_or("unknown");
+                    let timestamp = tx["timestamp"].as_u64().unwrap_or(0);
+
+                    let human = format!(
+                        "Transaction: {}\n\
+                         Status: {:?}{}\n\
+                         Confirmations: {}/{}\n\
+                         Type: {}\n\
+                         Sender: {}\n\
+                         Nonce: {}\n\
+                         Gas Limit: {}\n\
+                         Gas Price: {}\n\
+                         Chain ID: {}\n\
+                         Timestamp: {}\n\
+                         Payload: {}\n\
+                         Signature: {}",
+                        hash_str,
+                        status_text,
+                        block_text,
+                        confirmations,
+                        required,
+                        payload_type,
+                        sender,
+                        nonce,
+                        gas_limit,
+                        gas_price,
+                        chain_id,
+                        timestamp,
+                        serde_json::to_string_pretty(payload).unwrap_or_default(),
+                        signature,
+                    );
+                    Ok(text_or_json(json, &human, val))
+                }
+                Err(ureq::Error::Status(404, _)) => Err("Transaction not found".into()),
+                Err(_) => Err(
+                    "Could not reach node — start with `baals node start` first".into()
+                ),
             }
         }
         TxCommands::EstimateFee { file, gas_price } => {

@@ -26,6 +26,12 @@ pub struct NodeConfig {
     pub health_port: u16,
     #[serde(default = "default_mempool_limit")]
     pub mempool_limit: usize,
+    #[serde(default = "default_ws_port")]
+    pub ws_port: u16,
+}
+
+fn default_ws_port() -> u16 {
+    8081
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +192,7 @@ impl Default for Config {
                 port: default_node_port(),
                 health_port: default_health_port(),
                 mempool_limit: default_mempool_limit(),
+                ws_port: default_ws_port(),
             },
             consensus: ConsensusConfig {
                 block_time_ms: default_block_time_ms(),

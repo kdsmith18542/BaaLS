@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use crate::{
     config::{Config, StorageBackend},
-    contracts::WasmRuntime,
-    AnyStorage, BaaLSContractEngine, ContractId, MetricsCollector, PublicKey, RedbStorage,
+    contracts::ContractEngine,
+    AnyStorage, BaaLSContractEngine, MetricsCollector, PublicKey, RedbStorage,
     SledStorage, Storage,
 };
 
@@ -101,11 +101,13 @@ pub fn handle_dev(
             }
             Ok(text_or_json(json, &keys.join("\n"), serde_json::json!({"keys": keys})))
         }
-        DevCommands::SimulateContract { wasm, method, args, sender, data_dir } => {
+        DevCommands::SimulateContract { wasm, method, args, sender, data_dir: _ } => {
             let wasm_bytes = std::fs::read(&wasm)?;
-            let storage = SledStorage::new(&data_dir)?;
+            let dir = tempfile::TempDir::new()?;
+            let storage = SledStorage::new(dir.path())?;
             let engine = BaaLSContractEngine::new(storage.clone())?;
-            let dummy_pk = match sender {
+
+            let deployer = match sender {
                 Some(s) => {
                     parse_pubkey(&s).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
                 }
@@ -116,52 +118,43 @@ pub fn handle_dev(
                     PublicKey::from(sk.verifying_key())
                 }
             };
-            let cid = ContractId::from_bytes(&[0u8; 32]);
-            let arg_bytes = args.map(|a| vec![a.into_bytes()]).unwrap_or_default();
 
-            let gas_estimate = engine.estimate_gas(&wasm_bytes, &method, &arg_bytes).unwrap_or(0);
+            let args_vec: Vec<Vec<u8>> = args.map(|a| vec![a.into_bytes()]).unwrap_or_default();
 
-            let start = std::time::Instant::now();
-            let (result, gas_used, events) = engine.execute_wasm_contract(
+            let deploy_result = engine.deploy_contract(
+                &deployer,
+                0,
                 &wasm_bytes,
-                &method,
-                &arg_bytes,
-                &dummy_pk,
-                &cid,
+                None,
                 &storage,
-                false,
                 1_000_000,
-                0,
-                0,
             )?;
-            let exec_time = start.elapsed();
 
-            let events_count = events.events.len();
-            let state_changes = if !events.events.is_empty() {
-                format!("{} events emitted", events_count)
-            } else {
-                "no events emitted".to_string()
-            };
+            storage.put_contract_code(&deploy_result.contract_id, &wasm_bytes)?;
+
+            let estimate = engine.estimate_gas_usage(
+                &deploy_result.contract_id,
+                &method,
+                &args_vec,
+                &storage,
+            )?;
 
             Ok(text_or_json(
                 json,
                 &format!(
-                    "Result ({} bytes): {}\nGas: {}/{} (est: {})\nTime: {:?}\nState: {}",
-                    result.len(),
-                    String::from_utf8_lossy(&result[..result.len().min(64)]),
-                    gas_used,
-                    1_000_000u64,
-                    gas_estimate,
-                    exec_time,
-                    state_changes
+                    "Contract: {}\nMethod: {}\nGas estimate: {}\nConfidence: {:.0}%\nExecution time: {:?}",
+                    hex::encode(deploy_result.contract_id.to_bytes()),
+                    method,
+                    estimate.estimated_gas,
+                    estimate.confidence_level * 100.0,
+                    estimate.execution_time_estimate,
                 ),
                 serde_json::json!({
-                    "result_hex": hex::encode(&result),
-                    "result_len": result.len(),
-                    "gas_used": gas_used,
-                    "gas_estimate": gas_estimate,
-                    "execution_time_us": exec_time.as_micros(),
-                    "events_count": events_count,
+                    "contract_id": hex::encode(deploy_result.contract_id.to_bytes()),
+                    "method": method,
+                    "estimated_gas": estimate.estimated_gas,
+                    "confidence_level": estimate.confidence_level,
+                    "execution_time_us": estimate.execution_time_estimate.as_micros(),
                 }),
             ))
         }

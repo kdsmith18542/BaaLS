@@ -41,6 +41,7 @@ pub mod storage;
 pub mod sync;
 /// Core types and data structures (accounts, blocks, transactions, etc.)
 pub mod types;
+pub mod ws_server;
 
 pub use any_storage::*;
 pub use config::*;

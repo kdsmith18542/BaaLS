@@ -6,6 +6,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use crate::config::StorageBackend;
 use crate::sdk::BaaLSSdk;
 use crate::types::{Account, ContractId, PublicKey, Transaction};
 
@@ -72,14 +73,22 @@ fn json_or_null<T: serde::Serialize>(val: &T) -> *mut c_char {
 /// # Safety
 ///
 /// `data_dir` must be null or a valid, null-terminated C string path.
+/// `backend` must be null or a valid, null-terminated C string ("sled" or "redb").
 /// Should be called exactly once before any other SDK function.
 /// Returns: 0 = OK, 1 = invalid input, 2 = init failed, 5 = already initialized
-pub unsafe extern "C" fn baals_sdk_init(data_dir: *const c_char) -> c_uint {
+pub unsafe extern "C" fn baals_sdk_init(
+    data_dir: *const c_char,
+    backend: *const c_char,
+) -> c_uint {
     let dir = match unsafe { c_str_to_path(data_dir) } {
         Some(d) => d,
         None => return 1,
     };
-    match BaaLSSdk::new(dir) {
+    let backend = match unsafe { c_str_to_str(backend) } {
+        Some(s) if s.eq_ignore_ascii_case("redb") => StorageBackend::Redb,
+        _ => StorageBackend::Sled,
+    };
+    match BaaLSSdk::with_backend(dir, Some(backend)) {
         Ok(sdk) => {
             if SDK_INSTANCE.set(Mutex::new(sdk)).is_err() {
                 return 5; // BAALS_ERR_ALREADY_INITIALIZED
@@ -328,6 +337,53 @@ pub unsafe extern "C" fn baals_sdk_query_contract(
     unsafe {
         with_sdk(|s| s.query_contract(&cid, &method_str, payload))
             .map(|result| json_or_null(&serde_json::json!({"result_hex": hex::encode(&result)})))
+            .unwrap_or(ptr::null_mut())
+    }
+}
+
+// ─── P2P / Sync ───
+
+#[no_mangle]
+/// # Safety
+///
+/// `address` must be a valid, null-terminated C string.
+pub unsafe extern "C" fn baals_sdk_add_peer(
+    address: *const c_char,
+) -> c_uint {
+    let addr = match unsafe { c_str_to_str(address) } {
+        Some(s) => s,
+        None => return 1,
+    };
+    unsafe { with_sdk(|s| s.add_peer(&addr)).map(|_| 0).unwrap_or_else(|e| e) }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `address` must be a valid, null-terminated C string.
+pub unsafe extern "C" fn baals_sdk_remove_peer(
+    address: *const c_char,
+) -> c_uint {
+    let addr = match unsafe { c_str_to_str(address) } {
+        Some(s) => s,
+        None => return 1,
+    };
+    unsafe { with_sdk(|s| s.remove_peer(&addr)).map(|_| 0).unwrap_or_else(|e| e) }
+}
+
+#[no_mangle]
+pub extern "C" fn baals_sdk_trigger_sync() -> c_uint {
+    match unsafe { with_sdk(|s| s.trigger_sync()) } {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn baals_sdk_known_peers_json() -> *mut c_char {
+    unsafe {
+        with_sdk(|s| Ok::<_, crate::sdk::SdkError>(s.known_peers()))
+            .map(|peers| json_or_null(&peers))
             .unwrap_or(ptr::null_mut())
     }
 }

@@ -10,6 +10,24 @@ use crate::types::{Account, Block, ChainState, ContractId, CryptoError, Transact
 
 pub type ContractEvents = Vec<(Vec<u8>, Vec<u8>)>;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BackupManifest {
+    pub version: u32,
+    pub created_at: u64,
+    pub last_block_height: u64,
+    pub last_block_hash: [u8; 32],
+    pub backup_type: BackupType,
+    pub previous_manifest: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum BackupType {
+    Full,
+    Incremental,
+}
+
+pub(crate) const BACKUP_MANIFEST_FILENAME: &str = "backup_manifest.json";
+
 #[derive(Error, Debug)]
 pub enum StorageError {
     #[error("Sled error: {0}")]
@@ -54,6 +72,10 @@ pub trait Storage: Send + Sync {
         &self,
         tx_hash: &[u8; 32],
     ) -> Result<Option<crate::types::TransactionStatus>, StorageError>;
+
+    // Transaction Receipts
+    fn put_receipt(&self, receipt: &crate::types::TransactionReceipt) -> Result<(), StorageError>;
+    fn get_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<crate::types::TransactionReceipt>, StorageError>;
 
     // Enhanced Transaction indexing for fast lookup
     fn index_transaction(
@@ -121,6 +143,8 @@ pub trait Storage: Send + Sync {
         wasm_bytes: &[u8],
     ) -> Result<(), StorageError>;
     fn get_contract_code(&self, contract_id: &ContractId) -> Result<Option<Vec<u8>>, StorageError>;
+    fn put_contract_abi(&self, contract_id: &ContractId, abi: &[u8]) -> Result<(), StorageError>;
+    fn get_contract_abi(&self, contract_id: &ContractId) -> Result<Option<Vec<u8>>, StorageError>;
     fn contract_storage_read(
         &self,
         contract_id: &ContractId,
@@ -248,6 +272,8 @@ pub trait Storage: Send + Sync {
     // Backup and restore
     fn backup_to(&self, path: &std::path::Path) -> Result<(), StorageError>;
     fn restore_from(&self, path: &std::path::Path) -> Result<(), StorageError>;
+    fn backup_incremental(&self, base_path: &std::path::Path, output_path: &std::path::Path) -> Result<(), StorageError>;
+    fn get_backup_manifest(&self, path: &std::path::Path) -> Result<Option<BackupManifest>, StorageError>;
 
     // Storage metadata
     fn get_storage_metadata(&self, key: &str) -> Result<Option<String>, StorageError>;
@@ -325,7 +351,9 @@ pub enum StorageOperation {
     PutTransaction(Vec<u8>, Vec<u8>),
     PutTxIndex(Vec<u8>, Vec<u8>),
     PutTxStatus(Vec<u8>, Vec<u8>),
+    PutReceipt(Vec<u8>, Vec<u8>),
     PutContractCode(Vec<u8>, Vec<u8>),
+    PutContractAbi(Vec<u8>, Vec<u8>),
     PutContractDeployer(Vec<u8>, Vec<u8>),
     PutContractStorage(Vec<u8>, Vec<u8>),
     PutMempool(Vec<u8>, Vec<u8>),
@@ -367,6 +395,7 @@ pub struct SledStorage {
     tx_count_tree: Tree,
     state_tree: Tree,
     contract_events_tree: Tree,
+    receipts_tree: Tree,
 }
 
 impl SledStorage {
@@ -398,6 +427,7 @@ impl SledStorage {
             tx_count_tree: db.open_tree("tx_count")?,
             state_tree: db.open_tree("state_nodes")?,
             contract_events_tree: db.open_tree("contract_events")?,
+            receipts_tree: db.open_tree("receipts")?,
             db,
         };
 
@@ -549,7 +579,13 @@ impl SledStorage {
                 StorageOperation::PutTxStatus(key, value) => {
                     self.tx_by_block_tree.insert(key, value)?;
                 }
+                StorageOperation::PutReceipt(key, value) => {
+                    self.receipts_tree.insert(key, value)?;
+                }
                 StorageOperation::PutContractCode(key, value) => {
+                    self.contract_code_tree.insert(key, value)?;
+                }
+                StorageOperation::PutContractAbi(key, value) => {
                     self.contract_code_tree.insert(key, value)?;
                 }
                 StorageOperation::PutContractDeployer(key, value) => {
@@ -588,6 +624,7 @@ impl SledStorage {
         self.contract_code_tree.flush()?;
         self.contract_storage_tree.flush()?;
         self.mempool_tree.flush()?;
+        self.receipts_tree.flush()?;
         Ok(())
     }
 
@@ -730,6 +767,7 @@ impl Clone for SledStorage {
             tx_count_tree: self.tx_count_tree.clone(),
             state_tree: self.state_tree.clone(),
             contract_events_tree: self.contract_events_tree.clone(),
+            receipts_tree: self.receipts_tree.clone(),
         }
     }
 }
@@ -901,6 +939,24 @@ impl Storage for SledStorage {
             Some(bytes) => {
                 let status: crate::types::TransactionStatus = bincode::deserialize(&bytes)?;
                 Ok(Some(status))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn put_receipt(&self, receipt: &crate::types::TransactionReceipt) -> Result<(), StorageError> {
+        let key = hex::encode(receipt.tx_hash);
+        let value = bincode::serialize(receipt)?;
+        self.receipts_tree.insert(key.as_bytes(), value)?;
+        Ok(())
+    }
+
+    fn get_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<crate::types::TransactionReceipt>, StorageError> {
+        let key = hex::encode(tx_hash);
+        match self.receipts_tree.get(key.as_bytes())? {
+            Some(bytes) => {
+                let receipt: crate::types::TransactionReceipt = bincode::deserialize(&bytes)?;
+                Ok(Some(receipt))
             }
             None => Ok(None),
         }
@@ -1130,6 +1186,18 @@ impl Storage for SledStorage {
 
     fn get_contract_code(&self, contract_id: &ContractId) -> Result<Option<Vec<u8>>, StorageError> {
         let key = format!("code:{}", hex::encode(contract_id.id));
+        let encoded = self.contract_code_tree.get(key.as_bytes())?;
+        Ok(encoded.map(|e| e.to_vec()))
+    }
+
+    fn put_contract_abi(&self, contract_id: &ContractId, abi: &[u8]) -> Result<(), StorageError> {
+        let key = format!("abi:{}", hex::encode(contract_id.id));
+        self.contract_code_tree.insert(key.as_bytes(), abi)?;
+        Ok(())
+    }
+
+    fn get_contract_abi(&self, contract_id: &ContractId) -> Result<Option<Vec<u8>>, StorageError> {
+        let key = format!("abi:{}", hex::encode(contract_id.id));
         let encoded = self.contract_code_tree.get(key.as_bytes())?;
         Ok(encoded.map(|e| e.to_vec()))
     }
@@ -1456,11 +1524,9 @@ impl Storage for SledStorage {
 
     fn backup_to(&self, path: &std::path::Path) -> Result<(), StorageError> {
         use std::fs;
-        // Create backup directory
         fs::create_dir_all(path).map_err(|e| StorageError::IndexError(e.to_string()))?;
         let backup_db = sled::open(path).map_err(StorageError::Sled)?;
 
-        // Export all data trees
         let export_tree = |src: &sled::Tree, dst_tree: &sled::Tree| -> Result<(), StorageError> {
             for item in src.iter() {
                 let (key, value) = item?;
@@ -1485,6 +1551,25 @@ impl Storage for SledStorage {
         export_tree(&self.tx_count_tree, &backup_db.open_tree("tx_count")?)?;
 
         backup_db.flush()?;
+
+        // Write backup manifest
+        let latest = self.get_latest_block()?;
+        let manifest = BackupManifest {
+            version: 1,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            last_block_height: latest.as_ref().map(|b| b.index).unwrap_or(0),
+            last_block_hash: latest.as_ref().map(|b| b.hash).unwrap_or([0u8; 32]),
+            backup_type: BackupType::Full,
+            previous_manifest: None,
+        };
+        let manifest_json = serde_json::to_string_pretty(&manifest)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+        fs::write(path.join(BACKUP_MANIFEST_FILENAME), manifest_json)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+
         log::info!("Storage backup completed to {:?}", path);
         Ok(())
     }
@@ -1519,6 +1604,171 @@ impl Storage for SledStorage {
         self.db.flush()?;
         log::info!("Storage restore completed from {:?}", path);
         Ok(())
+    }
+
+    fn backup_incremental(&self, base_path: &std::path::Path, output_path: &std::path::Path) -> Result<(), StorageError> {
+        use std::fs;
+        let base_manifest_path = base_path.join(BACKUP_MANIFEST_FILENAME);
+        if !base_manifest_path.exists() {
+            return Err(StorageError::IndexError(
+                "No manifest found at base backup path. Run a full backup first.".to_string(),
+            ));
+        }
+        let manifest_data = fs::read_to_string(&base_manifest_path)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+        let base_manifest: BackupManifest = serde_json::from_str(&manifest_data)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+
+        let current_height = self.get_chain_height()?;
+        if current_height <= base_manifest.last_block_height {
+            return Err(StorageError::IndexError(
+                "No new blocks since last backup; nothing to incrementally backup.".to_string(),
+            ));
+        }
+
+        fs::create_dir_all(output_path).map_err(|e| StorageError::IndexError(e.to_string()))?;
+        let inc_db = sled::open(output_path).map_err(StorageError::Sled)?;
+
+        let mut new_tx_hashes: Vec<[u8; 32]> = Vec::new();
+
+        let inc_blocks_tree = inc_db.open_tree("blocks")?;
+        let inc_transactions_tree = inc_db.open_tree("transactions")?;
+        let inc_tx_by_block_tree = inc_db.open_tree("tx_by_block")?;
+        let inc_tx_to_block_tree = inc_db.open_tree("tx_to_block")?;
+
+        for h in (base_manifest.last_block_height + 1)..=current_height {
+            if let Some(block) = self.get_block_by_height(h)? {
+                let encoded = bincode::serialize(&block)?;
+                let checksum: [u8; 32] = sha2::Sha256::digest(&encoded).into();
+
+                let mut hash_key = b"hash:".to_vec();
+                hash_key.extend_from_slice(&block.hash);
+                inc_blocks_tree.insert(hash_key, encoded.clone())?;
+
+                inc_blocks_tree.insert(
+                    format!("height:{:0>20}", block.index).as_bytes(),
+                    encoded,
+                )?;
+
+                inc_blocks_tree.insert(
+                    format!("checksum:{}", hex::encode(block.hash)).as_bytes(),
+                    checksum.as_slice(),
+                )?;
+
+                for tx in &block.transactions {
+                    new_tx_hashes.push(tx.hash);
+                }
+            }
+        }
+
+        for tx_hash in &new_tx_hashes {
+            if let Some(tx) = self.get_transaction(tx_hash)? {
+                let encoded = bincode::serialize(&tx)?;
+                inc_transactions_tree.insert(tx_hash.as_slice(), encoded)?;
+            }
+        }
+
+        for h in (base_manifest.last_block_height + 1)..=current_height {
+            if let Some(block) = self.get_block_by_height(h)? {
+                let prefix_string = format!("block_tx:{}:", hex::encode(block.hash));
+                for item in self.tx_by_block_tree.scan_prefix(prefix_string.as_bytes()) {
+                    let (key, value) = item?;
+                    inc_tx_by_block_tree.insert(key, value.clone())?;
+                }
+                for tx in &block.transactions {
+                    if let Some(tx_block_bytes) = self.tx_to_block_tree.get(tx.hash)? {
+                        inc_tx_to_block_tree.insert(tx.hash.as_slice(), tx_block_bytes)?;
+                    }
+                }
+            }
+        }
+
+        let inc_receipts_tree = inc_db.open_tree("receipts")?;
+        for tx_hash in &new_tx_hashes {
+            let key = hex::encode(tx_hash);
+            if let Some(receipt_bytes) = self.receipts_tree.get(key.as_bytes())? {
+                inc_receipts_tree.insert(key.as_bytes(), receipt_bytes)?;
+            }
+        }
+
+        let inc_accounts_tree = inc_db.open_tree("accounts")?;
+        for item in self.accounts_tree.iter() {
+            let (key, value) = item?;
+            inc_accounts_tree.insert(key, value)?;
+        }
+        inc_accounts_tree.flush()?;
+
+        let inc_chain_state_tree = inc_db.open_tree("chain_state")?;
+        for item in self.chain_state_tree.iter() {
+            let (key, value) = item?;
+            inc_chain_state_tree.insert(key, value)?;
+        }
+        inc_chain_state_tree.flush()?;
+
+        let inc_contract_code_tree = inc_db.open_tree("contract_code")?;
+        for item in self.contract_code_tree.iter() {
+            let (key, value) = item?;
+            inc_contract_code_tree.insert(key, value)?;
+        }
+        inc_contract_code_tree.flush()?;
+
+        let inc_contract_storage_tree = inc_db.open_tree("contract_storage")?;
+        for item in self.contract_storage_tree.iter() {
+            let (key, value) = item?;
+            inc_contract_storage_tree.insert(key, value)?;
+        }
+        inc_contract_storage_tree.flush()?;
+
+        let inc_state_tree = inc_db.open_tree("state_nodes")?;
+        for item in self.state_tree.iter() {
+            let (key, value) = item?;
+            inc_state_tree.insert(key, value)?;
+        }
+        inc_state_tree.flush()?;
+
+        inc_db.flush()?;
+
+        let latest = self.get_latest_block()?;
+        let manifest = BackupManifest {
+            version: 1,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            last_block_height: latest.as_ref().map(|b| b.index).unwrap_or(0),
+            last_block_hash: latest.as_ref().map(|b| b.hash).unwrap_or([0u8; 32]),
+            backup_type: BackupType::Incremental,
+            previous_manifest: Some(
+                base_path
+                    .join(BACKUP_MANIFEST_FILENAME)
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+        };
+        let manifest_json = serde_json::to_string_pretty(&manifest)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+        fs::write(output_path.join(BACKUP_MANIFEST_FILENAME), manifest_json)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+
+        log::info!(
+            "Incremental backup: blocks {}..={} backed up to {:?}",
+            base_manifest.last_block_height + 1,
+            current_height,
+            output_path
+        );
+        Ok(())
+    }
+
+    fn get_backup_manifest(&self, path: &std::path::Path) -> Result<Option<BackupManifest>, StorageError> {
+        let manifest_path = path.join(BACKUP_MANIFEST_FILENAME);
+        if !manifest_path.exists() {
+            return Ok(None);
+        }
+        let data = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+        serde_json::from_str(&data)
+            .map(Some)
+            .map_err(|e| StorageError::IndexError(e.to_string()))
     }
 
     fn take_snapshot(

@@ -128,43 +128,43 @@ pub fn handle_contract(
             ))
         }
         ContractCommands::EstimateGas { contract_id, method, args, .. } => {
-            let msg = format!(
-                "contract estimate-gas is not implemented for live runtime execution yet \
-(contract_id={}, method={}, args_present={}).",
-                contract_id,
-                method,
-                args.is_some()
-            );
-            let _ = text_or_json(
-                json,
-                &msg,
-                serde_json::json!({
-                    "error": "not_implemented",
-                    "command": "contract estimate-gas",
-                    "contract_id": contract_id,
-                    "method": method,
-                    "args_present": args.is_some(),
-                    "message": msg,
-                }),
-            );
-            Err(msg.into())
+            let body = serde_json::json!({
+                "contract_id": contract_id,
+                "method": method,
+                "args": args.map(|a| vec![a]).unwrap_or_default(),
+            })
+            .to_string();
+            let out = std::process::Command::new("curl")
+                .args([
+                    "-s", "-X", "POST",
+                    "-H", "Content-Type: application/json",
+                    "-d", &body,
+                    "http://127.0.0.1:8080/api/v1/contracts/estimate-gas",
+                ])
+                .output();
+            match out {
+                Ok(o) if o.status.success() => {
+                    let text = String::from_utf8_lossy(&o.stdout).to_string();
+                    let val: serde_json::Value =
+                        serde_json::from_str(&text).unwrap_or(serde_json::json!({"raw": text}));
+                    Ok(text_or_json(json, &format!("Gas estimate: {}", val), val))
+                }
+                Ok(_) | Err(_) => Err(
+                    "Could not reach node — start with `baals node start` first".into()
+                ),
+            }
         }
         ContractCommands::Abi { contract_id, .. } => {
-            let msg = format!(
-                "contract abi is not implemented for deployed artifact introspection yet (contract_id={}).",
-                contract_id
-            );
-            let _ = text_or_json(
-                json,
-                &msg,
-                serde_json::json!({
-                    "error": "not_implemented",
-                    "command": "contract abi",
-                    "contract_id": contract_id,
-                    "message": msg,
-                }),
-            );
-            Err(msg.into())
+            let url = format!("http://127.0.0.1:8080/api/v1/contracts/{}/abi", contract_id);
+            let resp = ureq::get(&url).call();
+            match resp {
+                Ok(response) => {
+                    let text = response.into_string().unwrap_or_default();
+                    let val: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({"raw": text}));
+                    Ok(text_or_json(json, &format!("ABI: {}", val), val))
+                }
+                Err(_) => Err("Could not reach node — start with `baals node start` first".into()),
+            }
         }
         ContractCommands::VerifyWasm { wasm } => match std::fs::read(&wasm) {
             Ok(data) => {

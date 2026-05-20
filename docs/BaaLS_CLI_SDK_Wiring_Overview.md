@@ -267,24 +267,25 @@ GET    /health (or /api/v1/health) Health check
 
 ### 2.6 WebSocket API (Streaming)
 
-Status: **Planned, not implemented in the current codebase**.
+Status: **Production**.
 
-For real-time updates, clients will eventually support WebSocket streams.
+A WebSocket server runs on port **8081** by default (configurable as `node.ws_port` in config.toml). It streams real-time events to connected clients.
 
-**Endpoints:**
+**Connection:**
 
 ```
-ws://localhost:8080/ws/blocks      Stream new blocks
-ws://localhost:8080/ws/transactions Stream new transactions
+ws://127.0.0.1:8081/
 ```
 
 **Message Format:**
 
+Events are JSON messages with a `type` field:
+
 ```json
-{
-  "type": "block",
-  "data": { "height": 100, "hash": "0x...", ... }
-}
+{ "type": "block", "data": { "height": 100, "hash": "0x...", ... } }
+{ "type": "transaction", "data": { "hash": "0x...", "from": "...", ... } }
+{ "type": "consensus", "data": { "event": "round_change", "round": 5 } }
+{ "type": "log", "data": { "level": "info", "message": "..." } }
 ```
 
 ### 2.7 FFI / C Bindings
@@ -380,18 +381,18 @@ connection_timeout_ms = 30000
 | Rust SDK (`baals` crate) | GA | Canonical runtime API |
 | HTTP REST API (`/api/v1/*` + legacy aliases) | GA | Mutating routes require JWT bearer token + loopback |
 | CLI core runtime workflows | Beta | Core node/wallet/tx/query/db/proof/dev paths are implemented |
-| CLI `p2p` group | Planned | Explicitly not wired to live sync state yet |
-| CLI advanced `contract`/`admin` subcommands | Planned | Some subcommands intentionally return not implemented |
+| CLI `p2p` group | GA | Peers, add-peer, remove-peer, ping, sync-now via node API |
+| CLI advanced `contract`/`admin` subcommands | GA | ABI, rotate-key, tls-generate, estimate-gas all implemented |
 | Go SDK (`sdk/go`) | Beta | Pure-Go client wrapper around daemon/API flow |
 | Node.js FFI SDK (`sdk/nodejs`) | Beta | Legacy ffi-napi package |
 | Node.js native SDK (`sdk/nodejs-native`) | Beta | napi-rs addon path |
 | Python SDK (`baals-py`) | Planned | Not present in this repository |
-| WebSocket streaming API | Planned | Not implemented in current runtime |
+| WebSocket streaming API | Production | Runs on port 8081 (configurable via `node.ws_port`) |
 
 ### Near-term
-- Complete runtime-backed `p2p` CLI actions
-- Fill `contract`/`admin` command gaps
-- Add WebSocket streaming endpoints
+- SDK/FFI hardening and cross-language test coverage
+- REST endpoint spec-gap closure (additional `/api/v1/*` routes)
+- CLI integration test suite
 
 ### Future
 - Python SDK

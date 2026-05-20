@@ -242,6 +242,59 @@ baalsd dev performance-report --data-dir ./data
 baalsd dev monitor --data-dir ./data --detailed
 ```
 
+## WebSocket API
+
+A WebSocket server runs on port **8081** by default (configurable as `node.ws_port` in `config.toml`). It streams real-time events:
+
+```bash
+# Connect with any WebSocket client
+ws ws://127.0.0.1:8081/
+```
+
+Events are JSON messages with a `type` field:
+- `"block"` — new block produced
+- `"transaction"` — new transaction seen
+- `"consensus"` — consensus event (round change, validator update)
+- `"log"` — runtime log entry
+
+## Administration
+
+```bash
+# Rotate the consensus signing key (generates new key, does not affect runtime)
+baalsd admin rotate-consensus-key --data-dir ./data
+
+# Export the node ID
+baalsd admin export-node-id --data-dir ./data
+
+# Generate self-signed TLS certificate and key
+baalsd admin tls-generate --output ./certs --cn "node1.baals.local"
+
+# Show TLS certificate SHA-256 fingerprint
+baalsd admin tls-fingerprint --cert-path ./certs/server.crt
+
+# Generate a random hex token (default 32 bytes)
+baalsd admin token-generate --length 32
+```
+
+## Contract Tools
+
+```bash
+# Inspect a deployed contract
+baalsd contract inspect --contract-id <hex>
+
+# Fetch contract ABI
+baalsd contract abi --contract-id <hex>
+
+# Estimate gas for a contract call
+baalsd contract estimate-gas --contract-id <hex> --method "method" --args "args"
+
+# Simulate a WASM contract locally (offline validation)
+baalsd contract simulate --wasm contract.wasm --method "method" --args "args"
+
+# Verify WASM binary validity
+baalsd contract verify-wasm --wasm contract.wasm
+```
+
 ## Diagnostics
 
 ```bash
@@ -301,6 +354,11 @@ Default config file: `config.toml`
 
 Key settings:
 ```toml
+[node]
+port = 8080
+health_port = 8080
+ws_port = 8081             # WebSocket server (real-time events)
+
 [storage]
 backend = "sled"           # sled or redb
 cache_size_mb = 256

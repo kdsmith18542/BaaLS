@@ -478,6 +478,7 @@ fn spawn_health_server(
     node_signing_key: ed25519_dalek::SigningKey,
     tls: Option<tiny_http::SslConfig>,
     health_only: bool,
+    ws_port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let server = if let Some(ssl_cfg) = tls {
         Server::https(&bind_addr, ssl_cfg).map_err(|e| {
@@ -546,11 +547,12 @@ fn spawn_health_server(
                         if is_health {
                             match runtime.get_health_status() {
                                 Ok(health) => {
-                                    let body =
-                                        serde_json::to_string(&health).unwrap_or_else(|_| {
-                                            "{\"status\":\"unhealthy\"}".to_string()
-                                        });
-                                    respond_json(request, 200, body);
+                                    let mut body = serde_json::to_value(&health)
+                                        .unwrap_or_else(|_| serde_json::json!({"status":"unhealthy"}));
+                                    if let Some(obj) = body.as_object_mut() {
+                                        obj.insert("ws_port".to_string(), serde_json::json!(ws_port));
+                                    }
+                                    respond_json(request, 200, body.to_string());
                                 }
                                 Err(e) => {
                                     let body = serde_json::json!({
@@ -682,9 +684,12 @@ fn spawn_health_server(
                     if is_health {
                         match runtime.get_health_status() {
                             Ok(health) => {
-                                let body = serde_json::to_string(&health)
-                                    .unwrap_or_else(|_| "{\"status\":\"unhealthy\"}".to_string());
-                                respond_json(request, 200, body);
+                                let mut body = serde_json::to_value(&health)
+                                    .unwrap_or_else(|_| serde_json::json!({"status":"unhealthy"}));
+                                if let Some(obj) = body.as_object_mut() {
+                                    obj.insert("ws_port".to_string(), serde_json::json!(ws_port));
+                                }
+                                respond_json(request, 200, body.to_string());
                             }
                             Err(e) => {
                                 let body = serde_json::json!({
@@ -696,9 +701,14 @@ fn spawn_health_server(
                             }
                         }
                     } else if request.method() == &Method::Get
-                        && request_url_str.starts_with("/proof/account/")
+                        && (request_url_str.starts_with("/proof/account/")
+                            || request_url_str.starts_with("/api/v1/proofs/account/"))
                     {
-                        let addr_hex = &request_url_str["/proof/account/".len()..];
+                        let addr_hex = if request_url_str.starts_with("/api/v1/proofs/account/") {
+                            &request_url_str["/api/v1/proofs/account/".len()..]
+                        } else {
+                            &request_url_str["/proof/account/".len()..]
+                        };
                         let response_json =
                             (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
                                 let pk = parse_pubkey(addr_hex)?;
@@ -962,6 +972,188 @@ fn spawn_health_server(
                             Ok(json) => (200, json.to_string()),
                             Err(e) => {
                                 (400, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
+                    } else if request.method() == &Method::Post
+                        && matches!(request_url_str, "/api/v1/contracts/estimate-gas")
+                    {
+                        let mut body = String::new();
+                        let _ = request.as_reader().read_to_string(&mut body);
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let v: serde_json::Value = serde_json::from_str(&body)?;
+                                let cid_hex =
+                                    v["contract_id"].as_str().ok_or("Missing 'contract_id'")?;
+                                let method = v["method"].as_str().ok_or("Missing 'method'")?;
+                                let cid_bytes = hex::decode(cid_hex)
+                                    .map_err(|e| format!("Invalid contract id: {}", e))?;
+                                if cid_bytes.len() != 32 {
+                                    return Err("Contract id must be 32 bytes".into());
+                                }
+                                let mut cid_arr = [0u8; 32];
+                                cid_arr.copy_from_slice(&cid_bytes);
+                                let cid = crate::ContractId::from_bytes(&cid_arr);
+                                let args: Vec<Vec<u8>> = v["args"]
+                                    .as_array()
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|a| a.as_str())
+                                            .map(|s| s.as_bytes().to_vec())
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                let estimate = runtime.estimate_contract_gas(&cid, method, &args)?;
+                                Ok(serde_json::json!({
+                                    "gas_used": estimate.estimated_gas,
+                                    "gas_limit_recommended": estimate.estimated_gas.saturating_mul(12) / 10,
+                                    "confidence_level": estimate.confidence_level,
+                                }))
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (400, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
+                    } else if request.method() == &Method::Get
+                        && request_url_str.starts_with("/api/v1/contracts/")
+                        && request_url_str.ends_with("/state")
+                    {
+                        let prefix = "/api/v1/contracts/";
+                        let suffix = "/state";
+                        let cid_hex = &request_url_str[prefix.len()..request_url_str.len() - suffix.len()];
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let cid_bytes = hex::decode(cid_hex)
+                                    .map_err(|_| "Invalid contract ID hex".to_string())?;
+                                if cid_bytes.len() != 32 {
+                                    return Err("Contract ID must be 32 bytes".into());
+                                }
+                                let mut cid_arr = [0u8; 32];
+                                cid_arr.copy_from_slice(&cid_bytes);
+                                let contract_id = crate::ContractId::from_bytes(&cid_arr);
+                                let code = runtime.storage().get_contract_code(&contract_id)?
+                                    .ok_or("Contract not found")?;
+                                if code.is_empty() {
+                                    return Err("Contract not found".into());
+                                }
+                                let all_storage = runtime.storage()
+                                    .contract_storage_read_all(&contract_id)?;
+                                let kv: Vec<serde_json::Value> = all_storage.iter().map(|(k, v)| {
+                                    serde_json::json!({
+                                        "key": hex::encode(k),
+                                        "value": hex::encode(v),
+                                    })
+                                }).collect();
+                                Ok(serde_json::json!({"storage": kv}))
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (404, serde_json::json!({"error": "not found", "message": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
+                    } else if request.method() == &Method::Get
+                        && request_url_str.starts_with("/api/v1/contracts/")
+                        && request_url_str.ends_with("/abi")
+                    {
+                        let prefix = "/api/v1/contracts/";
+                        let suffix = "/abi";
+                        let cid_hex = &request_url_str[prefix.len()..request_url_str.len() - suffix.len()];
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let cid_bytes = hex::decode(cid_hex)
+                                    .map_err(|_| "Invalid contract ID hex".to_string())?;
+                                if cid_bytes.len() != 32 {
+                                    return Err("Contract ID must be 32 bytes".into());
+                                }
+                                let mut cid_arr = [0u8; 32];
+                                cid_arr.copy_from_slice(&cid_bytes);
+                                let contract_id = crate::ContractId::from_bytes(&cid_arr);
+                                let abi = runtime.storage().get_contract_abi(&contract_id)?
+                                    .ok_or("ABI not found")?;
+                                let abi_str = String::from_utf8(abi)
+                                    .map_err(|_| "ABI is not valid UTF-8".to_string())?;
+                                let val: serde_json::Value = serde_json::from_str(&abi_str)
+                                    .map_err(|_| "ABI is not valid JSON".to_string())?;
+                                Ok(val)
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (404, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
+                    } else if request.method() == &Method::Get
+                        && request_url_str.starts_with("/api/v1/transactions/address/")
+                    {
+                        let path_and_query = &request_url_str["/api/v1/transactions/address/".len()..];
+                        let (addr_hex, query) = if let Some(idx) = path_and_query.find('?') {
+                            (&path_and_query[..idx], &path_and_query[idx+1..])
+                        } else {
+                            (path_and_query, "")
+                        };
+                        let limit = query
+                            .split('&')
+                            .find_map(|pair| {
+                                let mut parts = pair.splitn(2, '=');
+                                if parts.next()? == "limit" {
+                                    parts.next()?.parse::<usize>().ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(100);
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let pk = parse_pubkey(addr_hex)?;
+                                let txs = runtime.storage().get_transactions_by_address(&pk, limit)?;
+                                Ok(serde_json::json!({"transactions": txs}))
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (404, serde_json::json!({"error": "not found", "message": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
+                    } else if request.method() == &Method::Get
+                        && (request_url_str.ends_with("/receipt")
+                            && (request_url_str.starts_with("/tx/")
+                                || request_url_str.starts_with("/api/v1/transactions/")))
+                    {
+                        let parsed = request_url_str
+                            .strip_prefix("/api/v1/transactions/")
+                            .and_then(|rest| rest.strip_suffix("/receipt"))
+                            .or_else(|| {
+                                let rest = request_url_str.strip_prefix("/tx/")?;
+                                rest.strip_suffix("/receipt")
+                            });
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                let hash_hex = parsed.ok_or("Invalid receipt route")?;
+                                if hash_hex.contains('/') || hash_hex.is_empty() {
+                                    return Err("Invalid transaction hash path".into());
+                                }
+                                let hash_bytes = hex::decode(hash_hex)
+                                    .map_err(|_| "Invalid transaction hash hex".to_string())?;
+                                if hash_bytes.len() != 32 {
+                                    return Err("Transaction hash must be 32 bytes".into());
+                                }
+                                let mut hash_arr = [0u8; 32];
+                                hash_arr.copy_from_slice(&hash_bytes);
+                                let receipt = runtime.storage().get_receipt(&hash_arr)?
+                                    .ok_or("Receipt not found")?;
+                                Ok(serde_json::to_value(&receipt)?)
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (404, serde_json::json!({"error": e.to_string()}).to_string())
                             }
                         };
                         respond_json(request, status, body);
@@ -1422,6 +1614,12 @@ pub fn handle_node(
                 });
             }
 
+            let (ws_tx, ws_rx) = crate::ws_server::create_event_bus();
+            runtime.set_event_sender(ws_tx);
+            let ws_bind = format!("127.0.0.1:{}", cfg.node.ws_port);
+            crate::ws_server::start_ws_server(ws_bind, ws_rx, runtime.is_running_handle());
+            println!("WebSocket server started on ws://127.0.0.1:{}", cfg.node.ws_port);
+
             let health_bind = format!("127.0.0.1:{}", cfg.node.health_port);
             if cfg.network.tls_enabled {
                 if cfg.node.health_port == port {
@@ -1448,6 +1646,7 @@ pub fn handle_node(
                     node_signing_key.clone(),
                     None,
                     true,
+                    cfg.node.ws_port,
                 )?;
                 spawn_health_server(
                     runtime.clone(),
@@ -1456,6 +1655,7 @@ pub fn handle_node(
                     node_signing_key,
                     Some(tiny_http::SslConfig { certificate: cert_bytes, private_key: key_bytes }),
                     false,
+                    cfg.node.ws_port,
                 )?;
                 info!("HTTPS API endpoint listening on https://{}", api_bind);
             } else {
@@ -1466,6 +1666,7 @@ pub fn handle_node(
                     node_signing_key,
                     None,
                     false,
+                    cfg.node.ws_port,
                 )?;
             }
             info!("Node started. Press Ctrl+C to stop.");

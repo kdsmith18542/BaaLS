@@ -674,6 +674,18 @@ pub enum TransactionStatus {
     Pending,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionReceipt {
+    pub tx_hash: [u8; 32],
+    pub block_hash: [u8; 32],
+    pub block_height: u64,
+    pub index_in_block: u32,
+    pub success: bool,
+    pub gas_used: u64,
+    pub contract_address: Option<ContractId>,
+    pub error_message: Option<String>,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct TransactionFinality {
     #[serde(rename = "final")]
