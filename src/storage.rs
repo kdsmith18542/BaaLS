@@ -167,6 +167,42 @@ pub trait Storage: Send + Sync {
     // Atomic Batching for Block Application
     fn apply_batch(&self, batch: StorageBatch) -> Result<(), StorageError>;
 
+    // Rollback log support — capture before-images and undo on reorg.
+    // Default impls use JSON in storage_metadata; SledStorage overrides with direct tree access.
+    fn apply_batch_with_rollback(
+        &self,
+        batch: StorageBatch,
+        block_hash: &[u8; 32],
+        block_index: u64,
+    ) -> Result<(), StorageError> {
+        let _ = (block_hash, block_index);
+        self.apply_batch(batch)
+    }
+
+    fn get_rollback_log(
+        &self,
+        block_hash: &[u8; 32],
+    ) -> Result<Option<crate::rollback::RollbackLog>, StorageError> {
+        let key = format!("rollback:{}", hex::encode(block_hash));
+        match self.get_storage_metadata(&key)? {
+            Some(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(|e| StorageError::IndexError(e.to_string())),
+            None => Ok(None),
+        }
+    }
+
+    fn apply_rollback_log(&self, _log: &crate::rollback::RollbackLog) -> Result<(), StorageError> {
+        Err(StorageError::IndexError(
+            "rollback not supported by this storage backend".to_string(),
+        ))
+    }
+
+    fn delete_rollback_log(&self, block_hash: &[u8; 32]) -> Result<(), StorageError> {
+        let key = format!("rollback:{}", hex::encode(block_hash));
+        self.set_storage_metadata(&key, "")
+    }
+
     // New: Performance and maintenance methods
     fn compact(&self) -> Result<(), StorageError>;
     fn get_storage_stats(&self) -> Result<StorageStats, StorageError>;
@@ -1218,6 +1254,142 @@ impl Storage for SledStorage {
             self.db.flush()?;
         }
         result
+    }
+
+    fn apply_batch_with_rollback(
+        &self,
+        batch: StorageBatch,
+        block_hash: &[u8; 32],
+        block_index: u64,
+    ) -> Result<(), StorageError> {
+        // Capture before-images for state-changing ops, write rollback log BEFORE applying.
+        let mut rollback_ops: Vec<crate::rollback::RollbackOp> = Vec::new();
+
+        for op in &batch.ops {
+            match op {
+                StorageOperation::PutAccount(key, _) | StorageOperation::DeleteAccount(key) => {
+                    let mut prefixed = b"acc:".to_vec();
+                    prefixed.extend_from_slice(key);
+                    let old = self.accounts_tree.get(&prefixed)?.map(|v| v.to_vec());
+                    rollback_ops.push(crate::rollback::RollbackOp::Account(key.clone(), old));
+                }
+                StorageOperation::PutChainState(key, _) => {
+                    let old = self.chain_state_tree.get(key)?.map(|v| v.to_vec());
+                    rollback_ops.push(crate::rollback::RollbackOp::ChainState(key.clone(), old));
+                }
+                StorageOperation::PutContractStorage(key, _)
+                | StorageOperation::DeleteContractStorage(key) => {
+                    let old = self.contract_storage_tree.get(key)?.map(|v| v.to_vec());
+                    rollback_ops
+                        .push(crate::rollback::RollbackOp::ContractStorage(key.clone(), old));
+                }
+                StorageOperation::PutContractCode(key, _) => {
+                    let old = self.contract_code_tree.get(key)?.map(|v| v.to_vec());
+                    rollback_ops.push(crate::rollback::RollbackOp::ContractCode(key.clone(), old));
+                }
+                StorageOperation::PutContractDeployer(key, _) => {
+                    let old = self.contract_code_tree.get(key)?.map(|v| v.to_vec());
+                    rollback_ops
+                        .push(crate::rollback::RollbackOp::ContractDeployer(key.clone(), old));
+                }
+                StorageOperation::PutTxStatus(key, _) => {
+                    let old = self.tx_by_block_tree.get(key)?.map(|v| v.to_vec());
+                    rollback_ops.push(crate::rollback::RollbackOp::TxStatus(key.clone(), old));
+                }
+                // PutBlock, PutTransaction, PutTxIndex, PutStateNode, PutMempool,
+                // DeleteMempool, DeleteTransaction, PutContractEvent — not rolled back
+                _ => {}
+            }
+        }
+
+        let log = crate::rollback::RollbackLog {
+            block_hash: *block_hash,
+            block_index,
+            ops: rollback_ops,
+        };
+        let log_key = format!("rollback:{}", hex::encode(block_hash));
+        let log_json = serde_json::to_string(&log)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+        self.meta_tree.insert(log_key.as_bytes(), log_json.as_bytes())?;
+        self.meta_tree.flush()?;
+
+        self.apply_batch(batch)
+    }
+
+    fn apply_rollback_log(
+        &self,
+        log: &crate::rollback::RollbackLog,
+    ) -> Result<(), StorageError> {
+        use crate::rollback::RollbackOp;
+        for op in &log.ops {
+            match op {
+                RollbackOp::Account(key, old) => {
+                    let mut prefixed = b"acc:".to_vec();
+                    prefixed.extend_from_slice(key);
+                    match old {
+                        Some(v) => { self.accounts_tree.insert(&prefixed, v.as_slice())?; }
+                        None => { self.accounts_tree.remove(&prefixed)?; }
+                    }
+                }
+                RollbackOp::ChainState(key, old) => {
+                    match old {
+                        Some(v) => { self.chain_state_tree.insert(key.as_slice(), v.as_slice())?; }
+                        None => { self.chain_state_tree.remove(key.as_slice())?; }
+                    }
+                }
+                RollbackOp::ContractStorage(key, old) => {
+                    match old {
+                        Some(v) => { self.contract_storage_tree.insert(key.as_slice(), v.as_slice())?; }
+                        None => { self.contract_storage_tree.remove(key.as_slice())?; }
+                    }
+                }
+                RollbackOp::ContractCode(key, old) | RollbackOp::ContractDeployer(key, old) => {
+                    match old {
+                        Some(v) => { self.contract_code_tree.insert(key.as_slice(), v.as_slice())?; }
+                        None => { self.contract_code_tree.remove(key.as_slice())?; }
+                    }
+                }
+                RollbackOp::TxStatus(key, old) => {
+                    match old {
+                        Some(v) => { self.tx_by_block_tree.insert(key.as_slice(), v.as_slice())?; }
+                        None => { self.tx_by_block_tree.remove(key.as_slice())?; }
+                    }
+                }
+            }
+        }
+        self.accounts_tree.flush()?;
+        self.chain_state_tree.flush()?;
+        self.contract_storage_tree.flush()?;
+        self.contract_code_tree.flush()?;
+        self.tx_by_block_tree.flush()?;
+        Ok(())
+    }
+
+    fn get_rollback_log(
+        &self,
+        block_hash: &[u8; 32],
+    ) -> Result<Option<crate::rollback::RollbackLog>, StorageError> {
+        let key = format!("rollback:{}", hex::encode(block_hash));
+        match self.meta_tree.get(key.as_bytes())? {
+            Some(v) => {
+                let json = std::str::from_utf8(&v)
+                    .map_err(|e| StorageError::IndexError(e.to_string()))?;
+                if json.is_empty() {
+                    return Ok(None);
+                }
+                serde_json::from_str(json)
+                    .map(Some)
+                    .map_err(|e| StorageError::IndexError(e.to_string()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn delete_rollback_log(&self, block_hash: &[u8; 32]) -> Result<(), StorageError> {
+        let key = format!("rollback:{}", hex::encode(block_hash));
+        self.meta_tree.remove(key.as_bytes())?;
+        self.meta_tree.flush()?;
+        Ok(())
     }
 
     // New: Performance and maintenance methods

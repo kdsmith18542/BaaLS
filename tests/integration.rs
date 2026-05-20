@@ -1446,7 +1446,7 @@ fn test_fork_reorg_with_common_ancestor() {
 }
 
 #[test]
-fn test_reorg_detects_divergent_fork_and_rejects_without_rollback_support() {
+fn test_reorg_divergent_fork_succeeds_with_rollback_log() {
     init_logging();
 
     let dir_a = TempDir::new().unwrap();
@@ -1489,7 +1489,7 @@ fn test_reorg_detects_divergent_fork_and_rejects_without_rollback_support() {
             nonce,
             timestamp: now,
             signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
-            gas_limit: 21_000,
+            gas_limit: 100_000,
             gas_price: 1,
             priority: 0,
             metadata: None,
@@ -1502,20 +1502,22 @@ fn test_reorg_detects_divergent_fork_and_rejects_without_rollback_support() {
 
     let tokio_rt = tokio::runtime::Runtime::new().unwrap();
 
-    // Shared ancestor block #1.
+    // Shared ancestor block #1 (both runtimes apply it).
     rt_a.submit_transaction(make_tx(1, 100)).unwrap();
     let block1 = tokio_rt.block_on(rt_a.produce_block()).unwrap();
     rt_b.ledger().apply_block(&block1).unwrap();
     let synced_state = rt_b.storage().get_chain_state().unwrap().unwrap();
     *rt_b.chain_state_lock().lock().unwrap() = synced_state;
 
-    // Local branch on A: blocks #2a, #3a.
+    // Local branch on A: blocks #2a, #3a (depth-2 local fork from ancestor).
     rt_a.submit_transaction(make_tx(2, 101)).unwrap();
-    let _block2a = tokio_rt.block_on(rt_a.produce_block()).unwrap();
+    let block2a = tokio_rt.block_on(rt_a.produce_block()).unwrap();
     rt_a.submit_transaction(make_tx(3, 102)).unwrap();
     let block3a = tokio_rt.block_on(rt_a.produce_block()).unwrap();
+    assert_eq!(rt_a.get_chain_state().unwrap().latest_block_index, 3);
+    assert_eq!(rt_a.get_chain_state().unwrap().latest_block_hash, block3a.hash);
 
-    // Competing branch on B: blocks #2b, #3b, #4b (longer fork).
+    // Competing branch on B: blocks #2b, #3b, #4b (longer — will win).
     rt_b.submit_transaction(make_tx(2, 201)).unwrap();
     let block2b = tokio_rt.block_on(rt_b.produce_block()).unwrap();
     rt_b.submit_transaction(make_tx(3, 202)).unwrap();
@@ -1523,23 +1525,17 @@ fn test_reorg_detects_divergent_fork_and_rejects_without_rollback_support() {
     rt_b.submit_transaction(make_tx(4, 203)).unwrap();
     let block4b = tokio_rt.block_on(rt_b.produce_block()).unwrap();
 
-    let before = rt_a.get_chain_state().unwrap();
-    assert_eq!(before.latest_block_index, 3);
-    assert_eq!(before.latest_block_hash, block3a.hash);
+    // Verify rollback logs exist for the local branch on A
+    assert!(rt_a.storage().get_rollback_log(&block2a.hash).unwrap().is_some());
+    assert!(rt_a.storage().get_rollback_log(&block3a.hash).unwrap().is_some());
 
-    let err = rt_a.reorganize_chain(&[block2b, block3b, block4b]).unwrap_err();
-    assert!(
-        format!("{}", err).contains("rollback support"),
-        "expected rollback support error, got: {}",
-        err
-    );
+    // Reorg A to the longer fork — should now succeed (rollback logs exist)
+    let new_height = rt_a.reorganize_chain(&[block2b.clone(), block3b, block4b.clone()]).unwrap();
+    assert_eq!(new_height, 4, "reorganize_chain should return new tip height");
 
     let after = rt_a.get_chain_state().unwrap();
-    assert_eq!(after.latest_block_index, 3, "divergent fork must not mutate local height");
-    assert_eq!(
-        after.latest_block_hash, block3a.hash,
-        "divergent fork must not replace local tip without rollback implementation"
-    );
+    assert_eq!(after.latest_block_index, 4, "A should be at height 4 after reorg");
+    assert_eq!(after.latest_block_hash, block4b.hash, "A tip should match fork tip");
 }
 
 // â”€â”€â”€ P0-6: Automatic P2P announcement/import test â”€â”€â”€

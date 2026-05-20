@@ -1145,7 +1145,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         let chain_snapshot = self.chain_state.lock().unwrap().clone();
         let local_height = chain_snapshot.latest_block_index;
-        let local_tip_hash = chain_snapshot.latest_block_hash;
+        let _local_tip_hash = chain_snapshot.latest_block_hash;
         let before_state_root = chain_snapshot.accounts_root_hash;
         let fork_tip_height = fork_blocks.last().map(|b| b.index).unwrap_or(0);
         let fork_tip_state_root =
@@ -1213,42 +1213,68 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         }
 
         if ancestor_height < local_height {
-            warn!(
-                "[CHAIN] Divergent fork detected at ancestor height {} (local tip {}). \
-                 Rollback depth {} requires rollback logs/snapshots, which are not implemented yet.",
-                ancestor_height, local_height, rollback_depth
+            // Divergent reorg: roll back blocks from local_height down to ancestor_height+1
+            info!(
+                "[CHAIN][REORG] Divergent fork: rolling back {} blocks ({} → {})",
+                rollback_depth, local_height, ancestor_height
             );
-            warn!(
-                "[CHAIN][REORG] Rejected divergent fork: before_root={}, fork_tip_root={}, local_height={}, fork_tip_height={}",
+            for height in (ancestor_height + 1..=local_height).rev() {
+                let block = self.storage.get_block_by_height(height)?.ok_or_else(|| {
+                    RuntimeError::InvalidTransaction(format!(
+                        "Cannot rollback: block at height {} not found",
+                        height
+                    ))
+                })?;
+                let log = self.storage.get_rollback_log(&block.hash)?.ok_or_else(|| {
+                    RuntimeError::InvalidTransaction(format!(
+                        "Rollback log missing for block {} (height {}). \
+                         Blocks produced before rollback log support cannot be rolled back.",
+                        hex::encode(&block.hash),
+                        height
+                    ))
+                })?;
+                self.storage.apply_rollback_log(&log).map_err(|e| {
+                    RuntimeError::InvalidTransaction(format!(
+                        "Failed to apply rollback log for block {}: {}",
+                        height, e
+                    ))
+                })?;
+                self.storage.delete_rollback_log(&block.hash).map_err(|e| {
+                    RuntimeError::InvalidTransaction(format!(
+                        "Failed to delete rollback log for block {}: {}",
+                        height, e
+                    ))
+                })?;
+                info!("[CHAIN][REORG] Rolled back block {}", height);
+            }
+            // Sync in-memory chain state from storage after rollback
+            if let Ok(Some(state)) = self.storage.get_chain_state() {
+                *self.chain_state.lock().unwrap() = state;
+            }
+            info!(
+                "[CHAIN][REORG] Rollback complete. before_root={}, fork_tip_root={}",
                 crate::types::format_hex(&before_state_root),
                 crate::types::format_hex(&fork_tip_state_root),
-                local_height,
-                fork_tip_height
             );
-            return Err(RuntimeError::InvalidTransaction(
-                "Divergent fork reorg requires rollback support (RollbackLog/snapshots) and is not implemented yet"
-                    .to_string(),
-            ));
         }
 
-        if first_fork_block.index != local_height + 1
-            || first_fork_block.prev_hash != local_tip_hash
-        {
+        if first_fork_block.index != ancestor_height + 1 {
             return Err(RuntimeError::InvalidTransaction(format!(
-                "Fork extension mismatch: expected start index {} with prev_hash {}",
-                local_height + 1,
-                crate::types::format_hex(&local_tip_hash)
+                "Fork start mismatch: expected index {}, got {}",
+                ancestor_height + 1,
+                first_fork_block.index
             )));
         }
 
+        let current_tip_hash = self.chain_state.lock().unwrap().latest_block_hash;
         info!(
-            "[CHAIN] Applying extension fork from {} to {} ({} blocks)",
-            local_height + 1,
+            "[CHAIN] Applying fork blocks {} to {} ({} blocks)",
+            first_fork_block.index,
             fork_tip_height,
             fork_blocks.len()
         );
 
-        let mut expected_prev_hash = local_tip_hash;
+        let mut expected_prev_hash = current_tip_hash;
         for block in fork_blocks {
             if block.prev_hash != expected_prev_hash {
                 return Err(RuntimeError::InvalidTransaction(format!(

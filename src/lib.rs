@@ -29,6 +29,8 @@ pub mod ledger;
 /// Performance metrics collection and reporting
 pub mod metrics;
 pub mod redb_storage;
+/// Write-ahead rollback log for reorg support
+pub mod rollback;
 /// Central runtime coordinator and public API
 pub mod runtime;
 /// Rust SDK for programmatic interaction

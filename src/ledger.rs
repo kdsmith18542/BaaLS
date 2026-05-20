@@ -701,8 +701,8 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         let height_key = format!("height:{:0>20}", block.index);
         batch.ops.push(StorageOperation::PutBlock(height_key.as_bytes().to_vec(), block_encoded));
 
-        // 6. Commit Batch
-        self.storage.apply_batch(batch)?;
+        // 6. Commit Batch (captures rollback log before applying for reorg support)
+        self.storage.apply_batch_with_rollback(batch, &block.hash, block.index)?;
         info!("[LEDGER] Block {} applied atomically", block.index);
 
         // 7. Apply any pending ValidatorSetChange that becomes effective at this height
