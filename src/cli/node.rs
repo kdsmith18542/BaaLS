@@ -267,7 +267,6 @@ pub fn build_runtime(
         (pk, consensus, signing_key)
     };
 
-    let mut consensus = consensus;
     consensus.load_authorized_signers_from_storage(&storage)?;
 
     let contract_engine = BaaLSContractEngine::new(storage.clone())?;
@@ -1484,6 +1483,129 @@ gas_used_per_block {}\n",
                                 request,
                                 500,
                                 serde_json::json!({"error": e.to_string()}).to_string(),
+                            ),
+                        }
+                    // --- Admin: Authorized Signers ---
+                    } else if request.method() == &Method::Get
+                        && matches!(request_url_str, "/api/v1/admin/signers")
+                    {
+                        let signers = runtime.list_authorized_signers();
+                        respond_json(
+                            request,
+                            200,
+                            serde_json::json!({
+                                "primary": signers.first().cloned().unwrap_or_default(),
+                                "additional": &signers[1..],
+                                "total": signers.len()
+                            })
+                            .to_string(),
+                        );
+                    } else if request.method() == &Method::Post
+                        && matches!(request_url_str, "/api/v1/admin/signers")
+                    {
+                        let mut body = String::new();
+                        let _ = request.as_reader().read_to_string(&mut body);
+                        let result: Result<serde_json::Value, _> = serde_json::from_str(&body);
+                        match result.and_then(|v| {
+                            v["public_key"]
+                                .as_str()
+                                .map(|s| s.to_string())
+                                .ok_or_else(|| serde_json::from_str::<()>("null").unwrap_err())
+                        }) {
+                            Ok(pk_hex) => {
+                                match hex::decode(&pk_hex) {
+                                    Ok(bytes) if bytes.len() == 32 => {
+                                        let mut arr = [0u8; 32];
+                                        arr.copy_from_slice(&bytes);
+                                        match crate::types::PublicKey::from_bytes(&arr) {
+                                            Ok(pk) => match runtime.add_authorized_signer(pk) {
+                                                Ok(true) => respond_json(
+                                                    request,
+                                                    200,
+                                                    serde_json::json!({
+                                                        "added": pk_hex,
+                                                        "signers": runtime.list_authorized_signers()
+                                                    }).to_string(),
+                                                ),
+                                                Ok(false) => respond_json(
+                                                    request,
+                                                    200,
+                                                    serde_json::json!({
+                                                        "already_exists": pk_hex,
+                                                        "signers": runtime.list_authorized_signers()
+                                                    }).to_string(),
+                                                ),
+                                                Err(e) => respond_json(
+                                                    request,
+                                                    500,
+                                                    serde_json::json!({"error": e.to_string()}).to_string(),
+                                                ),
+                                            },
+                                            Err(e) => respond_json(
+                                                request,
+                                                400,
+                                                serde_json::json!({"error": format!("Invalid public key: {}", e)}).to_string(),
+                                            ),
+                                        }
+                                    }
+                                    Ok(_) => respond_json(
+                                        request,
+                                        400,
+                                        serde_json::json!({"error": "public_key must be 32 bytes (64 hex chars)"}).to_string(),
+                                    ),
+                                    Err(e) => respond_json(
+                                        request,
+                                        400,
+                                        serde_json::json!({"error": format!("Invalid hex: {}", e)}).to_string(),
+                                    ),
+                                }
+                            }
+                            Err(_) => respond_json(
+                                request,
+                                400,
+                                serde_json::json!({"error": "missing 'public_key' field"}).to_string(),
+                            ),
+                        }
+                    } else if request.method() == &Method::Delete
+                        && request_url_str.starts_with("/api/v1/admin/signers/")
+                    {
+                        let pk_hex = &request_url_str["/api/v1/admin/signers/".len()..];
+                        match hex::decode(pk_hex) {
+                            Ok(bytes) if bytes.len() == 32 => {
+                                let mut arr = [0u8; 32];
+                                arr.copy_from_slice(&bytes);
+                                match crate::types::PublicKey::from_bytes(&arr) {
+                                    Ok(pk) => match runtime.remove_authorized_signer(pk) {
+                                        Ok(true) => respond_json(
+                                            request,
+                                            200,
+                                            serde_json::json!({
+                                                "removed": pk_hex,
+                                                "signers": runtime.list_authorized_signers()
+                                            }).to_string(),
+                                        ),
+                                        Ok(false) => respond_json(
+                                            request,
+                                            404,
+                                            serde_json::json!({"error": "signer not found"}).to_string(),
+                                        ),
+                                        Err(e) => respond_json(
+                                            request,
+                                            500,
+                                            serde_json::json!({"error": e.to_string()}).to_string(),
+                                        ),
+                                    },
+                                    Err(e) => respond_json(
+                                        request,
+                                        400,
+                                        serde_json::json!({"error": format!("Invalid key: {}", e)}).to_string(),
+                                    ),
+                                }
+                            }
+                            _ => respond_json(
+                                request,
+                                400,
+                                serde_json::json!({"error": "Invalid hex public key"}).to_string(),
                             ),
                         }
                     } else {

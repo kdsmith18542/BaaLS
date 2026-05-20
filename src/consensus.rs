@@ -40,11 +40,31 @@ pub trait ConsensusEngine: Send + Sync {
     fn block_time_interval_ms(&self) -> u64 {
         5000
     }
+
+    /// Add an authorized signer. Returns true if newly added.
+    fn add_signer(&self, _pk: PublicKey) -> bool {
+        false
+    }
+
+    /// Remove an authorized signer. Returns true if removed.
+    fn remove_signer(&self, _pk: PublicKey) -> bool {
+        false
+    }
+
+    /// List all authorized signers (excluding primary).
+    fn list_signers(&self) -> Vec<PublicKey> {
+        vec![]
+    }
+
+    /// Return the primary signer public key.
+    fn primary_signer(&self) -> Option<PublicKey> {
+        None
+    }
 }
 
 pub struct PoAConsensus {
     authorized_signer_key: PublicKey,
-    authorized_signers: Vec<PublicKey>,
+    authorized_signers: std::sync::RwLock<Vec<PublicKey>>,
     block_time_interval_ms: u64,
     signing_key: Option<SigningKey>,
     pub block_gas_limit: u64,
@@ -58,7 +78,7 @@ impl PoAConsensus {
     pub fn new(authorized_signer_key: PublicKey, block_time_interval_ms: u64) -> Self {
         Self {
             authorized_signer_key,
-            authorized_signers: Vec::new(),
+            authorized_signers: std::sync::RwLock::new(Vec::new()),
             block_time_interval_ms,
             signing_key: None,
             block_gas_limit: 30_000_000,        // 30M gas per block
@@ -82,8 +102,9 @@ impl PoAConsensus {
     /// under round-robin scheduling. All signers (primary + authorized) are
     /// included in the rotation.
     pub fn expected_signer_for_index(&self, block_index: u64) -> PublicKey {
+        let signers = self.authorized_signers.read().unwrap();
         let all: Vec<&PublicKey> = std::iter::once(&self.authorized_signer_key)
-            .chain(self.authorized_signers.iter())
+            .chain(signers.iter())
             .collect();
         *all[(block_index as usize) % all.len()]
     }
@@ -93,25 +114,33 @@ impl PoAConsensus {
         self
     }
 
-    pub fn add_authorized_signer(&mut self, pk: PublicKey) {
-        if !self.authorized_signers.contains(&pk) {
-            self.authorized_signers.push(pk);
+    pub fn add_authorized_signer(&self, pk: PublicKey) -> bool {
+        let mut signers = self.authorized_signers.write().unwrap();
+        if !signers.contains(&pk) {
+            signers.push(pk);
+            true
+        } else {
+            false
         }
     }
 
-    pub fn remove_authorized_signer(&mut self, pk: PublicKey) {
-        self.authorized_signers.retain(|k| *k != pk);
+    pub fn remove_authorized_signer(&self, pk: PublicKey) -> bool {
+        let mut signers = self.authorized_signers.write().unwrap();
+        let before = signers.len();
+        signers.retain(|k| *k != pk);
+        signers.len() < before
     }
 
-    pub fn authorized_signers(&self) -> &[PublicKey] {
-        &self.authorized_signers
+    pub fn authorized_signers_list(&self) -> Vec<PublicKey> {
+        self.authorized_signers.read().unwrap().clone()
     }
 
     pub fn load_authorized_signers_from_storage(
-        &mut self,
+        &self,
         storage: &dyn crate::storage::Storage,
     ) -> Result<(), crate::storage::StorageError> {
-        self.authorized_signers = storage.get_authorized_signers()?;
+        let loaded = storage.get_authorized_signers()?;
+        *self.authorized_signers.write().unwrap() = loaded;
         Ok(())
     }
 
@@ -119,7 +148,8 @@ impl PoAConsensus {
         &self,
         storage: &dyn crate::storage::Storage,
     ) -> Result<(), crate::storage::StorageError> {
-        storage.put_authorized_signers(&self.authorized_signers)
+        let signers = self.authorized_signers.read().unwrap();
+        storage.put_authorized_signers(&signers)
     }
 
     pub fn validate_block(&self, block: &Block) -> Result<(), ConsensusError> {
@@ -143,11 +173,14 @@ impl PoAConsensus {
         let primary_key_hex = hex::encode(self.authorized_signer_key.to_bytes());
         let is_primary = *signer_hex == primary_key_hex;
 
+        // Snapshot signers under a short-lived read lock to avoid holding it
+        // across nested calls (expected_signer_for_index, quorum check).
+        let signers_snapshot: Vec<PublicKey> = self.authorized_signers.read().unwrap().clone();
+
         let verifier_pk = if is_primary {
             self.authorized_signer_key
         } else {
-            match self
-                .authorized_signers
+            match signers_snapshot
                 .iter()
                 .find(|pk| hex::encode(pk.to_bytes()) == *signer_hex)
             {
@@ -157,12 +190,14 @@ impl PoAConsensus {
         };
 
         // Round-robin check — with a 1-block grace window for liveness
-        if self.round_robin && !self.authorized_signers.is_empty() {
-            let expected = self.expected_signer_for_index(block.index);
+        if self.round_robin && !signers_snapshot.is_empty() {
+            let all_rr: Vec<&PublicKey> = std::iter::once(&self.authorized_signer_key)
+                .chain(signers_snapshot.iter())
+                .collect();
+            let expected = *all_rr[(block.index as usize) % all_rr.len()];
             let expected_hex = hex::encode(expected.to_bytes());
-            // Also allow the previous slot signer (grace window)
-            let prev_expected = self.expected_signer_for_index(block.index.saturating_sub(1));
-            let prev_hex = hex::encode(prev_expected.to_bytes());
+            let prev_idx = block.index.saturating_sub(1) as usize % all_rr.len();
+            let prev_hex = hex::encode(all_rr[prev_idx].to_bytes());
             if *signer_hex != expected_hex && *signer_hex != prev_hex {
                 return Err(ConsensusError::ValidationFailed(format!(
                     "Round-robin violation: block {} expected signer {}, got {}",
@@ -204,7 +239,7 @@ impl PoAConsensus {
         // Quorum check — if threshold > 1, validate additional signatures
         if self.quorum_threshold > 1 {
             let all_signers: Vec<&PublicKey> = std::iter::once(&self.authorized_signer_key)
-                .chain(self.authorized_signers.iter())
+                .chain(signers_snapshot.iter())
                 .collect();
 
             let mut valid_count = 1usize; // primary signer already verified above
@@ -338,8 +373,12 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
         );
 
         // Determine signer: round-robin from all authorized keys, or primary
-        let block_signer_pk = if self.round_robin && !self.authorized_signers.is_empty() {
-            let chosen = self.expected_signer_for_index(index);
+        let signers_snapshot: Vec<PublicKey> = self.authorized_signers.read().unwrap().clone();
+        let block_signer_pk = if self.round_robin && !signers_snapshot.is_empty() {
+            let all_rr: Vec<&PublicKey> = std::iter::once(&self.authorized_signer_key)
+                .chain(signers_snapshot.iter())
+                .collect();
+            let chosen = *all_rr[(index as usize) % all_rr.len()];
             info!(
                 "[CONSENSUS] Round-robin: block {} assigned to signer {}",
                 index,
@@ -398,5 +437,21 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
 
     fn block_time_interval_ms(&self) -> u64 {
         self.block_time_interval_ms
+    }
+
+    fn add_signer(&self, pk: PublicKey) -> bool {
+        self.add_authorized_signer(pk)
+    }
+
+    fn remove_signer(&self, pk: PublicKey) -> bool {
+        self.remove_authorized_signer(pk)
+    }
+
+    fn list_signers(&self) -> Vec<PublicKey> {
+        self.authorized_signers_list()
+    }
+
+    fn primary_signer(&self) -> Option<PublicKey> {
+        Some(self.authorized_signer_key)
     }
 }

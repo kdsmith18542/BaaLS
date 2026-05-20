@@ -1395,6 +1395,47 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             .map_err(|e| RuntimeError::InvalidTransaction(format!("Sync trigger failed: {}", e)))
     }
 
+    /// Add an authorized signer to the consensus engine and persist to storage.
+    pub fn add_authorized_signer(&self, pk: PublicKey) -> Result<bool, RuntimeError> {
+        let added = self.consensus.add_signer(pk);
+        if added {
+            // Persist the updated signer list
+            let signers = self.consensus.list_signers();
+            self.storage.put_authorized_signers(&signers)?;
+            info!(
+                "[ADMIN] Added authorized signer: {}",
+                hex::encode(pk.to_bytes())
+            );
+        }
+        Ok(added)
+    }
+
+    /// Remove an authorized signer from the consensus engine and persist to storage.
+    pub fn remove_authorized_signer(&self, pk: PublicKey) -> Result<bool, RuntimeError> {
+        let removed = self.consensus.remove_signer(pk);
+        if removed {
+            let signers = self.consensus.list_signers();
+            self.storage.put_authorized_signers(&signers)?;
+            info!(
+                "[ADMIN] Removed authorized signer: {}",
+                hex::encode(pk.to_bytes())
+            );
+        }
+        Ok(removed)
+    }
+
+    /// List all authorized signers (including primary).
+    pub fn list_authorized_signers(&self) -> Vec<String> {
+        let mut result = Vec::new();
+        if let Some(primary) = self.consensus.primary_signer() {
+            result.push(hex::encode(primary.to_bytes()));
+        }
+        for pk in self.consensus.list_signers() {
+            result.push(hex::encode(pk.to_bytes()));
+        }
+        result
+    }
+
     /// Apply blocks received from peers via the sync layer.
     fn apply_received_blocks(&self) {
         let blocks = self.sync_layer.poll_received_blocks();

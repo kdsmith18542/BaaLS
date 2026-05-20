@@ -193,6 +193,61 @@ impl PerPeerRateLimiter {
     }
 }
 
+/// Per-peer health tracking for connection quality and backoff.
+#[derive(Debug, Clone)]
+struct PeerHealth {
+    consecutive_failures: u32,
+    last_failure: Option<std::time::Instant>,
+    last_success: Option<std::time::Instant>,
+    total_successes: u64,
+    total_failures: u64,
+}
+
+impl PeerHealth {
+    fn new() -> Self {
+        Self {
+            consecutive_failures: 0,
+            last_failure: None,
+            last_success: None,
+            total_successes: 0,
+            total_failures: 0,
+        }
+    }
+
+    fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+        self.last_success = Some(std::time::Instant::now());
+        self.total_successes += 1;
+    }
+
+    fn record_failure(&mut self) {
+        self.consecutive_failures += 1;
+        self.last_failure = Some(std::time::Instant::now());
+        self.total_failures += 1;
+    }
+
+    /// Exponential backoff: 2^failures seconds, capped at 300s (5 min).
+    fn backoff_remaining(&self) -> Option<std::time::Duration> {
+        let last = self.last_failure?;
+        if self.consecutive_failures == 0 {
+            return None;
+        }
+        let backoff_secs =
+            (2u64.saturating_pow(self.consecutive_failures.min(8))).min(300);
+        let elapsed = last.elapsed();
+        let backoff = std::time::Duration::from_secs(backoff_secs);
+        if elapsed < backoff {
+            Some(backoff - elapsed)
+        } else {
+            None
+        }
+    }
+
+    fn is_dead(&self) -> bool {
+        self.consecutive_failures >= PEER_MAX_CONSECUTIVE_FAILURES
+    }
+}
+
 /// Minimal custom P2P sync implementation
 pub struct CustomSync {
     peer_id: PublicKey,
@@ -209,6 +264,7 @@ pub struct CustomSync {
     connection_semaphore: Arc<tokio::sync::Semaphore>,
     signing_key: Arc<Mutex<Option<SigningKey>>>,
     peer_rate_limiters: Arc<Mutex<HashMap<SocketAddr, PerPeerRateLimiter>>>,
+    peer_health: Arc<Mutex<HashMap<SocketAddr, PeerHealth>>>,
 }
 
 const MAX_CONCURRENT_CONNECTIONS: usize = 128;
@@ -217,6 +273,7 @@ const MAX_RECEIVED_BLOCKS_QUEUE: usize = 1000;
 const MAX_BLOCK_CACHE_SIZE: usize = 5000;
 const MAX_P2P_MESSAGES_PER_SECOND: u32 = 50;
 const MAX_BLOCK_RANGE: u64 = 500;
+const PEER_MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
 impl std::fmt::Debug for CustomSync {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -479,6 +536,7 @@ impl CustomSync {
             connection_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
             signing_key: Arc::new(Mutex::new(None)),
             peer_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
+            peer_health: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -773,9 +831,18 @@ impl CustomSync {
                     addr
                 );
 
-                // Register inbound peer so broadcast_block / peer_count see it
+                // Register inbound peer, deduplicating any dummy entries for same address
                 {
                     let mut peers_guard = peers.write().await;
+                    // Remove stale entries with same address but different (dummy) ID
+                    let stale: Vec<PublicKey> = peers_guard
+                        .iter()
+                        .filter(|(id, a)| **a == addr && **id != remote_peer_id)
+                        .map(|(id, _)| *id)
+                        .collect();
+                    for id in stale {
+                        peers_guard.remove(&id);
+                    }
                     if peers_guard.len() < MAX_KNOWN_PEERS {
                         peers_guard.insert(remote_peer_id, addr);
                     }
@@ -1062,6 +1129,87 @@ impl CustomSync {
         blocks
     }
 
+    /// Record a successful sync with a peer.
+    async fn record_peer_success(&self, addr: SocketAddr) {
+        let mut health = self.peer_health.lock().await;
+        health.entry(addr).or_insert_with(PeerHealth::new).record_success();
+    }
+
+    /// Record a failed sync attempt with a peer.
+    async fn record_peer_failure(&self, addr: SocketAddr) {
+        let mut health = self.peer_health.lock().await;
+        health.entry(addr).or_insert_with(PeerHealth::new).record_failure();
+    }
+
+    /// Check if a peer is in backoff. Returns true if we should skip this peer.
+    async fn peer_in_backoff(&self, addr: SocketAddr) -> bool {
+        let health = self.peer_health.lock().await;
+        if let Some(h) = health.get(&addr) {
+            h.backoff_remaining().is_some()
+        } else {
+            false
+        }
+    }
+
+    /// Remove dead peers (too many consecutive failures) from known_peers.
+    /// Also cleans up stale health entries for peers no longer in known_peers.
+    pub async fn cleanup_dead_peers(&self) -> Vec<SocketAddr> {
+        let dead: Vec<(PublicKey, SocketAddr)> = {
+            let health = self.peer_health.lock().await;
+            let peers = self.known_peers.read().await;
+            peers
+                .iter()
+                .filter(|(_, addr)| {
+                    health.get(addr).map(|h| h.is_dead()).unwrap_or(false)
+                })
+                .map(|(id, addr)| (*id, *addr))
+                .collect()
+        };
+
+        let mut removed = Vec::new();
+        if !dead.is_empty() {
+            let mut peers = self.known_peers.write().await;
+            for (id, addr) in &dead {
+                peers.remove(id);
+                log::warn!(
+                    "Removed dead peer {} ({} consecutive failures)",
+                    addr,
+                    PEER_MAX_CONSECUTIVE_FAILURES
+                );
+                removed.push(*addr);
+            }
+        }
+
+        // Clean up health entries for peers no longer tracked
+        {
+            let peers = self.known_peers.read().await;
+            let active_addrs: HashSet<SocketAddr> = peers.values().cloned().collect();
+            let mut health = self.peer_health.lock().await;
+            health.retain(|addr, _| active_addrs.contains(addr));
+        }
+
+        removed
+    }
+
+    /// Deduplicate peer entries: when we learn the real peer_id from a handshake,
+    /// replace any dummy entry that has the same address.
+    async fn dedup_peer(&self, real_peer_id: PublicKey, addr: SocketAddr) {
+        let mut peers = self.known_peers.write().await;
+        // Remove any entry with the same address but different (dummy) ID
+        let stale_ids: Vec<PublicKey> = peers
+            .iter()
+            .filter(|(id, a)| **a == addr && **id != real_peer_id)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale_ids {
+            peers.remove(&id);
+        }
+        // Ensure real ID → addr mapping exists
+        if peers.len() < MAX_KNOWN_PEERS {
+            peers.insert(real_peer_id, addr);
+        }
+    }
+
     /// When a fork is detected, request the peer's fork blocks starting from common ancestor.
     async fn resolve_fork_blocks<S: AsyncWrite + AsyncRead + Unpin + Send>(
         &self,
@@ -1107,11 +1255,10 @@ impl CustomSync {
             _ => Err(SyncError::SynchronizationError("Failed to receive fork blocks".to_string())),
         }
     }
-}
 
-#[async_trait]
-impl SyncLayer for CustomSync {
-    async fn sync_with_peer(
+    /// Core sync-with-peer logic, called by the trait method which wraps it
+    /// with health tracking and backoff checks.
+    async fn sync_with_peer_inner(
         &self,
         peer: &Peer,
         local_chain_state: &ChainState,
@@ -1156,6 +1303,9 @@ impl SyncLayer for CustomSync {
                 )
                 .await?;
 
+                // Deduplicate: replace dummy peer ID with real one
+                self.dedup_peer(remote_peer_id, peer.address).await;
+
                 log::info!(
                     "Outbound peer mutually authenticated: {}",
                     hex::encode(remote_peer_id.to_bytes())
@@ -1190,14 +1340,12 @@ impl SyncLayer for CustomSync {
                         crate::types::format_hex(&latest_block_hash),
                         crate::types::format_hex(&local_chain_state.latest_block_hash)
                     );
-                    // Trigger fork resolution by requesting fork blocks
                     return self
                         .resolve_fork_blocks(peer, &mut stream, local_chain_state, height)
                         .await;
                 }
 
                 if height < local_chain_state.latest_block_index {
-                    // Peer is behind — try resolving fork in case our chain is stale
                     let peer_state = ChainState {
                         latest_block_hash,
                         latest_block_index: height,
@@ -1233,8 +1381,6 @@ impl SyncLayer for CustomSync {
                                     "Empty blocks response".to_string(),
                                 ));
                             }
-                            // Detect fork: if first block doesn't chain to our head,
-                            // the peer diverged before our current height.
                             if blocks[0].prev_hash != local_chain_state.latest_block_hash {
                                 log::warn!(
                                     "Fork detected: received block #{} prev_hash \
@@ -1273,7 +1419,7 @@ impl SyncLayer for CustomSync {
                     }
                 }
 
-                // Peer is ahead by exactly 1: request the latest block
+                // Peer is ahead by exactly 1
                 Self::send_message(
                     &mut stream,
                     NetworkMessage::RequestBlock { hash: latest_block_hash },
@@ -1303,8 +1449,41 @@ impl SyncLayer for CustomSync {
             _ => Err(SyncError::InvalidMessage),
         }
     }
+}
+
+#[async_trait]
+impl SyncLayer for CustomSync {
+    async fn sync_with_peer(
+        &self,
+        peer: &Peer,
+        local_chain_state: &ChainState,
+    ) -> Result<Block, SyncError> {
+        // Skip peers in exponential backoff
+        if self.peer_in_backoff(peer.address).await {
+            return Err(SyncError::SynchronizationError(
+                "Peer in backoff".to_string(),
+            ));
+        }
+
+        let result = self
+            .sync_with_peer_inner(peer, local_chain_state)
+            .await;
+
+        match &result {
+            Ok(_) => self.record_peer_success(peer.address).await,
+            Err(e) if !matches!(e, SyncError::SynchronizationError(_)) => {
+                self.record_peer_failure(peer.address).await;
+            }
+            _ => {} // "not ahead" is not a real failure
+        }
+
+        result
+    }
 
     async fn discover_peers(&self) -> Result<Vec<Peer>, SyncError> {
+        // Opportunistically clean up dead peers every discovery cycle
+        self.cleanup_dead_peers().await;
+
         let peers = self.known_peers.read().await;
         Ok(peers.iter().map(|(id, addr)| Peer { id: *id, address: *addr }).collect())
     }
@@ -1602,6 +1781,7 @@ impl Clone for SyncWrapper {
                 connection_semaphore: Arc::clone(&cs.connection_semaphore),
                 signing_key: Arc::clone(&cs.signing_key),
                 peer_rate_limiters: Arc::clone(&cs.peer_rate_limiters),
+                peer_health: Arc::clone(&cs.peer_health),
             })),
         }
     }
