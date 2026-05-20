@@ -282,8 +282,6 @@ struct HostState {
     contract_storage: HashMap<Vec<u8>, Vec<u8>>,
     storage: Box<dyn Storage>,
     read_only: bool,
-    gas_used: u64,
-    gas_limit: u64,
     block_index: u64,
     block_timestamp: u64,
     input_data: Vec<u8>,
@@ -294,27 +292,6 @@ struct HostState {
     inter_contract_results: Vec<Vec<u8>>,
     deleted_keys: Vec<Vec<u8>>,
     permissions: ContractPermissions,
-}
-
-impl HostState {
-    fn charge_gas(&mut self, amount: u64) -> Result<(), ContractError> {
-        self.gas_used = self.gas_used.saturating_add(amount);
-        if self.gas_used > self.gas_limit {
-            Err(ContractError::GasLimitExceeded)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn charge_memory_growth(&mut self, current_memory_size: usize) -> Result<(), ContractError> {
-        if current_memory_size > self.last_memory_size {
-            let growth_bytes = current_memory_size - self.last_memory_size;
-            let growth_pages = growth_bytes.div_ceil(65536).max(1) as u64;
-            self.charge_gas(growth_pages * 100)?;
-            self.last_memory_size = current_memory_size;
-        }
-        Ok(())
-    }
 }
 
 // ─── Contract Engine ───
@@ -434,8 +411,6 @@ impl<S: Storage> BaaLSContractEngine<S> {
             contract_storage: HashMap::new(),
             storage: storage.clone_storage(),
             read_only,
-            gas_used: 0,
-            gas_limit,
             block_index,
             block_timestamp,
             input_data: serialized_args.clone(),
@@ -580,8 +555,6 @@ impl<S: Storage> BaaLSContractEngine<S> {
                 Ok((result_data, gas_used, side_effects))
             }
             Err(e) => {
-                let host_state = store.data();
-                let _gas_used = host_state.gas_used;
                 warn!(
                     "[CONTRACTS] {}::{} trap: {}",
                     hex::encode(contract_id.to_bytes()),
@@ -602,6 +575,17 @@ impl<S: Storage> BaaLSContractEngine<S> {
             } else {
                 Some(len as usize)
             }
+        }
+
+        fn consume_host_fuel(caller: &mut Caller<'_, HostState>, amount: u64) -> bool {
+            let remaining = match caller.get_fuel() {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+            if remaining < amount {
+                return false;
+            }
+            caller.set_fuel(remaining - amount).is_ok()
         }
 
         // baals_storage_read(key_ptr, key_len, value_ptr, value_len_cap) -> bytes_written
@@ -633,10 +617,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     }
 
                     let value = {
-                        let state = caller.data_mut();
-                        if state.charge_gas(100).is_err() {
+                        if !consume_host_fuel(&mut caller, 100) {
                             return -1;
                         }
+                        let state = caller.data_mut();
                         state.contract_storage.get(&key).cloned().or_else(|| {
                             state
                                 .storage
@@ -693,10 +677,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         return -1;
                     }
 
-                    let state = caller.data_mut();
-                    if state.charge_gas(200).is_err() {
+                    if !consume_host_fuel(&mut caller, 200) {
                         return -1;
                     }
+                    let state = caller.data_mut();
                     if state.read_only {
                         return -1;
                     }
@@ -729,10 +713,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         return -1;
                     }
 
-                    let state = caller.data_mut();
-                    if state.charge_gas(50).is_err() {
+                    if !consume_host_fuel(&mut caller, 50) {
                         return -1;
                     }
+                    let state = caller.data_mut();
                     if state.read_only {
                         return -1;
                     }
@@ -827,7 +811,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         return;
                     }
 
-                    if caller.data_mut().charge_gas(50 + data_len as u64 / 16).is_err() {
+                    if !consume_host_fuel(&mut caller, 50 + data_len as u64 / 16) {
                         return;
                     }
 
@@ -884,8 +868,8 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         return 0;
                     }
 
-                    if caller.data_mut().charge_gas(500).is_err() {
-                        return -1;
+                    if !consume_host_fuel(&mut caller, 500) {
+                        return 0;
                     }
 
                     if pk_bytes.len() != 32 || sig_bytes.len() != 64 {
@@ -948,11 +932,11 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     let _ = mem.read(&caller, topic_ptr as usize, &mut topic);
                     let _ = mem.read(&caller, data_ptr as usize, &mut data);
 
-                    let state = caller.data_mut();
-                    if !state.permissions.emit_events {
+                    if !consume_host_fuel(&mut caller, 100 + topic_len as u64 + data_len as u64) {
                         return;
                     }
-                    if state.charge_gas(100 + topic_len as u64 + data_len as u64).is_err() {
+                    let state = caller.data_mut();
+                    if !state.permissions.emit_events {
                         return;
                     }
                     state.events.push((topic, data));
@@ -987,9 +971,16 @@ impl<S: Storage> BaaLSContractEngine<S> {
                 };
                 let current_size = mem.data_size(&caller);
                 let state = caller.data_mut();
-                if state.charge_memory_growth(current_size).is_err() {
+                let growth = if current_size > state.last_memory_size {
+                    (current_size - state.last_memory_size) / 65536 // WASM page size
+                } else {
+                    0
+                };
+                if !consume_host_fuel(&mut caller, growth as u64 * 100) {
                     return -1;
                 }
+                let state = caller.data_mut();
+                state.last_memory_size = current_size;
                 current_size as i32
             })
             .map_err(|e| ContractError::HostFunctionError(e.to_string()))?;
@@ -1035,10 +1026,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     {
                         return -1;
                     }
-                    let state = caller.data_mut();
-                    if state.charge_gas(1000).is_err() {
+                    if !consume_host_fuel(&mut caller, 1000) {
                         return -1;
                     }
+                    let state = caller.data_mut();
                     if state.read_only {
                         return -1;
                     }
