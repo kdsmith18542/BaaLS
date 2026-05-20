@@ -309,7 +309,7 @@ pub fn build_runtime(
 
     let mut runtime = Runtime::new(storage, consensus, contract_engine, sync_layer)?;
     runtime.auto_block_interval_ms = config.consensus.block_time_ms;
-    runtime.auto_block_mempool_threshold = 10;
+    runtime.auto_block_mempool_threshold = 1;
     runtime.min_gas_price = config.consensus.min_gas_price;
     runtime.chain_id = config.consensus.chain_id;
     runtime.finality_depth = config.consensus.finality_depth;
