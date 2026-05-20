@@ -772,6 +772,14 @@ impl CustomSync {
                     hex::encode(remote_peer_id.to_bytes()),
                     addr
                 );
+
+                // Register inbound peer so broadcast_block / peer_count see it
+                {
+                    let mut peers_guard = peers.write().await;
+                    if peers_guard.len() < MAX_KNOWN_PEERS {
+                        peers_guard.insert(remote_peer_id, addr);
+                    }
+                }
             }
             _ => return Err(SyncError::InvalidMessage),
         }
