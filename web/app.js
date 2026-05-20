@@ -142,7 +142,7 @@ async function loadLatestBlocks() {
         : Number(block.tx_count ?? 0);
 
       const tdHeight = document.createElement("td");
-      tdHeight.textContent = String(block.index ?? "-");
+      tdHeight.textContent = String(block.height ?? block.index ?? "-");
 
       const tdHash = document.createElement("td");
       const hash = String(block.hash || "-");
