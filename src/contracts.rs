@@ -552,6 +552,10 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     }
                 }
 
+                // Store results back into HostState so baals_read_call_result can access them
+                let host_state = store.data_mut();
+                host_state.inter_contract_results = call_results;
+
                 Ok((result_data, gas_used, side_effects))
             }
             Err(e) => {
