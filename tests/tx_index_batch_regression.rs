@@ -1,4 +1,4 @@
-use baals::*;
+﻿use baals::*;
 use tempfile::TempDir;
 
 fn sample_tx(sender: PublicKey, recipient: PublicKey) -> Transaction {
@@ -30,7 +30,11 @@ fn sample_block(tx: Transaction) -> Block {
         nonce: 0,
         transactions: vec![tx],
         metadata: None,
-    };
+                total_gas_used: 0,
+                signer: None,
+                signature: None,
+                quorum_signatures: Vec::new(),
+            };
     block.hash = block.calculate_hash().unwrap();
     block
 }
@@ -76,3 +80,4 @@ fn batch_tx_index_lookup_redb() {
     let storage = RedbStorage::new(tmp.path()).unwrap();
     assert_batch_index_lookup_works(&storage);
 }
+

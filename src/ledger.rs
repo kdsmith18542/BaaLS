@@ -95,6 +95,10 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             nonce: 0,
             transactions: Vec::new(),
             metadata: None,
+            total_gas_used: 0,
+            signer: None,
+            signature: None,
+            quorum_signatures: Vec::new(),
         };
 
         let calculated_genesis_hash = genesis_block.calculate_hash()?;

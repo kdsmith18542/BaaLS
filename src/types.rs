@@ -542,7 +542,7 @@ pub fn format_hex(bytes: &[u8; 32]) -> String {
     hex::encode(bytes)
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Block {
     pub index: u64,
     pub timestamp: u64,
@@ -552,6 +552,14 @@ pub struct Block {
     pub nonce: u64,
     pub transactions: Vec<Transaction>,
     pub metadata: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    pub total_gas_used: u64,
+    #[serde(default)]
+    pub signer: Option<String>,
+    #[serde(default)]
+    pub signature: Option<Vec<u8>>,
+    #[serde(default)]
+    pub quorum_signatures: Vec<(String, Vec<u8>)>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -865,6 +873,10 @@ mod tests {
             nonce: 0,
             transactions: vec![tx1.clone(), tx2.clone()],
             metadata: None,
+            total_gas_used: 0,
+            signer: None,
+            signature: None,
+            quorum_signatures: Vec::new(),
         };
 
         let hash1 = block.calculate_hash().unwrap();

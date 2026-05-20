@@ -1,4 +1,4 @@
-use baals::*;
+﻿use baals::*;
 use log::info;
 
 use sha2::Digest;
@@ -122,7 +122,11 @@ async fn test_incremental_smt_integrity() {
             transactions: vec![tx],
             nonce: 0,
             metadata: None,
-        };
+                    total_gas_used: 0,
+                    signer: None,
+                    signature: None,
+                    quorum_signatures: Vec::new(),
+                };
         block.hash = block.calculate_hash().unwrap();
 
         ledger.apply_block(&block).unwrap();
@@ -167,3 +171,4 @@ fn test_consensus_key_permissions() {
 
     info!("[SECURITY_TEST] test_consensus_key_permissions passed");
 }
+

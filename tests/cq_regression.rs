@@ -1,4 +1,4 @@
-use baals::*;
+﻿use baals::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
@@ -202,7 +202,11 @@ fn cq8_monotonic_timestamp_enforced() {
         nonce: 0,
         transactions: vec![],
         metadata: None,
-    };
+                total_gas_used: 0,
+                signer: None,
+                signature: None,
+                quorum_signatures: Vec::new(),
+            };
     block2.hash = block2.calculate_hash().unwrap();
 
     let result = runtime.ledger().validate_block(&block2);
@@ -230,7 +234,7 @@ fn cq11_failed_tx_status_recorded() {
     // Create sender with balance less than transfer amount
     let (sk, pk) = make_test_account(&runtime, 1_000);
 
-    // Create tx that transfers more than balance — this would be rejected by mempool (CQ-3),
+    // Create tx that transfers more than balance â€” this would be rejected by mempool (CQ-3),
     // so we bypass mempool and feed the block directly to the ledger.
     let tx = make_transfer_tx(pk, &sk, pk, 2_000, 1, 21_000, 1, 1);
 
@@ -244,7 +248,11 @@ fn cq11_failed_tx_status_recorded() {
         nonce: 0,
         transactions: vec![tx.clone()],
         metadata: None,
-    };
+                total_gas_used: 0,
+                signer: None,
+                signature: None,
+                quorum_signatures: Vec::new(),
+            };
 
     // Sign the block with consensus key
     let consensus = PoAConsensus::new(consensus_pk, 1000).with_signing_key(consensus_sk);
@@ -319,7 +327,11 @@ fn cq12_duplicate_tx_rejected_in_block() {
         nonce: 0,
         transactions: vec![tx.clone()],
         metadata: None,
-    };
+                total_gas_used: 0,
+                signer: None,
+                signature: None,
+                quorum_signatures: Vec::new(),
+            };
     block2.hash = block2.calculate_hash().unwrap();
 
     let result = runtime.ledger().validate_block(&block2);
@@ -402,7 +414,7 @@ fn cq7_authorized_signers_persisted() {
     // Give Windows time to release file handles (Sled background threads)
     std::thread::sleep(std::time::Duration::from_secs(2));
 
-    // Create new runtime with same storage — signers should be reloaded
+    // Create new runtime with same storage â€” signers should be reloaded
     let storage2 = SledStorage::new(&data_dir).unwrap();
     let consensus_sk2 =
         Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
@@ -520,3 +532,4 @@ fn phase2_tx_status_and_finality_progress_with_confirmations() {
     assert_eq!(finality2.confirmations, 2);
     assert!(finality2.is_final);
 }
+

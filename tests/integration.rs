@@ -1,4 +1,4 @@
-use baals::*;
+﻿use baals::*;
 use ed25519_dalek::Signer;
 use log::info;
 use rand::RngCore;
@@ -172,7 +172,7 @@ fn test_transaction_validation_and_mempool() {
         result.err()
     );
 
-    // Test invalid transaction (insufficient balance — now rejected at submission)
+    // Test invalid transaction (insufficient balance â€” now rejected at submission)
     let mut overspend_tx = Transaction {
         hash: [0u8; 32],
         sender: public_key,
@@ -682,10 +682,10 @@ fn test_contract_deploy_and_execution() {
         "Contract ID should not be zero"
     );
 
-    // Call contract — our test module returns args_len (0 since no args passed)
+    // Call contract â€” our test module returns args_len (0 since no args passed)
     let result =
         runtime.call_contract(&public_key, &contract_id, "test_method", &[], None, 100000).unwrap();
-    // Module returns 0 (args_len) — verify call succeeded, not specific return value
+    // Module returns 0 (args_len) â€” verify call succeeded, not specific return value
     info!("[TEST] Contract call returned {} bytes", result.len());
 
     info!("[TEST] test_contract_deploy_and_execution completed successfully");
@@ -826,7 +826,11 @@ fn test_storage_and_merkle_root() {
         transactions: vec![],
         nonce: 0,
         metadata: None,
-    };
+                total_gas_used: 0,
+                signer: None,
+                signature: None,
+                quorum_signatures: Vec::new(),
+            };
 
     storage.put_block(&test_block).unwrap();
     let retrieved_block = storage.get_block(&test_block.hash).unwrap().unwrap();
@@ -1250,7 +1254,11 @@ fn test_batch_multi_tree_no_cross_contamination() {
         nonce: 0,
         transactions: vec![],
         metadata: None,
-    };
+                total_gas_used: 0,
+                signer: None,
+                signature: None,
+                quorum_signatures: Vec::new(),
+            };
     let dummy_tx = Transaction {
         hash: [2u8; 32],
         sender: test_key,
@@ -1306,7 +1314,7 @@ fn test_batch_multi_tree_no_cross_contamination() {
     assert_eq!(block_retrieved.timestamp, 1777953019);
 }
 
-// ─── P0-5: Full fork/reorg test with common ancestor ───
+// â”€â”€â”€ P0-5: Full fork/reorg test with common ancestor â”€â”€â”€
 
 #[test]
 fn test_fork_reorg_with_common_ancestor() {
@@ -1365,7 +1373,7 @@ fn test_fork_reorg_with_common_ancestor() {
 
     let tokio_rt = tokio::runtime::Runtime::new().unwrap();
 
-    // ── Node A: produce block 1 (tx A1: sender → recipient, 100) ──
+    // â”€â”€ Node A: produce block 1 (tx A1: sender â†’ recipient, 100) â”€â”€
     rt_a.submit_transaction(make_tx(1, 100)).unwrap();
     let block1 = tokio_rt.block_on(rt_a.produce_block()).unwrap();
     assert_eq!(block1.index, 1, "Node A produced block 1");
@@ -1381,7 +1389,7 @@ fn test_fork_reorg_with_common_ancestor() {
         crate::types::format_hex(&block1.hash)
     );
 
-    // ── Node B: produce blocks 2b, 3b, 4b (fork chain) ──
+    // â”€â”€ Node B: produce blocks 2b, 3b, 4b (fork chain) â”€â”€
     rt_b.submit_transaction(make_tx(2, 200)).unwrap();
     std::thread::sleep(std::time::Duration::from_secs(1));
     let block2b = tokio_rt.block_on(rt_b.produce_block()).unwrap();
@@ -1400,16 +1408,16 @@ fn test_fork_reorg_with_common_ancestor() {
     let b_head = rt_b.get_chain_state().unwrap();
     assert_eq!(b_head.latest_block_index, 4, "Node B is at height 4");
 
-    // ── Verify Node A is still at height 1 (has not seen fork yet) ──
+    // â”€â”€ Verify Node A is still at height 1 (has not seen fork yet) â”€â”€
     let a_head_before = rt_a.get_chain_state().unwrap();
     assert_eq!(a_head_before.latest_block_index, 1, "Node A is at height 1 before reorg");
 
-    // ── Reorganize: apply fork blocks 2b, 3b, 4b from B onto A ──
+    // â”€â”€ Reorganize: apply fork blocks 2b, 3b, 4b from B onto A â”€â”€
     let fork_blocks = vec![block2b.clone(), block3b.clone(), block4b.clone()];
     let new_height = rt_a.reorganize_chain(&fork_blocks).unwrap();
     assert_eq!(new_height, 4, "Reorganize returned height 4");
 
-    // ── Assertions ──
+    // â”€â”€ Assertions â”€â”€
     let a_head_after = rt_a.get_chain_state().unwrap();
     let b_head_after = rt_b.get_chain_state().unwrap();
     assert_eq!(a_head_after.latest_block_index, 4, "Node A chain height is now 4");
@@ -1534,7 +1542,7 @@ fn test_reorg_detects_divergent_fork_and_rejects_without_rollback_support() {
     );
 }
 
-// ─── P0-6: Automatic P2P announcement/import test ───
+// â”€â”€â”€ P0-6: Automatic P2P announcement/import test â”€â”€â”€
 
 #[test]
 fn test_p2p_auto_announcement_and_import() {
@@ -1670,7 +1678,7 @@ fn test_p2p_auto_announcement_and_import() {
         "Both nodes should be at the same height"
     );
 
-    // Verify no manual apply_block was needed — the import happened automatically
+    // Verify no manual apply_block was needed â€” the import happened automatically
     // (the absence of `ledger().apply_block()` calls proves this)
 
     // Verify balances on Node B reflect the imported block
@@ -1754,7 +1762,7 @@ fn test_consensus_signing_verification() {
     tx.sign(&sender_sk).unwrap();
     runtime.submit_transaction(tx).unwrap();
 
-    // Produce block — consensus signs it
+    // Produce block â€” consensus signs it
     let tokio_rt = tokio::runtime::Runtime::new().unwrap();
     let block = tokio_rt.block_on(runtime.produce_block()).unwrap();
     assert!(block.metadata.is_some(), "Block should have signing metadata");
@@ -1846,7 +1854,7 @@ fn test_insufficient_balance_rejected() {
     let sender_pk = PublicKey::from(sender_sk.verifying_key());
     runtime.create_account(&sender_pk, Account::Wallet { balance: 5, nonce: 0 }).unwrap();
 
-    // Submit transfer for more than balance — now rejected at submission (CQ-3)
+    // Submit transfer for more than balance â€” now rejected at submission (CQ-3)
     let mut tx = Transaction {
         hash: [0u8; 32],
         sender: sender_pk,
@@ -2016,7 +2024,7 @@ fn test_concurrent_mempool_integrity() {
     let success_count = results.iter().filter(|&&r| r).count();
     assert_eq!(
         success_count, 200,
-        "Expected 200 successful submissions (8 threads × 25), got {success_count}"
+        "Expected 200 successful submissions (8 threads Ã— 25), got {success_count}"
     );
 
     let pending_txs = runtime.get_pending_transactions().unwrap();
@@ -2052,14 +2060,14 @@ fn test_reentrancy_guard() {
     let wasm_bytes = wasm_fixtures::make_self_calling_module();
     let contract_id = runtime.deploy_contract(&deployer, &wasm_bytes, None, 1_000_000).unwrap();
 
-    // Call "safe" — should write i32(1) to memory and return 4
+    // Call "safe" â€” should write i32(1) to memory and return 4
     let safe_result =
         runtime.call_contract(&deployer, &contract_id, "safe", &[], None, 1_000_000).unwrap();
     assert_eq!(safe_result.len(), 4, "safe() should return 4 bytes");
     let safe_val = i32::from_le_bytes(safe_result.try_into().unwrap_or_default());
     assert_eq!(safe_val, 1, "safe() should encode value 1");
 
-    // Call "reenter" — the WASM calls baals_call_contract on itself.
+    // Call "reenter" â€” the WASM calls baals_call_contract on itself.
     // Currently, baals_call_contract queues the call (returns call index).
     // Verify the WASM execution completes without error.
     let reenter_result =
@@ -2098,7 +2106,7 @@ fn test_host_function_storage_write_read() {
     let wasm_bytes = wasm_fixtures::make_storage_write_read_module();
     let contract_id = runtime.deploy_contract(&deployer, &wasm_bytes, None, 1_000_000).unwrap();
 
-    // Call store_and_read — writes "key"="val", reads back.
+    // Call store_and_read â€” writes "key"="val", reads back.
     // Returns the 3 bytes of "val" at memory[0].
     let result = runtime
         .call_contract(&deployer, &contract_id, "store_and_read", &[], None, 1_000_000)
@@ -2134,7 +2142,7 @@ fn test_inter_contract_call() {
     let callee_wasm = wasm_fixtures::make_inter_contract_callee();
     let callee_id = runtime.deploy_contract(&deployer, &callee_wasm, None, 1_000_000).unwrap();
 
-    // Call the callee's "store" function — verifies contract deployment and calling.
+    // Call the callee's "store" function â€” verifies contract deployment and calling.
     // store() returns 0 (read 0 bytes), so result is empty.
     let result =
         runtime.call_contract(&deployer, &callee_id, "store", &[], None, 1_000_000).unwrap();
@@ -2163,7 +2171,7 @@ fn test_sync_layer_handshake() {
     let consensus1 = PoAConsensus::new(test_key1, 1000).with_signing_key(signing_key1);
     let consensus2 = PoAConsensus::new(test_key2, 1000).with_signing_key(signing_key2);
 
-    // Use NoopSync for both — verifies runtime works with sync layer
+    // Use NoopSync for both â€” verifies runtime works with sync layer
     let runtime1 =
         Runtime::with_mempool_limit(storage1.clone(), consensus1, ce1, NoopSync, 1000).unwrap();
     let runtime2 =
@@ -2211,7 +2219,11 @@ fn test_redb_storage_basic_crud() {
         transactions: vec![],
         nonce: 0,
         metadata: None,
-    };
+                total_gas_used: 0,
+                signer: None,
+                signature: None,
+                quorum_signatures: Vec::new(),
+            };
     storage.put_block(&block).unwrap();
     let retrieved_block = storage.get_block(&block.hash).unwrap().unwrap();
     assert_eq!(retrieved_block.index, 1, "RedbStorage put/get block");
@@ -2306,7 +2318,7 @@ fn test_redb_storage_with_runtime() {
     info!("[TEST] RedbStorage runtime integration passed");
 }
 
-// ─── Multi-Node P2P Sync Integration Tests ───
+// â”€â”€â”€ Multi-Node P2P Sync Integration Tests â”€â”€â”€
 
 #[test]
 fn test_p2p_block_propagation() {
@@ -2545,7 +2557,7 @@ fn test_p2p_storage_backed_block_serving() {
     // Create same account on B so it can apply synced blocks
     rt_b.create_account(&user_pk, Account::Wallet { balance: 50000, nonce: 0 }).unwrap();
 
-    // Node B syncs with A — should get blocks served from A's storage
+    // Node B syncs with A â€” should get blocks served from A's storage
     let peer_a = Peer { id: pk_a, address: listen_a };
     let chain_state_b = rt_b.get_chain_state().unwrap();
 
@@ -2647,7 +2659,11 @@ fn test_backup_and_restore() {
         nonce: 0,
         transactions: vec![],
         metadata: None,
-    };
+                total_gas_used: 0,
+                signer: None,
+                signature: None,
+                quorum_signatures: Vec::new(),
+            };
     let mut genesis = genesis;
     genesis.hash = genesis.calculate_hash().unwrap();
     storage.put_block(&genesis).unwrap();
@@ -2700,7 +2716,7 @@ fn test_inter_contract_result_isolation() {
 
     let zero_result: Vec<u8> = vec![0u8; 8]; // bincode length prefix for empty Vec<Vec<u8>>
 
-    // ── Different transactions ──────────────────────────────────────
+    // â”€â”€ Different transactions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let tokio_rt = tokio::runtime::Runtime::new().unwrap();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
@@ -2754,9 +2770,9 @@ fn test_inter_contract_result_isolation() {
     let block2 = tokio_rt.block_on(runtime.produce_block()).unwrap();
     assert_eq!(block2.index, 2, "Block 2 should be produced");
     assert_eq!(block2.transactions.len(), 1, "Block 2 should have 1 tx");
-    // No stale result from tx1 carried into tx2 — both blocks produced cleanly
+    // No stale result from tx1 carried into tx2 â€” both blocks produced cleanly
 
-    // ── Different blocks ────────────────────────────────────────────
+    // â”€â”€ Different blocks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let block1_result =
         runtime.call_contract(&caller1, &contract_a, "test_method", &[], None, 500_000).unwrap();
     assert_eq!(block1_result, zero_result);
@@ -2790,7 +2806,7 @@ fn test_inter_contract_result_isolation() {
         runtime.call_contract(&caller1, &contract_a, "test_method", &[], None, 500_000).unwrap();
     assert_eq!(after_block3, zero_result, "No cross-block leakage");
 
-    // ── Different callers ───────────────────────────────────────────
+    // â”€â”€ Different callers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let c1_res =
         runtime.call_contract(&caller1, &contract_a, "test_method", &[], None, 500_000).unwrap();
     let c2_res =
@@ -2799,7 +2815,7 @@ fn test_inter_contract_result_isolation() {
     assert_eq!(c2_res, zero_result, "caller2 result should be 0");
     assert_eq!(c1_res, c2_res, "Results from different callers should not be mixed");
 
-    // ── Failed calls ────────────────────────────────────────────────
+    // â”€â”€ Failed calls â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Note: unknown methods fall back to "main" export in v1 ABI,
     // so calling "nonexistent_method" succeeds rather than failing.
     // The result isolation is verified by the previous test sections.
@@ -2807,7 +2823,7 @@ fn test_inter_contract_result_isolation() {
         runtime.call_contract(&caller1, &contract_a, "test_method", &[], None, 500_000).unwrap();
     assert_eq!(valid_after, zero_result, "Valid call after failed call should be clean");
 
-    // ── Read-only queries ───────────────────────────────────────────
+    // â”€â”€ Read-only queries â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let q1 = runtime.query_contract(&contract_a, "test_method", &[]).unwrap();
     let q2 = runtime.query_contract(&contract_b, "test_method", &[]).unwrap();
     let q3 = runtime.query_contract(&contract_a, "test_method", &[]).unwrap();
@@ -2847,18 +2863,18 @@ fn test_reentrancy_guard_correctness() {
 
     let tokio_rt = tokio::runtime::Runtime::new().unwrap();
 
-    // ── 1. Blocked reentrant call ───────────────────────────────────
+    // â”€â”€ 1. Blocked reentrant call â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let self_calling = wasm_fixtures::make_self_calling_module();
     let contract_self = runtime.deploy_contract(&deployer, &self_calling, None, 1_000_000).unwrap();
 
-    // safe() works normally — returns i32(1) as 4 bytes
+    // safe() works normally â€” returns i32(1) as 4 bytes
     let safe_res =
         runtime.call_contract(&deployer, &contract_self, "safe", &[], None, 1_000_000).unwrap();
     assert_eq!(safe_res.len(), 4, "safe() should return 4 bytes");
     let safe_val = i32::from_le_bytes(safe_res[..4].try_into().unwrap());
     assert_eq!(safe_val, 1, "safe() should return 1");
 
-    // reenter() calls baals_call_contract on itself — inter-contract reentrancy is softly blocked
+    // reenter() calls baals_call_contract on itself â€” inter-contract reentrancy is softly blocked
     // (engine returns empty result, does NOT propagate error to outer caller)
     let reenter_res =
         runtime.call_contract(&deployer, &contract_self, "reenter", &[], None, 1_000_000);
@@ -2867,15 +2883,15 @@ fn test_reentrancy_guard_correctness() {
         "Outer reenter() call should succeed even when inner reentrancy is blocked"
     );
 
-    // ── 2. Guard not poisoned after blocked reentrant call ──────────
+    // â”€â”€ 2. Guard not poisoned after blocked reentrant call â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let safe_after =
         runtime.call_contract(&deployer, &contract_self, "safe", &[], None, 1_000_000).unwrap();
     assert_eq!(safe_after.len(), 4, "safe() after reentrant attempt should work");
     let safe_after_val = i32::from_le_bytes(safe_after[..4].try_into().unwrap());
     assert_eq!(safe_after_val, 1, "safe() after reentrant should return 1");
 
-    // ── 3. Failed call releases guard ───────────────────────────────
-    // Call with 0 gas — should fail mid-execution, but guard must be released
+    // â”€â”€ 3. Failed call releases guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Call with 0 gas â€” should fail mid-execution, but guard must be released
     let _gas_starved = runtime.call_contract(&deployer, &contract_self, "safe", &[], None, 0);
     // The call may succeed or fail depending on implementation, but guard must be released either way
     let safe_after_starve =
@@ -2890,8 +2906,8 @@ fn test_reentrancy_guard_correctness() {
         runtime.call_contract(&deployer, &contract_self, "safe", &[], None, 1_000_000).unwrap();
     assert_eq!(safe_after_trap.len(), 4, "safe() after failed call should work");
 
-    // ── 4. Nested non-reentrant A→B→C succeeds ─────────────────────
-    // Deploy C (leaf contract — returns 0)
+    // â”€â”€ 4. Nested non-reentrant Aâ†’Bâ†’C succeeds â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Deploy C (leaf contract â€” returns 0)
     let wasm_leaf = wasm_fixtures::create_test_wasm_module();
     let contract_c = runtime.deploy_contract(&deployer, &wasm_leaf, None, 1_000_000).unwrap();
 
@@ -2925,17 +2941,17 @@ fn test_reentrancy_guard_correctness() {
     let wasm_a = wasm_fixtures::make_inter_contract_caller(&cid_b);
     let contract_a = runtime.deploy_contract(&deployer, &wasm_a, None, 1_000_000).unwrap();
 
-    // Call A → should call B → should call C — all non-reentrant, no cycles
+    // Call A â†’ should call B â†’ should call C â€” all non-reentrant, no cycles
     let nested_res =
         runtime.call_contract(&deployer, &contract_a, "main", &[], None, 1_000_000).unwrap();
     assert_eq!(
         nested_res.len(),
         0,
-        "Nested A→B→C should return empty result (i32 0 = read 0 bytes)"
+        "Nested Aâ†’Bâ†’C should return empty result (i32 0 = read 0 bytes)"
     );
     assert!(nested_res.is_empty(), "Nested result should be empty");
 
-    // ── 5. Parallel calls don't corrupt guard ──────────────────────
+    // â”€â”€ 5. Parallel calls don't corrupt guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Deploy two independent contracts via transactions in the same block
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
@@ -3017,3 +3033,4 @@ fn test_tx_vec_args_roundtrip() {
     init_logging();
     golden::test_tx_roundtrip_vec_args();
 }
+

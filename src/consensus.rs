@@ -165,11 +165,23 @@ impl PoAConsensus {
                 return Err(ConsensusError::UnauthorizedSigner);
             }
 
+            // Ensure signer is in metadata and hash is set
+            // (For backward compat: if signer not yet in metadata, add it and recalculate hash)
+            let mut metadata = block.metadata.clone().unwrap_or_default();
+            let signer_hex = hex::encode(self.authorized_signer_key.to_bytes());
+            if !metadata.contains_key("signer") {
+                metadata.insert("signer".to_string(), signer_hex);
+                block.metadata = Some(metadata.clone());
+                // Recalculate hash with signer now in metadata
+                block.hash = block
+                    .calculate_hash()
+                    .map_err(|e| ConsensusError::BlockSigningFailed(e.to_string()))?;
+            }
+
             // Sign the block hash (which now includes signer identity from metadata)
             let signature = signing_key.sign(&block.hash);
 
             // Add signature and timestamp to block metadata
-            // Signer should already be in metadata from generate_block
             let mut metadata = block.metadata.clone().unwrap_or_default();
             metadata.insert("signature".to_string(), hex::encode(signature.to_bytes()));
             metadata.insert(
@@ -256,6 +268,10 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
             nonce: 0,
             transactions,
             metadata: Some(metadata),
+            total_gas_used: 0,
+            signer: Some(hex::encode(self.authorized_signer_key.to_bytes())),
+            signature: None,
+            quorum_signatures: Vec::new(),
         };
 
         debug!("[CONSENSUS] Created block structure, calculating hash");
