@@ -594,6 +594,9 @@ impl Transaction {
                 method.len() + args.iter().map(|a| a.len()).sum::<usize>() + args.len() * 4 + 50
             }
             TransactionPayload::Data { data } => data.len() + 10,
+            TransactionPayload::ValidatorSetChange { added, removed, .. } => {
+                (added.len() + removed.len()) * 32 + 20
+            }
         }
     }
 }
@@ -687,6 +690,11 @@ pub enum TransactionPayload {
     ContractDeploy { wasm_bytes: Vec<u8>, init_payload: Option<Vec<u8>> },
     ContractCall { method: String, args: Vec<Vec<u8>>, value: Option<u64> },
     Data { data: Vec<u8> },
+    ValidatorSetChange {
+        added: Vec<PublicKey>,
+        removed: Vec<PublicKey>,
+        effective_height: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

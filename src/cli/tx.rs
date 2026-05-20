@@ -314,6 +314,9 @@ pub fn handle_tx(
                     50_000 + args.iter().map(|a| a.len() as u64).sum::<u64>() * 10
                 }
                 TransactionPayload::Data { data } => 1_000 + data.len() as u64,
+                TransactionPayload::ValidatorSetChange { added, removed, .. } => {
+                    5_000 + (added.len() + removed.len()) as u64 * 100
+                }
             };
             let total_gas = base_gas + payload_gas;
             let total_fee = gas_price.checked_mul(total_gas).ok_or("Fee overflow")?;

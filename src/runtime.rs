@@ -636,6 +636,24 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                             ));
                         }
                     }
+                    crate::types::TransactionPayload::ValidatorSetChange {
+                        effective_height,
+                        added,
+                        removed,
+                    } => {
+                        if added.is_empty() && removed.is_empty() {
+                            return Err(RuntimeError::InvalidTransaction(
+                                "ValidatorSetChange must add or remove at least one key".to_string(),
+                            ));
+                        }
+                        let current_height = self.get_chain_state()?.latest_block_index;
+                        if *effective_height <= current_height {
+                            return Err(RuntimeError::InvalidTransaction(format!(
+                                "ValidatorSetChange effective_height {} must be > current height {}",
+                                effective_height, current_height
+                            )));
+                        }
+                    }
                 }
 
                 // 5. Nonce validation against chain state + mempool

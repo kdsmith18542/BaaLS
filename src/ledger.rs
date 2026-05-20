@@ -534,6 +534,54 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                         tx_status.error_message = Some(reason);
                     }
                 }
+                TransactionPayload::ValidatorSetChange {
+                    added,
+                    removed,
+                    effective_height,
+                } => {
+                    gas_used = gas_used.saturating_add(5_000);
+                    if gas_used > tx.gas_limit {
+                        let reason = "ValidatorSetChange exceeded gas limit".to_string();
+                        warn!("[LEDGER] {}", reason);
+                        tx_status.success = false;
+                        tx_status.error_message = Some(reason);
+                    } else {
+                        // Build the pending ValidatorSet from current + changes
+                        let current = self.storage.get_validator_set()?.unwrap_or_else(|| {
+                            crate::types::ValidatorSet {
+                                signers: vec![],
+                                quorum: 1,
+                                effective_height: 0,
+                            }
+                        });
+                        let mut new_signers = current.signers.clone();
+                        for pk in added {
+                            if !new_signers.contains(pk) {
+                                new_signers.push(*pk);
+                            }
+                        }
+                        new_signers.retain(|pk| !removed.contains(pk));
+                        let pending = crate::types::ValidatorSet {
+                            signers: new_signers,
+                            quorum: current.quorum,
+                            effective_height: *effective_height,
+                        };
+                        // Persist pending change via metadata — survives crash, read on next block
+                        let key = format!("pending_vs:{}", effective_height);
+                        let json = serde_json::to_string(&pending).map_err(|e| {
+                            LedgerError::StorageError(crate::storage::StorageError::IndexError(
+                                e.to_string(),
+                            ))
+                        })?;
+                        self.storage.set_storage_metadata(&key, &json)?;
+                        info!(
+                            "[LEDGER] Queued ValidatorSetChange: +{} -{}  effective at height {}",
+                            added.len(),
+                            removed.len(),
+                            effective_height
+                        );
+                    }
+                }
             }
 
             // Deduct gas fee — never charge more than the user's gas_limit
@@ -656,6 +704,19 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         // 6. Commit Batch
         self.storage.apply_batch(batch)?;
         info!("[LEDGER] Block {} applied atomically", block.index);
+
+        // 7. Apply any pending ValidatorSetChange that becomes effective at this height
+        let pending_key = format!("pending_vs:{}", block.index);
+        if let Some(json) = self.storage.get_storage_metadata(&pending_key)? {
+            if let Ok(vs) = serde_json::from_str::<crate::types::ValidatorSet>(&json) {
+                self.storage.put_validator_set(&vs)?;
+                info!(
+                    "[LEDGER] ValidatorSet activated at height {}: {} signers",
+                    block.index,
+                    vs.signers.len()
+                );
+            }
+        }
 
         Ok(())
     }
