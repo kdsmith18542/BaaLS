@@ -159,6 +159,10 @@ fn benchmark_storage_operations(c: &mut Criterion) {
             nonce: 0,
             state_root: [0u8; 32],
             metadata: None,
+            total_gas_used: 0,
+            signer: None,
+            signature: None,
+            quorum_signatures: vec![],
         };
 
         b.iter(|| {
@@ -392,6 +396,10 @@ fn benchmark_consensus_operations(c: &mut Criterion) {
             nonce: 0,
             state_root: [0u8; 32],
             metadata: None,
+            total_gas_used: 0,
+            signer: None,
+            signature: None,
+            quorum_signatures: vec![],
         };
 
         b.iter(|| {

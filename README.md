@@ -101,6 +101,9 @@ graph TD
     M --> Q[ChainState updated]
     Q --> B
     B --> R[Broadcast block to peers]
+    B --> V[WebSocket event bus]
+    V --> W[WS server ws://127.0.0.1:8081]
+    W --> X[Client subscriptions blocks transactions mempool]
 
     B --> S[Sync loop]
     S --> T[Poll received blocks]
@@ -116,6 +119,15 @@ Canonical API routes are under `/api/v1/*` with legacy aliases preserved.
 - Mutating endpoints require a short-lived JWT obtained from `POST /auth/token` or `POST /api/v1/auth/token`.
 - Mutating endpoints are restricted to loopback clients.
 
+## WebSocket API Notes
+
+- WebSocket server runs on `ws://127.0.0.1:8081` by default (discoverable via `GET /health` and `GET /api/v1/health` as `ws_port`).
+- Clients subscribe/unsubscribe using:
+  - `{"type":"subscribe","channel":"blocks"}`
+  - `{"type":"unsubscribe","channel":"blocks"}`
+- Supported channels: `blocks`, `transactions`, `mempool`.
+- Event frames use envelope: `{"type":"event","channel":"...","event":{...}}`.
+
 ## Storage Backends
 
 - `sled` (default): mature embedded KV engine.
@@ -125,6 +137,25 @@ Example:
 
 ```bash
 ./target/release/baalsd node start --storage-backend redb --data-dir ./data-redb
+```
+
+## SDK Integration Tests
+
+Go SDK:
+
+```bash
+cd sdk/go
+go test ./...
+BAALS_INTEGRATION=1 go test -run TestIntegration ./...
+```
+
+Node native SDK:
+
+```bash
+cd sdk/nodejs-native
+npm run build:debug
+npm run test:integration
+BAALS_NODE_INTEGRATION=1 npm run test:integration
 ```
 
 ## Repository Layout

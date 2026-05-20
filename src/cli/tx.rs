@@ -45,7 +45,7 @@ pub enum TxCommands {
         method: String,
         #[arg(short, long)]
         args: Option<String>,
-        #[arg(short, long, default_value = "0")]
+        #[arg(long, default_value = "0")]
         value: u64,
         #[arg(short, long, default_value = "1000000")]
         gas_limit: u64,
@@ -61,7 +61,10 @@ pub enum TxCommands {
         data_dir: PathBuf,
     },
     Inspect {
-        hash: String,
+        #[arg(value_name = "SIGNED_TX_FILE", required_unless_present = "hash")]
+        file: Option<PathBuf>,
+        #[arg(long, value_name = "HASH", conflicts_with = "file")]
+        hash: Option<String>,
         #[arg(short, long, default_value = "./data")]
         data_dir: PathBuf,
     },
@@ -102,6 +105,82 @@ fn prompt_password(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     Ok(input.trim().to_string())
+}
+
+fn parse_tx_hash(hash: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    let hash_bytes = hex::decode(hash)?;
+    if hash_bytes.len() != 32 {
+        return Err("Hash must be 32 bytes hex".into());
+    }
+    let mut hash_arr = [0u8; 32];
+    hash_arr.copy_from_slice(&hash_bytes);
+    Ok(hash_arr)
+}
+
+fn format_tx_inspect_output(
+    tx: &Transaction,
+    status: &str,
+    finality: Option<&crate::types::TransactionFinality>,
+) -> Result<(String, serde_json::Value), Box<dyn std::error::Error>> {
+    let payload = serde_json::to_value(&tx.payload)?;
+    let payload_type = match &tx.payload {
+        TransactionPayload::Transfer { .. } => "Transfer",
+        TransactionPayload::ContractDeploy { .. } => "ContractDeploy",
+        TransactionPayload::ContractCall { .. } => "ContractCall",
+        TransactionPayload::Data { .. } => "Data",
+        TransactionPayload::ValidatorSetChange { .. } => "ValidatorSetChange",
+    };
+    let recipient = match &tx.recipient {
+        Address::Wallet(pk) => hex::encode(pk.to_bytes()),
+        Address::Contract(cid) => hex::encode(cid.to_bytes()),
+    };
+    let confirmations = finality.map(|f| f.confirmations).unwrap_or(0);
+    let required = finality.map(|f| f.required).unwrap_or(0);
+    let block_text = finality
+        .and_then(|f| f.block_height)
+        .map(|h| format!(", block={}", h))
+        .unwrap_or_default();
+    let sig_ok = tx.verify_signature().unwrap_or(false);
+
+    let human = format!(
+        "Transaction: {}\n\
+         Status: {}{}\n\
+         Confirmations: {}/{}\n\
+         Type: {}\n\
+         Sender: {}\n\
+         Recipient: {}\n\
+         Nonce: {}\n\
+         Gas Limit: {}\n\
+         Gas Price: {}\n\
+         Chain ID: {}\n\
+         Timestamp: {}\n\
+         Signature Valid: {}\n\
+         Payload: {}",
+        hex::encode(tx.hash),
+        status,
+        block_text,
+        confirmations,
+        required,
+        payload_type,
+        hex::encode(tx.sender.to_bytes()),
+        recipient,
+        tx.nonce,
+        tx.gas_limit,
+        tx.gas_price,
+        tx.chain_id,
+        tx.timestamp,
+        sig_ok,
+        serde_json::to_string_pretty(&payload).unwrap_or_default(),
+    );
+
+    let json_val = serde_json::json!({
+        "hash": hex::encode(tx.hash),
+        "status": status,
+        "finality": finality,
+        "signature_valid": sig_ok,
+        "transaction": tx,
+    });
+    Ok((human, json_val))
 }
 
 pub fn handle_tx(
@@ -282,79 +361,43 @@ pub fn handle_tx(
                 serde_json::json!({"tx_hash": hex::encode(tx.hash)}),
             ))
         }
-        TxCommands::Inspect { hash, .. } => {
-            let url = format!("http://127.0.0.1:8080/api/v1/transactions/{}", hash);
-            let resp = ureq::get(&url).call();
-            match resp {
-                Ok(response) => {
-                    let text = response.into_string().unwrap_or_default();
-                    let val: serde_json::Value =
-                        serde_json::from_str(&text).unwrap_or(serde_json::json!({"raw": text}));
-                    let tx = &val["transaction"];
-                    let status = &val["status"];
-                    let status_text = match status.as_str() {
-                        Some(s) => s.to_string(),
-                        None => format!("{:?}", status),
-                    };
-                    let finality = &val["finality"];
-                    let confirmations = finality["confirmations"].as_u64().unwrap_or(0);
-                    let required = finality["required"].as_u64().unwrap_or(0);
-                    let block_height = finality["block_height"].as_u64();
-                    let block_text = block_height
-                        .map(|h| format!(", block={}", h))
-                        .unwrap_or_default();
-
-                    let hash_str = tx["hash"].as_str().unwrap_or(&hash);
-                    let sender = tx["sender"].as_str().unwrap_or("unknown");
-                    let nonce = tx["nonce"].as_u64().unwrap_or(0);
-                    let gas_limit = tx["gas_limit"].as_u64().unwrap_or(0);
-                    let gas_price = tx["gas_price"].as_u64().unwrap_or(0);
-                    let chain_id = tx["chain_id"].as_u64().unwrap_or(0);
-                    let payload = &tx["payload"];
-                    let payload_type = match payload {
-                        serde_json::Value::Object(m) => {
-                            m.keys().next().map(|k| k.clone()).unwrap_or_else(|| "unknown".to_string())
-                        }
-                        _ => "unknown".to_string(),
-                    };
-                    let signature = tx["signature"].as_str().unwrap_or("unknown");
-                    let timestamp = tx["timestamp"].as_u64().unwrap_or(0);
-
-                    let human = format!(
-                        "Transaction: {}\n\
-                         Status: {:?}{}\n\
-                         Confirmations: {}/{}\n\
-                         Type: {}\n\
-                         Sender: {}\n\
-                         Nonce: {}\n\
-                         Gas Limit: {}\n\
-                         Gas Price: {}\n\
-                         Chain ID: {}\n\
-                         Timestamp: {}\n\
-                         Payload: {}\n\
-                         Signature: {}",
-                        hash_str,
-                        status_text,
-                        block_text,
-                        confirmations,
-                        required,
-                        payload_type,
-                        sender,
-                        nonce,
-                        gas_limit,
-                        gas_price,
-                        chain_id,
-                        timestamp,
-                        serde_json::to_string_pretty(payload).unwrap_or_default(),
-                        signature,
-                    );
-                    Ok(text_or_json(json, &human, val))
-                }
-                Err(ureq::Error::Status(404, _)) => Err("Transaction not found".into()),
-                Err(_) => Err(
-                    "Could not reach node — start with `baals node start` first".into()
-                ),
+        TxCommands::Inspect { file, hash, data_dir } => {
+            if let Some(file) = file {
+                let data = std::fs::read(&file)?;
+                let tx: Transaction = if file.extension().map(|e| e == "json").unwrap_or(false) {
+                    serde_json::from_slice(&data)?
+                } else {
+                    bincode::deserialize(&data)?
+                };
+                let (human, val) = format_tx_inspect_output(&tx, "local_file", None)?;
+                return Ok(text_or_json(json, &human, val));
             }
+
+            let hash = hash.ok_or("Provide either <SIGNED_TX_FILE> or --hash <HASH>")?;
+            let hash_arr = parse_tx_hash(&hash)?;
+
+            let mut cfg = Config::default();
+            cfg.storage.backend = match backend {
+                "redb" => StorageBackend::Redb,
+                _ => StorageBackend::Sled,
+            };
+            let (runtime, _, _) = build_runtime(&data_dir, &cfg, &[], "0.0.0.0:9070", false)?;
+
+            let mut tx = runtime.get_transaction(&hash_arr)?;
+            if tx.is_none() {
+                tx = runtime
+                    .get_pending_transactions()?
+                    .into_iter()
+                    .find(|candidate| candidate.hash == hash_arr);
+            }
+            let tx = tx.ok_or("Transaction not found")?;
+            let status = runtime
+                .get_transaction_status(&hash_arr)?
+                .unwrap_or(crate::types::TransactionStatus::Pending);
+            let finality = runtime.get_transaction_finality(&hash_arr)?;
+            let status_text = format!("{:?}", status);
+            let (human, val) = format_tx_inspect_output(&tx, &status_text, finality.as_ref())?;
+            Ok(text_or_json(json, &human, val))
         }
         TxCommands::EstimateFee { file, gas_price } => {
             let data = std::fs::read_to_string(&file)?;

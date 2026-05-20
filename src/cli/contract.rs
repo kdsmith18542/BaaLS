@@ -1,6 +1,8 @@
 use clap::Subcommand;
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::text_or_json;
 
@@ -19,6 +21,8 @@ pub enum ContractCommands {
         method: String,
         #[arg(short, long)]
         args: Option<String>,
+        #[arg(short = 'g', long, default_value = "1000000")]
+        gas_limit: u64,
     },
     EstimateGas {
         #[arg(short, long)]
@@ -40,6 +44,31 @@ pub enum ContractCommands {
         #[arg(short, long)]
         wasm: PathBuf,
     },
+}
+
+fn parse_contract_args(
+    raw_args: Option<String>,
+) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+    let Some(raw) = raw_args else {
+        return Ok(Vec::new());
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let to_bytes = |value: serde_json::Value| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        match value {
+            serde_json::Value::String(s) => Ok(s.into_bytes()),
+            other => Ok(serde_json::to_vec(&other)?),
+        }
+    };
+
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(serde_json::Value::Array(items)) => items.into_iter().map(to_bytes).collect(),
+        Ok(value) => Ok(vec![to_bytes(value)?]),
+        Err(_) => Ok(vec![raw.into_bytes()]),
+    }
 }
 
 pub fn handle_contract(
@@ -101,31 +130,98 @@ pub fn handle_contract(
                 ))
             }
         }
-        ContractCommands::Simulate { wasm, method, args } => {
+        ContractCommands::Simulate { wasm, method, args, gas_limit } => {
             let wasm_data = std::fs::read(&wasm)?;
 
             if !wasm_data.starts_with(b"\0asm") {
                 return Err("Invalid WASM magic number".into());
             }
 
-            let code_size = wasm_data.len();
-            let args_str = args.as_deref().unwrap_or("{}");
+            let arg_bytes = parse_contract_args(args.clone())?;
+            let mut seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut seed);
+            let caller = crate::PublicKey::from(
+                ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key(),
+            );
 
-            Ok(text_or_json(
-                json,
-                &format!(
-                    "Contract simulation for: {}\nMethod: {}\nArgs: {}\nCode size: {} bytes\n(Note: Actual execution requires runtime context)",
-                    wasm.display(), method, args_str, code_size
-                ),
-                serde_json::json!({
-                    "wasm": wasm.to_string_lossy(),
-                    "method": method,
-                    "args": args,
-                    "code_size": code_size,
-                    "valid": true,
-                    "status": "validation_only"
-                }),
-            ))
+            let mut contract_hash = [0u8; 32];
+            contract_hash.copy_from_slice(&Sha256::digest(&wasm_data));
+            let contract_id = crate::ContractId::from_bytes(&contract_hash);
+
+            let temp_dir = tempfile::TempDir::new()?;
+            let storage = crate::SledStorage::new(temp_dir.path())?;
+            let engine = crate::BaaLSContractEngine::new(storage.clone())?;
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+
+            match engine.execute_wasm_contract(
+                &wasm_data,
+                &method,
+                &arg_bytes,
+                &caller,
+                &contract_id,
+                &storage,
+                true,
+                gas_limit,
+                0,
+                now,
+            ) {
+                Ok((output, gas_used, side_effects)) => {
+                    let logs = side_effects
+                        .events
+                        .iter()
+                        .map(|(topic, data)| {
+                            serde_json::json!({
+                                "topic_hex": hex::encode(topic),
+                                "data_hex": hex::encode(data),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    Ok(text_or_json(
+                        json,
+                        &format!(
+                            "Contract simulation succeeded\nWASM: {}\nMethod: {}\nArgs: {}\nGas used: {}\nOutput bytes: {}",
+                            wasm.display(),
+                            method,
+                            arg_bytes.len(),
+                            gas_used,
+                            output.len()
+                        ),
+                        serde_json::json!({
+                            "wasm": wasm.to_string_lossy(),
+                            "method": method,
+                            "args": args,
+                            "code_size": wasm_data.len(),
+                            "status": "success",
+                            "gas_limit": gas_limit,
+                            "gas_used": gas_used,
+                            "output_hex": hex::encode(output),
+                            "logs": logs,
+                            "storage_writes": side_effects.storage_updates.writes.len(),
+                            "storage_deletes": side_effects.storage_updates.deletes.len(),
+                            "state_mutated": false
+                        }),
+                    ))
+                }
+                Err(e) => Ok(text_or_json(
+                    json,
+                    &format!(
+                        "Contract simulation failed\nWASM: {}\nMethod: {}\nError: {}",
+                        wasm.display(),
+                        method,
+                        e
+                    ),
+                    serde_json::json!({
+                        "wasm": wasm.to_string_lossy(),
+                        "method": method,
+                        "args": args,
+                        "code_size": wasm_data.len(),
+                        "status": "error",
+                        "gas_limit": gas_limit,
+                        "error": e.to_string(),
+                        "state_mutated": false
+                    }),
+                )),
+            }
         }
         ContractCommands::EstimateGas { contract_id, method, args, .. } => {
             let body = serde_json::json!({
@@ -136,9 +232,13 @@ pub fn handle_contract(
             .to_string();
             let out = std::process::Command::new("curl")
                 .args([
-                    "-s", "-X", "POST",
-                    "-H", "Content-Type: application/json",
-                    "-d", &body,
+                    "-s",
+                    "-X",
+                    "POST",
+                    "-H",
+                    "Content-Type: application/json",
+                    "-d",
+                    &body,
                     "http://127.0.0.1:8080/api/v1/contracts/estimate-gas",
                 ])
                 .output();
@@ -149,9 +249,9 @@ pub fn handle_contract(
                         serde_json::from_str(&text).unwrap_or(serde_json::json!({"raw": text}));
                     Ok(text_or_json(json, &format!("Gas estimate: {}", val), val))
                 }
-                Ok(_) | Err(_) => Err(
-                    "Could not reach node — start with `baals node start` first".into()
-                ),
+                Ok(_) | Err(_) => {
+                    Err("Could not reach node — start with `baals node start` first".into())
+                }
             }
         }
         ContractCommands::Abi { contract_id, .. } => {
@@ -160,7 +260,8 @@ pub fn handle_contract(
             match resp {
                 Ok(response) => {
                     let text = response.into_string().unwrap_or_default();
-                    let val: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({"raw": text}));
+                    let val: serde_json::Value =
+                        serde_json::from_str(&text).unwrap_or(serde_json::json!({"raw": text}));
                     Ok(text_or_json(json, &format!("ABI: {}", val), val))
                 }
                 Err(_) => Err("Could not reach node — start with `baals node start` first".into()),

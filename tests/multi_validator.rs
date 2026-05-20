@@ -241,27 +241,6 @@ fn test_round_robin_violation_rejected() {
     consensus.add_authorized_signer(pk2);
     consensus.add_authorized_signer(pk3);
 
-    let chain_state = baals::types::ChainState {
-        latest_block_hash: [0u8; 32],
-        latest_block_index: 0,
-        accounts_root_hash: [0u8; 32],
-        total_supply: 0,
-    };
-    let prev = Block {
-        index: 0, // block 1 is next, so pk2 is expected
-        timestamp: 1_700_000_000,
-        prev_hash: [0u8; 32],
-        state_root: [0u8; 32],
-        hash: [0u8; 32],
-        nonce: 0,
-        transactions: vec![],
-        metadata: None,
-        total_gas_used: 0,
-        signer: None,
-        signature: None,
-        quorum_signatures: vec![],
-    };
-
     // generate_block will pick pk2 (index 1) for round-robin, but pk1 is the signing key
     // This means block generation will fail or produce a block signed by wrong key
     // Instead, manually craft a block signed by pk1 for slot 1 (should be pk2)
@@ -340,4 +319,3 @@ fn test_round_robin_clear_violation_rejected() {
         err
     );
 }
-

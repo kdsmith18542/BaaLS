@@ -1,16 +1,42 @@
 use clap::Subcommand;
 use rand::RngCore;
+use sha2::Digest;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
     config::{Config, StorageBackend},
-    contracts::ContractEngine,
-    AnyStorage, BaaLSContractEngine, MetricsCollector, PublicKey, RedbStorage,
-    SledStorage, Storage,
+    AnyStorage, BaaLSContractEngine, MetricsCollector, PublicKey, RedbStorage, SledStorage,
+    Storage,
 };
 
 use crate::cli::node::build_runtime;
 use crate::cli::{parse_pubkey, text_or_json};
+
+fn parse_simulation_args(
+    raw_args: Option<String>,
+) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+    let Some(raw) = raw_args else {
+        return Ok(Vec::new());
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let to_bytes = |value: serde_json::Value| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        match value {
+            serde_json::Value::String(s) => Ok(s.into_bytes()),
+            other => Ok(serde_json::to_vec(&other)?),
+        }
+    };
+
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(serde_json::Value::Array(items)) => items.into_iter().map(to_bytes).collect(),
+        Ok(value) => Ok(vec![to_bytes(value)?]),
+        Err(_) => Ok(vec![raw.into_bytes()]),
+    }
+}
 
 #[derive(Subcommand)]
 pub enum DevCommands {
@@ -101,10 +127,12 @@ pub fn handle_dev(
             }
             Ok(text_or_json(json, &keys.join("\n"), serde_json::json!({"keys": keys})))
         }
-        DevCommands::SimulateContract { wasm, method, args, sender, data_dir: _ } => {
+        DevCommands::SimulateContract { wasm, method, args, sender, data_dir } => {
             let wasm_bytes = std::fs::read(&wasm)?;
-            let dir = tempfile::TempDir::new()?;
-            let storage = SledStorage::new(dir.path())?;
+            let storage: AnyStorage = match backend {
+                "redb" => AnyStorage::Redb(RedbStorage::new(&data_dir).map_err(|e| e.to_string())?),
+                _ => AnyStorage::Sled(SledStorage::new(&data_dir)?),
+            };
             let engine = BaaLSContractEngine::new(storage.clone())?;
 
             let deployer = match sender {
@@ -119,44 +147,76 @@ pub fn handle_dev(
                 }
             };
 
-            let args_vec: Vec<Vec<u8>> = args.map(|a| vec![a.into_bytes()]).unwrap_or_default();
+            let args_vec = parse_simulation_args(args.clone())?;
+            let mut contract_hash = [0u8; 32];
+            contract_hash.copy_from_slice(&sha2::Sha256::digest(&wasm_bytes));
+            let contract_id = crate::ContractId::from_bytes(&contract_hash);
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
 
-            let deploy_result = engine.deploy_contract(
-                &deployer,
-                0,
+            storage.put_contract_code(&contract_id, &wasm_bytes)?;
+
+            match engine.execute_wasm_contract(
                 &wasm_bytes,
-                None,
-                &storage,
-                1_000_000,
-            )?;
-
-            storage.put_contract_code(&deploy_result.contract_id, &wasm_bytes)?;
-
-            let estimate = engine.estimate_gas_usage(
-                &deploy_result.contract_id,
                 &method,
                 &args_vec,
+                &deployer,
+                &contract_id,
                 &storage,
-            )?;
-
-            Ok(text_or_json(
-                json,
-                &format!(
-                    "Contract: {}\nMethod: {}\nGas estimate: {}\nConfidence: {:.0}%\nExecution time: {:?}",
-                    hex::encode(deploy_result.contract_id.to_bytes()),
-                    method,
-                    estimate.estimated_gas,
-                    estimate.confidence_level * 100.0,
-                    estimate.execution_time_estimate,
-                ),
-                serde_json::json!({
-                    "contract_id": hex::encode(deploy_result.contract_id.to_bytes()),
-                    "method": method,
-                    "estimated_gas": estimate.estimated_gas,
-                    "confidence_level": estimate.confidence_level,
-                    "execution_time_us": estimate.execution_time_estimate.as_micros(),
-                }),
-            ))
+                true,
+                1_000_000,
+                0,
+                now,
+            ) {
+                Ok((output, gas_used, side_effects)) => {
+                    let logs = side_effects
+                        .events
+                        .iter()
+                        .map(|(topic, data)| {
+                            serde_json::json!({
+                                "topic_hex": hex::encode(topic),
+                                "data_hex": hex::encode(data),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    Ok(text_or_json(
+                        json,
+                        &format!(
+                            "Contract simulation succeeded\nContract: {}\nMethod: {}\nGas used: {}\nOutput bytes: {}",
+                            hex::encode(contract_id.to_bytes()),
+                            method,
+                            gas_used,
+                            output.len()
+                        ),
+                        serde_json::json!({
+                            "contract_id": hex::encode(contract_id.to_bytes()),
+                            "method": method,
+                            "args": args,
+                            "gas_used": gas_used,
+                            "output_hex": hex::encode(output),
+                            "logs": logs,
+                            "storage_writes": side_effects.storage_updates.writes.len(),
+                            "storage_deletes": side_effects.storage_updates.deletes.len(),
+                            "state_mutated": false
+                        }),
+                    ))
+                }
+                Err(e) => Ok(text_or_json(
+                    json,
+                    &format!(
+                        "Contract simulation failed\nContract: {}\nMethod: {}\nError: {}",
+                        hex::encode(contract_id.to_bytes()),
+                        method,
+                        e
+                    ),
+                    serde_json::json!({
+                        "contract_id": hex::encode(contract_id.to_bytes()),
+                        "method": method,
+                        "args": args,
+                        "error": e.to_string(),
+                        "state_mutated": false
+                    }),
+                )),
+            }
         }
         DevCommands::ValidateTx { file } => {
             let data = std::fs::read(&file)?;

@@ -12,7 +12,8 @@
   },
   "scripts": {
     "build": "napi build --release",
-    "build:debug": "napi build"
+    "build:debug": "napi build",
+    "test:integration": "node --test __tests__/integration.test.js"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0"

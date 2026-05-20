@@ -718,15 +718,27 @@ func findBinary() (string, error) {
 	if p, err := exec.LookPath(defaultBinName); err == nil {
 		return p, nil
 	}
+	if runtime.GOOS == "windows" {
+		if p, err := exec.LookPath(defaultBinName + ".exe"); err == nil {
+			return p, nil
+		}
+	}
 
 	// Resolve relative to the baals.go source file.
 	_, file, _, ok := runtime.Caller(0)
 	if ok {
 		base := filepath.Dir(filepath.Dir(file)) // sdk/go → sdk
-		for _, rel := range []string{
+		candidates := []string{
 			"../target/release/baalsd",
 			"../target/debug/baalsd",
-		} {
+		}
+		if runtime.GOOS == "windows" {
+			candidates = append(candidates,
+				"../target/release/baalsd.exe",
+				"../target/debug/baalsd.exe",
+			)
+		}
+		for _, rel := range candidates {
 			candidate := filepath.Join(base, rel)
 			if _, err := os.Stat(candidate); err == nil {
 				abs, err := filepath.Abs(candidate)

@@ -547,10 +547,14 @@ fn spawn_health_server(
                         if is_health {
                             match runtime.get_health_status() {
                                 Ok(health) => {
-                                    let mut body = serde_json::to_value(&health)
-                                        .unwrap_or_else(|_| serde_json::json!({"status":"unhealthy"}));
+                                    let mut body = serde_json::to_value(&health).unwrap_or_else(
+                                        |_| serde_json::json!({"status":"unhealthy"}),
+                                    );
                                     if let Some(obj) = body.as_object_mut() {
-                                        obj.insert("ws_port".to_string(), serde_json::json!(ws_port));
+                                        obj.insert(
+                                            "ws_port".to_string(),
+                                            serde_json::json!(ws_port),
+                                        );
                                     }
                                     respond_json(request, 200, body.to_string());
                                 }
@@ -704,11 +708,10 @@ fn spawn_health_server(
                         && (request_url_str.starts_with("/proof/account/")
                             || request_url_str.starts_with("/api/v1/proofs/account/"))
                     {
-                        let addr_hex = if request_url_str.starts_with("/api/v1/proofs/account/") {
-                            &request_url_str["/api/v1/proofs/account/".len()..]
-                        } else {
-                            &request_url_str["/proof/account/".len()..]
-                        };
+                        let addr_hex = request_url_str
+                            .strip_prefix("/api/v1/proofs/account/")
+                            .or_else(|| request_url_str.strip_prefix("/proof/account/"))
+                            .unwrap_or_default();
                         let response_json =
                             (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
                                 let pk = parse_pubkey(addr_hex)?;
@@ -744,9 +747,13 @@ fn spawn_health_server(
                         };
                         respond_json(request, status, body);
                     } else if request.method() == &Method::Get
-                        && request_url_str.starts_with("/proof/contract/")
+                        && (request_url_str.starts_with("/proof/contract/")
+                            || request_url_str.starts_with("/api/v1/proofs/contract/"))
                     {
-                        let path = &request_url_str["/proof/contract/".len()..];
+                        let path = request_url_str
+                            .strip_prefix("/api/v1/proofs/contract/")
+                            .or_else(|| request_url_str.strip_prefix("/proof/contract/"))
+                            .unwrap_or_default();
                         let parts: Vec<&str> = path.split("/storage/").collect();
                         if parts.len() == 2 {
                             let cid_hex = parts[0];
@@ -1003,7 +1010,8 @@ fn spawn_health_server(
                                             .collect()
                                     })
                                     .unwrap_or_default();
-                                let estimate = runtime.estimate_contract_gas(&cid, method, &args)?;
+                                let estimate =
+                                    runtime.estimate_contract_gas(&cid, method, &args)?;
                                 Ok(serde_json::json!({
                                     "gas_used": estimate.estimated_gas,
                                     "gas_limit_recommended": estimate.estimated_gas.saturating_mul(12) / 10,
@@ -1023,7 +1031,8 @@ fn spawn_health_server(
                     {
                         let prefix = "/api/v1/contracts/";
                         let suffix = "/state";
-                        let cid_hex = &request_url_str[prefix.len()..request_url_str.len() - suffix.len()];
+                        let cid_hex =
+                            &request_url_str[prefix.len()..request_url_str.len() - suffix.len()];
                         let response_json =
                             (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
                                 let cid_bytes = hex::decode(cid_hex)
@@ -1034,26 +1043,33 @@ fn spawn_health_server(
                                 let mut cid_arr = [0u8; 32];
                                 cid_arr.copy_from_slice(&cid_bytes);
                                 let contract_id = crate::ContractId::from_bytes(&cid_arr);
-                                let code = runtime.storage().get_contract_code(&contract_id)?
+                                let code = runtime
+                                    .storage()
+                                    .get_contract_code(&contract_id)?
                                     .ok_or("Contract not found")?;
                                 if code.is_empty() {
                                     return Err("Contract not found".into());
                                 }
-                                let all_storage = runtime.storage()
-                                    .contract_storage_read_all(&contract_id)?;
-                                let kv: Vec<serde_json::Value> = all_storage.iter().map(|(k, v)| {
-                                    serde_json::json!({
-                                        "key": hex::encode(k),
-                                        "value": hex::encode(v),
+                                let all_storage =
+                                    runtime.storage().contract_storage_read_all(&contract_id)?;
+                                let kv: Vec<serde_json::Value> = all_storage
+                                    .iter()
+                                    .map(|(k, v)| {
+                                        serde_json::json!({
+                                            "key": hex::encode(k),
+                                            "value": hex::encode(v),
+                                        })
                                     })
-                                }).collect();
+                                    .collect();
                                 Ok(serde_json::json!({"storage": kv}))
                             })();
                         let (status, body) = match response_json {
                             Ok(json) => (200, json.to_string()),
-                            Err(e) => {
-                                (404, serde_json::json!({"error": "not found", "message": e.to_string()}).to_string())
-                            }
+                            Err(e) => (
+                                404,
+                                serde_json::json!({"error": "not found", "message": e.to_string()})
+                                    .to_string(),
+                            ),
                         };
                         respond_json(request, status, body);
                     } else if request.method() == &Method::Get
@@ -1062,7 +1078,8 @@ fn spawn_health_server(
                     {
                         let prefix = "/api/v1/contracts/";
                         let suffix = "/abi";
-                        let cid_hex = &request_url_str[prefix.len()..request_url_str.len() - suffix.len()];
+                        let cid_hex =
+                            &request_url_str[prefix.len()..request_url_str.len() - suffix.len()];
                         let response_json =
                             (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
                                 let cid_bytes = hex::decode(cid_hex)
@@ -1073,7 +1090,9 @@ fn spawn_health_server(
                                 let mut cid_arr = [0u8; 32];
                                 cid_arr.copy_from_slice(&cid_bytes);
                                 let contract_id = crate::ContractId::from_bytes(&cid_arr);
-                                let abi = runtime.storage().get_contract_abi(&contract_id)?
+                                let abi = runtime
+                                    .storage()
+                                    .get_contract_abi(&contract_id)?
                                     .ok_or("ABI not found")?;
                                 let abi_str = String::from_utf8(abi)
                                     .map_err(|_| "ABI is not valid UTF-8".to_string())?;
@@ -1091,9 +1110,10 @@ fn spawn_health_server(
                     } else if request.method() == &Method::Get
                         && request_url_str.starts_with("/api/v1/transactions/address/")
                     {
-                        let path_and_query = &request_url_str["/api/v1/transactions/address/".len()..];
+                        let path_and_query =
+                            &request_url_str["/api/v1/transactions/address/".len()..];
                         let (addr_hex, query) = if let Some(idx) = path_and_query.find('?') {
-                            (&path_and_query[..idx], &path_and_query[idx+1..])
+                            (&path_and_query[..idx], &path_and_query[idx + 1..])
                         } else {
                             (path_and_query, "")
                         };
@@ -1111,14 +1131,17 @@ fn spawn_health_server(
                         let response_json =
                             (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
                                 let pk = parse_pubkey(addr_hex)?;
-                                let txs = runtime.storage().get_transactions_by_address(&pk, limit)?;
+                                let txs =
+                                    runtime.storage().get_transactions_by_address(&pk, limit)?;
                                 Ok(serde_json::json!({"transactions": txs}))
                             })();
                         let (status, body) = match response_json {
                             Ok(json) => (200, json.to_string()),
-                            Err(e) => {
-                                (404, serde_json::json!({"error": "not found", "message": e.to_string()}).to_string())
-                            }
+                            Err(e) => (
+                                404,
+                                serde_json::json!({"error": "not found", "message": e.to_string()})
+                                    .to_string(),
+                            ),
                         };
                         respond_json(request, status, body);
                     } else if request.method() == &Method::Get
@@ -1146,7 +1169,9 @@ fn spawn_health_server(
                                 }
                                 let mut hash_arr = [0u8; 32];
                                 hash_arr.copy_from_slice(&hash_bytes);
-                                let receipt = runtime.storage().get_receipt(&hash_arr)?
+                                let receipt = runtime
+                                    .storage()
+                                    .get_receipt(&hash_arr)?
                                     .ok_or("Receipt not found")?;
                                 Ok(serde_json::to_value(&receipt)?)
                             })();
@@ -1412,25 +1437,22 @@ gas_used_per_block {}\n",
                                 .map(|a| a.to_string())
                                 .ok_or_else(|| serde_json::from_str::<()>("null").unwrap_err())
                         }) {
-                            Ok(addr) => {
-                                match runtime.add_peer(&addr) {
-                                    Ok(_) => respond_json(
-                                        request,
-                                        200,
-                                        serde_json::json!({"added": addr}).to_string(),
-                                    ),
-                                    Err(e) => respond_json(
-                                        request,
-                                        500,
-                                        serde_json::json!({"error": e.to_string()}).to_string(),
-                                    ),
-                                }
-                            }
+                            Ok(addr) => match runtime.add_peer(&addr) {
+                                Ok(_) => respond_json(
+                                    request,
+                                    200,
+                                    serde_json::json!({"added": addr}).to_string(),
+                                ),
+                                Err(e) => respond_json(
+                                    request,
+                                    500,
+                                    serde_json::json!({"error": e.to_string()}).to_string(),
+                                ),
+                            },
                             Err(_) => respond_json(
                                 request,
                                 400,
-                                serde_json::json!({"error": "missing 'address' field"})
-                                    .to_string(),
+                                serde_json::json!({"error": "missing 'address' field"}).to_string(),
                             ),
                         }
                     } else if request.method() == &Method::Post

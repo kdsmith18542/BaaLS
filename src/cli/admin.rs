@@ -47,13 +47,14 @@ pub fn handle_admin(
 ) -> Result<String, Box<dyn std::error::Error>> {
     match action {
         AdminCommands::RotateConsensusKey { data_dir, new_key_path } => {
-            let new_key_path = new_key_path.unwrap_or_else(|| data_dir.join("consensus_rotated.key"));
+            let new_key_path =
+                new_key_path.unwrap_or_else(|| data_dir.join("consensus_rotated.key"));
             let mut sk_bytes = [0u8; 32];
             rand::rng().fill_bytes(&mut sk_bytes);
             let new_key = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
             let new_pk = PublicKey::from(new_key.verifying_key());
             std::fs::create_dir_all(new_key_path.parent().unwrap_or(&data_dir))?;
-            std::fs::write(&new_key_path, &sk_bytes)?;
+            std::fs::write(&new_key_path, sk_bytes)?;
             Ok(text_or_json(
                 json,
                 &format!(

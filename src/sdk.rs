@@ -48,9 +48,10 @@ impl BaaLSSdk {
     ) -> Result<Self, SdkError> {
         let backend = backend.unwrap_or_default();
         let storage: AnyStorage = match backend {
-            StorageBackend::Redb => {
-                AnyStorage::Redb(RedbStorage::new(&data_dir).map_err(|e| SdkError::InvalidConfiguration(e.to_string()))?)
-            }
+            StorageBackend::Redb => AnyStorage::Redb(
+                RedbStorage::new(&data_dir)
+                    .map_err(|e| SdkError::InvalidConfiguration(e.to_string()))?,
+            ),
             _ => AnyStorage::Sled(SledStorage::new(&data_dir)?),
         };
         let mut secret = [0u8; 32];
@@ -83,9 +84,10 @@ impl BaaLSSdk {
     ) -> Result<Self, SdkError> {
         let backend = backend.unwrap_or_default();
         let storage: AnyStorage = match backend {
-            StorageBackend::Redb => {
-                AnyStorage::Redb(RedbStorage::new(&data_dir).map_err(|e| SdkError::InvalidConfiguration(e.to_string()))?)
-            }
+            StorageBackend::Redb => AnyStorage::Redb(
+                RedbStorage::new(&data_dir)
+                    .map_err(|e| SdkError::InvalidConfiguration(e.to_string()))?,
+            ),
             _ => AnyStorage::Sled(SledStorage::new(&data_dir)?),
         };
         let mut secret = [0u8; 32];
@@ -324,7 +326,7 @@ impl BaaLSSdk {
 
     /// Trigger sync now
     pub fn trigger_sync(&self) -> Result<(), SdkError> {
-        self.runtime.trigger_sync().map_err(|e| SdkError::RuntimeError(e))
+        self.runtime.trigger_sync().map_err(SdkError::RuntimeError)
     }
 }
 

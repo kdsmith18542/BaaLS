@@ -318,7 +318,10 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         Ok(SigningKey::from_bytes(&secret_key_bytes))
     }
 
-    pub fn set_event_sender(&self, sender: tokio::sync::broadcast::Sender<crate::ws_server::ChainEvent>) {
+    pub fn set_event_sender(
+        &self,
+        sender: tokio::sync::broadcast::Sender<crate::ws_server::ChainEvent>,
+    ) {
         *self.event_sender.lock().unwrap() = Some(sender);
     }
 
@@ -660,7 +663,8 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                     } => {
                         if added.is_empty() && removed.is_empty() {
                             return Err(RuntimeError::InvalidTransaction(
-                                "ValidatorSetChange must add or remove at least one key".to_string(),
+                                "ValidatorSetChange must add or remove at least one key"
+                                    .to_string(),
                             ));
                         }
                         let current_height = self.get_chain_state()?.latest_block_index;
@@ -735,11 +739,16 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         let mut mempool = self.mempool.lock().unwrap();
         mempool.insert(transaction)?;
+        let mempool_size = mempool.len();
         // Persist to storage for crash recovery
         if let Err(e) = self.storage.put_pending_transaction(mempool.get(&hash).unwrap()) {
             warn!("Failed to persist pending tx {}: {}", crate::types::format_hex(&hash), e);
         }
         self.metrics.record_mempool_operation();
+        self.broadcast_event(crate::ws_server::ChainEvent::Mempool {
+            tx_hash: crate::types::format_hex(&hash),
+            mempool_size,
+        });
         info!("Transaction submitted: {}", crate::types::format_hex(&hash));
         Ok(())
     }
@@ -862,6 +871,13 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             timestamp: new_block.timestamp,
             tx_count: new_block.transactions.len(),
         });
+        for tx in &new_block.transactions {
+            self.broadcast_event(crate::ws_server::ChainEvent::Transaction {
+                tx_hash: crate::types::format_hex(&tx.hash),
+                status: "included".to_string(),
+                block_hash: crate::types::format_hex(&new_block.hash),
+            });
+        }
 
         // Reload chain state from storage after block application
         if let Ok(Some(new_state)) = self.storage.get_chain_state() {
@@ -1253,7 +1269,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                     RuntimeError::InvalidTransaction(format!(
                         "Rollback log missing for block {} (height {}). \
                          Blocks produced before rollback log support cannot be rolled back.",
-                        hex::encode(&block.hash),
+                        hex::encode(block.hash),
                         height
                     ))
                 })?;
@@ -1324,6 +1340,13 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                 timestamp: block.timestamp,
                 tx_count: block.transactions.len(),
             });
+            for tx in &block.transactions {
+                self.broadcast_event(crate::ws_server::ChainEvent::Transaction {
+                    tx_hash: crate::types::format_hex(&tx.hash),
+                    status: "included".to_string(),
+                    block_hash: crate::types::format_hex(&block.hash),
+                });
+            }
 
             if let Ok(Some(new_state)) = self.storage.get_chain_state() {
                 expected_prev_hash = new_state.latest_block_hash;
@@ -1447,6 +1470,13 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                         timestamp: block.timestamp,
                         tx_count: block.transactions.len(),
                     });
+                    for tx in &block.transactions {
+                        self.broadcast_event(crate::ws_server::ChainEvent::Transaction {
+                            tx_hash: crate::types::format_hex(&tx.hash),
+                            status: "included".to_string(),
+                            block_hash: crate::types::format_hex(&block.hash),
+                        });
+                    }
                     info!(
                         "[SYNC] Applied received block #{} ({} txns)",
                         block.index,

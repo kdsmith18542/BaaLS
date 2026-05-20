@@ -51,6 +51,7 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 pub type StorageResult<T> = Result<T, StorageError>;
 pub type KVList = Vec<(Vec<u8>, Vec<u8>)>;
+type SnapshotTreeDump = Vec<(String, KVList)>;
 
 pub trait Storage: Send + Sync {
     fn put_block(&self, block: &Block) -> Result<(), StorageError>;
@@ -1782,8 +1783,8 @@ impl Storage for SledStorage {
             .map_err(|e| StorageError::IndexError(e.to_string()))?;
 
         // Dump essential trees: accounts, chain_state, contract_code, contract_storage
-        let mut snapshot: Vec<(String, Vec<(Vec<u8>, Vec<u8>)>)> = Vec::new();
-        let dump_tree = |tree: &sled::Tree| -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let mut snapshot: SnapshotTreeDump = Vec::new();
+        let dump_tree = |tree: &sled::Tree| -> Result<KVList, StorageError> {
             tree.iter()
                 .map(|r| r.map(|(k, v)| (k.to_vec(), v.to_vec())).map_err(StorageError::Sled))
                 .collect()
@@ -1831,7 +1832,7 @@ impl Storage for SledStorage {
         let snap_path = snapshots_dir.join(format!("{}.snap", height));
         let snap_bytes = std::fs::read(&snap_path)
             .map_err(|e| StorageError::IndexError(format!("Snapshot file not found: {}", e)))?;
-        let snapshot: Vec<(String, Vec<(Vec<u8>, Vec<u8>)>)> = bincode::deserialize(&snap_bytes)?;
+        let snapshot: SnapshotTreeDump = bincode::deserialize(&snap_bytes)?;
 
         for (tree_name, kvs) in snapshot {
             let tree = match tree_name.as_str() {
