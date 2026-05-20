@@ -203,6 +203,41 @@ pub trait Storage: Send + Sync {
         self.set_storage_metadata(&key, "")
     }
 
+    // Snapshot support — point-in-time copy of essential state for deep-reorg recovery.
+    // Default impls return "not supported"; SledStorage overrides with a real implementation.
+    fn take_snapshot(
+        &self,
+        height: u64,
+        snapshots_dir: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        let _ = (height, snapshots_dir);
+        Err(StorageError::IndexError("snapshots not supported by this storage backend".to_string()))
+    }
+
+    fn restore_from_snapshot(
+        &self,
+        height: u64,
+        snapshots_dir: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        let _ = (height, snapshots_dir);
+        Err(StorageError::IndexError("snapshots not supported by this storage backend".to_string()))
+    }
+
+    fn list_snapshots(
+        &self,
+        snapshots_dir: &std::path::Path,
+    ) -> Result<Vec<u64>, StorageError> {
+        let manifest_path = snapshots_dir.join("manifest.json");
+        if !manifest_path.exists() {
+            return Ok(Vec::new());
+        }
+        let data = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+        let heights: Vec<u64> = serde_json::from_str(&data)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+        Ok(heights)
+    }
+
     // New: Performance and maintenance methods
     fn compact(&self) -> Result<(), StorageError>;
     fn get_storage_stats(&self) -> Result<StorageStats, StorageError>;
@@ -1483,6 +1518,92 @@ impl Storage for SledStorage {
 
         self.db.flush()?;
         log::info!("Storage restore completed from {:?}", path);
+        Ok(())
+    }
+
+    fn take_snapshot(
+        &self,
+        height: u64,
+        snapshots_dir: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        const MAX_SNAPSHOTS: usize = 3;
+
+        std::fs::create_dir_all(snapshots_dir)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+
+        // Dump essential trees: accounts, chain_state, contract_code, contract_storage
+        let mut snapshot: Vec<(String, Vec<(Vec<u8>, Vec<u8>)>)> = Vec::new();
+        let dump_tree = |tree: &sled::Tree| -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+            tree.iter()
+                .map(|r| r.map(|(k, v)| (k.to_vec(), v.to_vec())).map_err(StorageError::Sled))
+                .collect()
+        };
+        snapshot.push(("accounts".to_string(), dump_tree(&self.accounts_tree)?));
+        snapshot.push(("chain_state".to_string(), dump_tree(&self.chain_state_tree)?));
+        snapshot.push(("contract_code".to_string(), dump_tree(&self.contract_code_tree)?));
+        snapshot.push(("contract_storage".to_string(), dump_tree(&self.contract_storage_tree)?));
+
+        let snap_bytes = bincode::serialize(&snapshot)?;
+        let snap_path = snapshots_dir.join(format!("{}.snap", height));
+        std::fs::write(&snap_path, snap_bytes)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+
+        // Update manifest, pruning old snapshots beyond MAX_SNAPSHOTS
+        let manifest_path = snapshots_dir.join("manifest.json");
+        let mut heights: Vec<u64> = if manifest_path.exists() {
+            let data = std::fs::read_to_string(&manifest_path)
+                .map_err(|e| StorageError::IndexError(e.to_string()))?;
+            serde_json::from_str(&data).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        heights.retain(|&h| h != height);
+        heights.push(height);
+        heights.sort_unstable();
+        while heights.len() > MAX_SNAPSHOTS {
+            let oldest = heights.remove(0);
+            let _ = std::fs::remove_file(snapshots_dir.join(format!("{}.snap", oldest)));
+        }
+        let manifest_json = serde_json::to_string(&heights)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+        std::fs::write(&manifest_path, manifest_json)
+            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+
+        log::info!("[SNAPSHOT] Snapshot saved at height {} → {:?}", height, snap_path);
+        Ok(())
+    }
+
+    fn restore_from_snapshot(
+        &self,
+        height: u64,
+        snapshots_dir: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        let snap_path = snapshots_dir.join(format!("{}.snap", height));
+        let snap_bytes = std::fs::read(&snap_path)
+            .map_err(|e| StorageError::IndexError(format!("Snapshot file not found: {}", e)))?;
+        let snapshot: Vec<(String, Vec<(Vec<u8>, Vec<u8>)>)> = bincode::deserialize(&snap_bytes)?;
+
+        for (tree_name, kvs) in snapshot {
+            let tree = match tree_name.as_str() {
+                "accounts" => &self.accounts_tree,
+                "chain_state" => &self.chain_state_tree,
+                "contract_code" => &self.contract_code_tree,
+                "contract_storage" => &self.contract_storage_tree,
+                _ => continue,
+            };
+            // Clear tree then re-insert all keys from snapshot
+            let existing_keys: Vec<sled::IVec> =
+                tree.iter().filter_map(|r| r.ok()).map(|(k, _)| k).collect();
+            for k in existing_keys {
+                tree.remove(k)?;
+            }
+            for (k, v) in kvs {
+                tree.insert(k, v)?;
+            }
+            tree.flush()?;
+        }
+
+        log::info!("[SNAPSHOT] Snapshot at height {} restored from {:?}", height, snap_path);
         Ok(())
     }
 

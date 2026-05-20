@@ -61,6 +61,20 @@ pub enum DbCommands {
         #[arg(short, long)]
         input: PathBuf,
     },
+    Snapshot {
+        #[arg(short, long, default_value = "./data")]
+        data_dir: PathBuf,
+    },
+    RestoreSnapshot {
+        #[arg(short, long, default_value = "./data")]
+        data_dir: PathBuf,
+        #[arg(short, long)]
+        height: u64,
+    },
+    ListSnapshots {
+        #[arg(short, long, default_value = "./data")]
+        data_dir: PathBuf,
+    },
 }
 
 pub fn handle_db(
@@ -80,6 +94,9 @@ pub fn handle_db(
         DbCommands::RebuildIndexes { data_dir } => data_dir.as_deref().map(PathBuf::from),
         DbCommands::Export { data_dir, .. } => Some(data_dir.clone()),
         DbCommands::Import { data_dir, .. } => Some(data_dir.clone()),
+        DbCommands::Snapshot { data_dir } => Some(data_dir.clone()),
+        DbCommands::RestoreSnapshot { data_dir, .. } => Some(data_dir.clone()),
+        DbCommands::ListSnapshots { data_dir } => Some(data_dir.clone()),
     }
     .unwrap_or(default_dir);
 
@@ -377,6 +394,51 @@ pub fn handle_db(
                 json,
                 &format!("Imported {} accounts from {:?}", imported, input),
                 serde_json::json!({"imported": imported}),
+            ))
+        }
+        DbCommands::Snapshot { data_dir } => {
+            let storage: AnyStorage = match backend {
+                "redb" => AnyStorage::Redb(RedbStorage::new(&data_dir).map_err(|e| e.to_string())?),
+                _ => AnyStorage::Sled(SledStorage::new(&data_dir)?),
+            };
+            let height = storage.get_chain_height()?;
+            let snapshots_dir = data_dir.join("snapshots");
+            storage.take_snapshot(height, &snapshots_dir)?;
+            Ok(text_or_json(
+                json,
+                &format!("Snapshot taken at height {}", height),
+                serde_json::json!({"height": height, "snapshots_dir": snapshots_dir.to_string_lossy()}),
+            ))
+        }
+        DbCommands::RestoreSnapshot { data_dir, height } => {
+            let storage: AnyStorage = match backend {
+                "redb" => AnyStorage::Redb(RedbStorage::new(&data_dir).map_err(|e| e.to_string())?),
+                _ => AnyStorage::Sled(SledStorage::new(&data_dir)?),
+            };
+            let snapshots_dir = data_dir.join("snapshots");
+            storage.restore_from_snapshot(height, &snapshots_dir)?;
+            Ok(text_or_json(
+                json,
+                &format!("Snapshot at height {} restored", height),
+                serde_json::json!({"height": height, "status": "restored"}),
+            ))
+        }
+        DbCommands::ListSnapshots { data_dir } => {
+            let storage: AnyStorage = match backend {
+                "redb" => AnyStorage::Redb(RedbStorage::new(&data_dir).map_err(|e| e.to_string())?),
+                _ => AnyStorage::Sled(SledStorage::new(&data_dir)?),
+            };
+            let snapshots_dir = data_dir.join("snapshots");
+            let heights = storage.list_snapshots(&snapshots_dir)?;
+            let summary = if heights.is_empty() {
+                "No snapshots available".to_string()
+            } else {
+                format!("Available snapshots at heights: {:?}", heights)
+            };
+            Ok(text_or_json(
+                json,
+                &summary,
+                serde_json::json!({"snapshots": heights}),
             ))
         }
     }
