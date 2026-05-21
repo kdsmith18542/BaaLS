@@ -892,7 +892,7 @@ impl CustomSync {
             }
             _ => return Err(SyncError::InvalidMessage),
         }
-        log::info!("Inbound peer authenticated, entering message loop");
+        eprintln!("[P2P] Inbound peer {} authenticated, entering message loop", addr);
         // After handshake, enter message loop
         loop {
             // Per-peer rate limit: max MAX_P2P_MESSAGES_PER_SECOND messages/sec
@@ -920,6 +920,7 @@ impl CustomSync {
                     break;
                 }
             };
+            eprintln!("[P2P] Inbound msg from {}: {:?}", addr, std::mem::discriminant(&msg));
             match msg {
                 NetworkMessage::PeerList { peers: peer_list } => {
                     let mut peers_guard = peers.write().await;
@@ -1488,16 +1489,16 @@ impl CustomSync {
             _ => return Err(SyncError::AuthenticationFailed),
         }
 
+        eprintln!("[P2P] Outbound: sending GetChainHead to {}", peer.address);
         Self::send_message(&mut stream, NetworkMessage::GetChainHead).await?;
         let chain_head = Self::receive_message(&mut stream).await?;
+        eprintln!("[P2P] Outbound: received response from {}", peer.address);
 
         match chain_head {
             NetworkMessage::ChainHeadResponse { latest_block_hash, height } => {
-                log::info!(
-                    "Peer {} has chain at height {} with hash {}",
-                    hex::encode(peer.id.to_bytes()),
-                    height,
-                    crate::types::format_hex(&latest_block_hash)
+                eprintln!(
+                    "[P2P] Outbound: peer {} height={} local_height={}",
+                    peer.address, height, local_chain_state.latest_block_index
                 );
 
                 // Detect fork at same height with different hash
@@ -1525,6 +1526,7 @@ impl CustomSync {
                         "Peer is behind or equal (peer={}, local={}), announcing our chain head",
                         height, local_chain_state.latest_block_index
                     );
+                    eprintln!("[P2P] Outbound: sending NewBlockAnnouncement height={} to {}", local_chain_state.latest_block_index, peer.address);
                     let _ = Self::send_message(
                         &mut stream,
                         NetworkMessage::NewBlockAnnouncement {
@@ -1532,9 +1534,11 @@ impl CustomSync {
                             height: local_chain_state.latest_block_index,
                         },
                     ).await;
+                    eprintln!("[P2P] Outbound: entering serve_sync_requests (10s) for {}", peer.address);
                     Self::serve_sync_requests_with_timeout(
                         &mut stream, &self.block_cache, &self.storage, 10,
                     ).await;
+                    eprintln!("[P2P] Outbound: done serving sync requests for {}", peer.address);
                     return Err(SyncError::SynchronizationError(
                         "Peer is not ahead of local chain".to_string(),
                     ));
@@ -1918,14 +1922,21 @@ impl CustomSync {
                     let clamped_to = to_height.min(from_height.saturating_add(MAX_BLOCK_RANGE));
                     let blocks = Self::blocks_in_range(block_cache, storage, from_height, clamped_to).await;
                     let count = blocks.len();
+                    eprintln!("[P2P] serve_sync: serving {} blocks ({}..={})", count, from_height, clamped_to);
                     let _ = Self::send_message(stream, NetworkMessage::BlocksResponse { blocks }).await;
-                    log::info!("Served {} blocks to peer via follow-up", count);
                 }
                 Ok(Ok(NetworkMessage::RequestBlock { hash })) => {
+                    eprintln!("[P2P] serve_sync: serving block request {}", hex::encode(hash));
                     let _ = Self::handle_block_request_full(stream, hash, block_cache, storage).await;
                 }
-                Ok(Ok(_)) => {}
-                _ => break,
+                Ok(Ok(other)) => {
+                    eprintln!("[P2P] serve_sync: ignoring {:?}", std::mem::discriminant(&other));
+                }
+                Err(_) => break,
+                Ok(Err(e)) => {
+                    eprintln!("[P2P] serve_sync: receive error: {}", e);
+                    break;
+                }
             }
         }
     }
