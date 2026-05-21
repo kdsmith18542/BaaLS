@@ -1,7 +1,7 @@
 use ed25519_dalek::Signer;
 use serde_json::Value;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -35,6 +35,11 @@ fn wait_until(timeout: Duration, interval: Duration, mut check: impl FnMut() -> 
         std::thread::sleep(interval);
     }
     check()
+}
+
+fn pick_free_local_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral test port");
+    listener.local_addr().expect("read ephemeral test port").port()
 }
 
 fn http_request(
@@ -83,6 +88,13 @@ fn test_cli_node_lifecycle_start_status_stop() {
     let bin_path = env!("CARGO_BIN_EXE_baalsd");
     let temp_dir = TempDir::new().expect("create temp dir");
     let data_dir = temp_dir.path();
+    let api_port = pick_free_local_port();
+    let api_host = format!("127.0.0.1:{}", api_port);
+    let mut p2p_port = pick_free_local_port();
+    while p2p_port == api_port {
+        p2p_port = pick_free_local_port();
+    }
+    let p2p_listen = format!("127.0.0.1:{}", p2p_port);
     let pid_path = data_dir.join("baals.pid");
     let stop_path = data_dir.join("baals.stop");
     let node_sk_hex = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -97,6 +109,10 @@ fn test_cli_node_lifecycle_start_status_stop() {
         .arg("start")
         .arg("--data-dir")
         .arg(data_dir)
+        .arg("--port")
+        .arg(api_port.to_string())
+        .arg("--listen")
+        .arg(p2p_listen)
         .env("BAALS_CONSENSUS_KEY", node_sk_hex)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -109,35 +125,43 @@ fn test_cli_node_lifecycle_start_status_stop() {
         "pid file should exist after start"
     );
 
-    let status_running = Command::new(bin_path)
-        .arg("node")
-        .arg("status")
-        .arg("--data-dir")
-        .arg(data_dir)
-        .arg("--json")
-        .output()
-        .expect("status while running");
-    assert!(status_running.status.success(), "status command should succeed");
-    let running_json: Value =
-        serde_json::from_slice(&status_running.stdout).expect("parse running status json");
-    assert_eq!(running_json["running"].as_bool(), Some(true));
+    assert!(
+        wait_until(Duration::from_secs(10), Duration::from_millis(200), || {
+            let status_running = Command::new(bin_path)
+                .arg("node")
+                .arg("status")
+                .arg("--data-dir")
+                .arg(data_dir)
+                .arg("--json")
+                .output();
+            match status_running {
+                Ok(output) if output.status.success() => serde_json::from_slice::<Value>(&output.stdout)
+                    .ok()
+                    .and_then(|v| v["running"].as_bool())
+                    == Some(true),
+                _ => false,
+            }
+        }),
+        "node should report running=true shortly after start"
+    );
 
     // API contract smoke checks: canonical /api/v1 aliases should be reachable.
     assert!(
         wait_until(Duration::from_secs(10), Duration::from_millis(200), || {
-            http_request("GET", "127.0.0.1:8080", "/health", None, &[])
+            http_request("GET", api_host.as_str(), "/health", None, &[])
                 .map(|(status, _)| status == 200)
                 .unwrap_or(false)
         }),
         "health endpoint should be reachable"
     );
 
-    let (health_v1_status, _) = http_request("GET", "127.0.0.1:8080", "/api/v1/health", None, &[])
-        .expect("GET /api/v1/health");
+    let (health_v1_status, _) =
+        http_request("GET", api_host.as_str(), "/api/v1/health", None, &[])
+            .expect("GET /api/v1/health");
     assert_eq!(health_v1_status, 200, "/api/v1/health should return 200");
 
     let (latest_status, latest_body) =
-        http_request("GET", "127.0.0.1:8080", "/api/v1/blocks/latest", None, &[])
+        http_request("GET", api_host.as_str(), "/api/v1/blocks/latest", None, &[])
             .expect("GET /api/v1/blocks/latest");
     assert_eq!(latest_status, 200, "/api/v1/blocks/latest should return 200");
     let latest_json: Value = serde_json::from_str(&latest_body).expect("parse latest block json");
@@ -147,7 +171,7 @@ fn test_cli_node_lifecycle_start_status_stop() {
     );
 
     let (by_height_status, by_height_body) =
-        http_request("GET", "127.0.0.1:8080", "/api/v1/blocks/0", None, &[])
+        http_request("GET", api_host.as_str(), "/api/v1/blocks/0", None, &[])
             .expect("GET /api/v1/blocks/0");
     assert_eq!(by_height_status, 200, "/api/v1/blocks/<height> should return 200");
     let by_height_json: Value =
@@ -155,7 +179,13 @@ fn test_cli_node_lifecycle_start_status_stop() {
     assert_eq!(by_height_json["height"].as_u64(), Some(0));
 
     let (account_status, _) =
-        http_request("GET", "127.0.0.1:8080", "/api/v1/accounts/not-a-pubkey", None, &[])
+        http_request(
+            "GET",
+            api_host.as_str(),
+            "/api/v1/accounts/not-a-pubkey",
+            None,
+            &[],
+        )
             .expect("GET /api/v1/accounts/<addr>");
     assert_eq!(
         account_status, 404,
@@ -163,7 +193,13 @@ fn test_cli_node_lifecycle_start_status_stop() {
     );
 
     let (contract_call_status, _) =
-        http_request("POST", "127.0.0.1:8080", "/api/v1/contracts/call", Some("{}"), &[])
+        http_request(
+            "POST",
+            api_host.as_str(),
+            "/api/v1/contracts/call",
+            Some("{}"),
+            &[],
+        )
             .expect("POST /api/v1/contracts/call");
     assert_eq!(
         contract_call_status, 400,
@@ -171,7 +207,13 @@ fn test_cli_node_lifecycle_start_status_stop() {
     );
 
     let (tx_submit_status, _) =
-        http_request("POST", "127.0.0.1:8080", "/api/v1/transactions", Some("{}"), &[])
+        http_request(
+            "POST",
+            api_host.as_str(),
+            "/api/v1/transactions",
+            Some("{}"),
+            &[],
+        )
             .expect("POST /api/v1/transactions");
     assert_eq!(
         tx_submit_status, 401,
@@ -195,8 +237,14 @@ fn test_cli_node_lifecycle_start_status_stop() {
         "signature": hex::encode(sig.to_bytes())
     });
     let (token_status, token_body) =
-        http_request("POST", "127.0.0.1:8080", "/auth/token", Some(&token_req.to_string()), &[])
-            .expect("POST /auth/token");
+        http_request(
+            "POST",
+            api_host.as_str(),
+            "/auth/token",
+            Some(&token_req.to_string()),
+            &[],
+        )
+        .expect("POST /auth/token");
     assert_eq!(token_status, 200, "/auth/token should return 200");
     let token_json: Value = serde_json::from_str(&token_body).expect("parse /auth/token json");
     let token = token_json["token"].as_str().expect("token in /auth/token response");
@@ -206,7 +254,7 @@ fn test_cli_node_lifecycle_start_status_stop() {
     std::thread::sleep(Duration::from_millis(1100));
     let (authed_submit_status, _) = http_request(
         "POST",
-        "127.0.0.1:8080",
+        api_host.as_str(),
         "/api/v1/transactions",
         Some("{}"),
         &[("Authorization", auth_header.as_str())],
@@ -220,7 +268,7 @@ fn test_cli_node_lifecycle_start_status_stop() {
     let missing_tx_hash = "0000000000000000000000000000000000000000000000000000000000000000";
     let (tx_lookup_status, _) = http_request(
         "GET",
-        "127.0.0.1:8080",
+        api_host.as_str(),
         &format!("/api/v1/transactions/{}", missing_tx_hash),
         None,
         &[],
@@ -230,7 +278,7 @@ fn test_cli_node_lifecycle_start_status_stop() {
 
     let (tx_finality_status, _) = http_request(
         "GET",
-        "127.0.0.1:8080",
+        api_host.as_str(),
         &format!("/api/v1/transactions/{}/finality", missing_tx_hash),
         None,
         &[],
@@ -242,7 +290,7 @@ fn test_cli_node_lifecycle_start_status_stop() {
     std::thread::sleep(Duration::from_millis(1100));
 
     let (supply_status, supply_body) =
-        http_request("GET", "127.0.0.1:8080", "/api/v1/supply", None, &[])
+        http_request("GET", api_host.as_str(), "/api/v1/supply", None, &[])
             .expect("GET /api/v1/supply");
     assert_eq!(supply_status, 200, "/api/v1/supply should return 200");
     let supply_json: Value = serde_json::from_str(&supply_body).expect("parse supply json");
@@ -252,7 +300,7 @@ fn test_cli_node_lifecycle_start_status_stop() {
     );
 
     let (metrics_status, metrics_body) =
-        http_request("GET", "127.0.0.1:8080", "/metrics", None, &[]).expect("GET /metrics");
+        http_request("GET", api_host.as_str(), "/metrics", None, &[]).expect("GET /metrics");
     assert_eq!(metrics_status, 200, "/metrics should return 200");
     assert!(
         metrics_body.contains("chain_height"),

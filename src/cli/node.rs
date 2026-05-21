@@ -1767,6 +1767,7 @@ pub fn handle_node(
             println!("WebSocket server started on ws://127.0.0.1:{}", cfg.node.ws_port);
 
             let health_bind = format!("127.0.0.1:{}", cfg.node.health_port);
+            let api_bind = format!("0.0.0.0:{}", port);
             if cfg.network.tls_enabled {
                 if cfg.node.health_port == port {
                     return Err(
@@ -1783,7 +1784,6 @@ pub fn handle_node(
                 let key_bytes = std::fs::read(&cfg.network.tls_key_path).map_err(|e| {
                     format!("Failed to read TLS private key at {}: {}", cfg.network.tls_key_path, e)
                 })?;
-                let api_bind = format!("0.0.0.0:{}", port);
 
                 spawn_health_server(
                     runtime.clone(),
@@ -1807,13 +1807,14 @@ pub fn handle_node(
             } else {
                 spawn_health_server(
                     runtime.clone(),
-                    health_bind,
+                    api_bind.clone(),
                     node_public_key,
                     node_signing_key,
                     None,
                     false,
                     cfg.node.ws_port,
                 )?;
+                info!("HTTP API endpoint listening on http://{}", api_bind);
             }
             info!("Node started. Press Ctrl+C to stop.");
             let pc_file = data_dir.join("peer_count");
