@@ -1,7 +1,6 @@
 use baals::{
-    storage::Storage,
-    Account, Address, BaaLSContractEngine, NoopSync, PoAConsensus, PublicKey, Runtime,
-    SledStorage, Transaction, TransactionPayload, TransactionSignature,
+    storage::Storage, Account, Address, BaaLSContractEngine, NoopSync, PoAConsensus, PublicKey,
+    Runtime, SledStorage, Transaction, TransactionPayload, TransactionSignature,
 };
 use ed25519_dalek::SigningKey;
 use rand::RngCore;
@@ -161,8 +160,16 @@ fn test_rollback_two_blocks() {
     let log2 = rt.storage().get_rollback_log(&block2.hash).unwrap().unwrap();
     rt.storage().apply_rollback_log(&log2).unwrap();
 
-    assert_eq!(rt.get_account(&pk1).unwrap().unwrap().balance(), 679_000, "after block2 rollback");
-    assert_eq!(rt.get_account(&pk2).unwrap().unwrap().balance(), 300_000, "after block2 rollback");
+    assert_eq!(
+        rt.get_account(&pk1).unwrap().unwrap().balance(),
+        679_000,
+        "after block2 rollback"
+    );
+    assert_eq!(
+        rt.get_account(&pk2).unwrap().unwrap().balance(),
+        300_000,
+        "after block2 rollback"
+    );
 
     let log1 = rt.storage().get_rollback_log(&block1.hash).unwrap().unwrap();
     rt.storage().apply_rollback_log(&log1).unwrap();

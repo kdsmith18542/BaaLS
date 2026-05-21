@@ -136,10 +136,8 @@ fn format_tx_inspect_output(
     };
     let confirmations = finality.map(|f| f.confirmations).unwrap_or(0);
     let required = finality.map(|f| f.required).unwrap_or(0);
-    let block_text = finality
-        .and_then(|f| f.block_height)
-        .map(|h| format!(", block={}", h))
-        .unwrap_or_default();
+    let block_text =
+        finality.and_then(|f| f.block_height).map(|h| format!(", block={}", h)).unwrap_or_default();
     let sig_ok = tx.verify_signature().unwrap_or(false);
 
     let human = format!(

@@ -46,7 +46,9 @@ fn node_api_call(
     let client = std::process::Command::new("curl")
         .args(match (method, body) {
             ("GET", _) => vec!["-s", "-X", "GET", &url],
-            ("POST", Some(b)) => vec!["-s", "-X", "POST", "-H", "Content-Type: application/json", "-d", b, &url],
+            ("POST", Some(b)) => {
+                vec!["-s", "-X", "POST", "-H", "Content-Type: application/json", "-d", b, &url]
+            }
             ("DELETE", _) => vec!["-s", "-X", "DELETE", &url],
             _ => vec!["-s", &url],
         })
@@ -55,19 +57,11 @@ fn node_api_call(
     match client {
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout);
-            serde_json::from_str(&text).map_err(|e| {
-                format!("Node response was not JSON ({}): {}", e, text).into()
-            })
+            serde_json::from_str(&text)
+                .map_err(|e| format!("Node response was not JSON ({}): {}", e, text).into())
         }
-        Ok(out) => {
-            Err(format!(
-                "curl exited with status {}",
-                out.status
-            ).into())
-        }
-        Err(_) => Err(
-            "Could not reach node — is `baals node start` running on this port?".into()
-        ),
+        Ok(out) => Err(format!("curl exited with status {}", out.status).into()),
+        Err(_) => Err("Could not reach node — is `baals node start` running on this port?".into()),
     }
 }
 
@@ -93,11 +87,10 @@ pub fn handle_p2p(
         }
         P2pCommands::Ping { address } => {
             // Simple TCP ping (no node API needed)
-            let socket: Result<std::net::TcpStream, _> =
-                std::net::TcpStream::connect_timeout(
-                    &address.parse()?,
-                    std::time::Duration::from_secs(2),
-                );
+            let socket: Result<std::net::TcpStream, _> = std::net::TcpStream::connect_timeout(
+                &address.parse()?,
+                std::time::Duration::from_secs(2),
+            );
             match socket {
                 Ok(_) => Ok(text_or_json(
                     json,

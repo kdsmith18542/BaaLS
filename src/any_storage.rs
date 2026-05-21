@@ -1,4 +1,4 @@
-﻿use crate::redb_storage::RedbStorage;
+use crate::redb_storage::RedbStorage;
 use crate::storage::{
     BackupManifest, ContractEvents, SledStorage, Storage, StorageBatch, StorageError, StorageStats,
 };
@@ -81,7 +81,10 @@ impl Storage for AnyStorage {
     fn put_receipt(&self, receipt: &crate::types::TransactionReceipt) -> Result<(), StorageError> {
         dispatch!(self, put_receipt, receipt)
     }
-    fn get_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<crate::types::TransactionReceipt>, StorageError> {
+    fn get_receipt(
+        &self,
+        tx_hash: &[u8; 32],
+    ) -> Result<Option<crate::types::TransactionReceipt>, StorageError> {
         dispatch!(self, get_receipt, tx_hash)
     }
     fn get_transactions_by_block(
@@ -249,10 +252,7 @@ impl Storage for AnyStorage {
     ) -> Result<Option<crate::rollback::RollbackLog>, StorageError> {
         dispatch!(self, get_rollback_log, block_hash)
     }
-    fn apply_rollback_log(
-        &self,
-        log: &crate::rollback::RollbackLog,
-    ) -> Result<(), StorageError> {
+    fn apply_rollback_log(&self, log: &crate::rollback::RollbackLog) -> Result<(), StorageError> {
         dispatch!(self, apply_rollback_log, log)
     }
     fn delete_rollback_log(&self, block_hash: &[u8; 32]) -> Result<(), StorageError> {
@@ -273,10 +273,17 @@ impl Storage for AnyStorage {
     fn restore_from(&self, path: &std::path::Path) -> Result<(), StorageError> {
         dispatch!(self, restore_from, path)
     }
-    fn backup_incremental(&self, base_path: &std::path::Path, output_path: &std::path::Path) -> Result<(), StorageError> {
+    fn backup_incremental(
+        &self,
+        base_path: &std::path::Path,
+        output_path: &std::path::Path,
+    ) -> Result<(), StorageError> {
         dispatch!(self, backup_incremental, base_path, output_path)
     }
-    fn get_backup_manifest(&self, path: &std::path::Path) -> Result<Option<BackupManifest>, StorageError> {
+    fn get_backup_manifest(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Option<BackupManifest>, StorageError> {
         dispatch!(self, get_backup_manifest, path)
     }
     fn get_storage_metadata(&self, key: &str) -> Result<Option<String>, StorageError> {

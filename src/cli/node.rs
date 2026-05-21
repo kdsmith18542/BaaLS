@@ -13,9 +13,9 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use crate::{
     config::{Config, NodeStatus, StorageBackend},
-    Account, AnyStorage, BaaLSContractEngine, CustomSync, Keystore, NoopSync, PoAConsensus,
-    PublicKey, RedbStorage, Runtime, SledStorage, Storage, SyncLayer, SyncWrapper, TlsConfig,
-    Transaction,
+    Account, AnyStorage, BaaLSContractEngine, CustomSync, FeePolicy, Keystore, NoopSync,
+    PoAConsensus, PublicKey, RedbStorage, Runtime, SledStorage, Storage, SyncLayer, SyncWrapper,
+    TlsConfig, Transaction,
 };
 
 use crate::cli::{parse_pubkey, text_or_json};
@@ -173,6 +173,16 @@ fn wait_for_pid_file(
     Ok(None)
 }
 
+fn parse_pubkey_hex(hex_str: &str) -> Result<PublicKey, Box<dyn std::error::Error>> {
+    let bytes = hex::decode(hex_str)?;
+    if bytes.len() != 32 {
+        return Err(format!("expected 32-byte public key, got {} bytes", bytes.len()).into());
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(PublicKey::from_bytes(&arr)?)
+}
+
 pub fn build_runtime(
     data_dir: &PathBuf,
     config: &Config,
@@ -313,6 +323,37 @@ pub fn build_runtime(
     runtime.chain_id = config.consensus.chain_id;
     runtime.finality_depth = config.consensus.finality_depth;
     runtime.max_reorg_depth = config.consensus.max_reorg_depth;
+    let treasury_address =
+        match config.fees.treasury_address.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(addr_hex) => Some(
+                parse_pubkey_hex(addr_hex)
+                    .map_err(|e| format!("Invalid fees.treasury_address '{}': {}", addr_hex, e))?,
+            ),
+            None => None,
+        };
+    let fee_policy = FeePolicy {
+        mode: config.fees.mode,
+        base_fee: config.fees.base_fee,
+        operator_percent: config.fees.operator_percent,
+        treasury_percent: config.fees.treasury_percent,
+        burn_percent: config.fees.burn_percent,
+        treasury_address,
+    };
+    runtime
+        .set_fee_policy(fee_policy.clone())
+        .map_err(|e| format!("Failed to apply fee policy: {}", e))?;
+    info!(
+        "Fee policy: mode={:?}, base_fee={}, split={}/{}/{} (operator/treasury/burn), treasury={}",
+        fee_policy.mode,
+        fee_policy.base_fee,
+        fee_policy.operator_percent,
+        fee_policy.treasury_percent,
+        fee_policy.burn_percent,
+        fee_policy
+            .treasury_address
+            .map(|pk| hex::encode(pk.to_bytes()))
+            .unwrap_or_else(|| "none".to_string())
+    );
     runtime.start()?;
     Ok((runtime, public_key, signing_key))
 }
@@ -1582,12 +1623,14 @@ gas_used_per_block {}\n",
                                             serde_json::json!({
                                                 "removed": pk_hex,
                                                 "signers": runtime.list_authorized_signers()
-                                            }).to_string(),
+                                            })
+                                            .to_string(),
                                         ),
                                         Ok(false) => respond_json(
                                             request,
                                             404,
-                                            serde_json::json!({"error": "signer not found"}).to_string(),
+                                            serde_json::json!({"error": "signer not found"})
+                                                .to_string(),
                                         ),
                                         Err(e) => respond_json(
                                             request,
@@ -1598,7 +1641,8 @@ gas_used_per_block {}\n",
                                     Err(e) => respond_json(
                                         request,
                                         400,
-                                        serde_json::json!({"error": format!("Invalid key: {}", e)}).to_string(),
+                                        serde_json::json!({"error": format!("Invalid key: {}", e)})
+                                            .to_string(),
                                     ),
                                 }
                             }
@@ -1764,7 +1808,7 @@ pub fn handle_node(
             runtime.set_event_sender(ws_tx);
             let ws_bind = format!("127.0.0.1:{}", cfg.node.ws_port);
             crate::ws_server::start_ws_server(ws_bind, ws_rx, runtime.is_running_handle());
-            println!("WebSocket server started on ws://127.0.0.1:{}", cfg.node.ws_port);
+            info!("WebSocket server started on ws://127.0.0.1:{}", cfg.node.ws_port);
 
             let health_bind = format!("127.0.0.1:{}", cfg.node.health_port);
             let api_bind = format!("0.0.0.0:{}", port);

@@ -4,9 +4,9 @@ use crate::types::{
 };
 use ed25519_dalek::Signature as Ed25519Signature;
 use log::{info, warn};
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use lru::LruCache;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};

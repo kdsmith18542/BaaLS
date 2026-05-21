@@ -76,10 +76,7 @@ fn json_or_null<T: serde::Serialize>(val: &T) -> *mut c_char {
 /// `backend` must be null or a valid, null-terminated C string ("sled" or "redb").
 /// Should be called exactly once before any other SDK function.
 /// Returns: 0 = OK, 1 = invalid input, 2 = init failed, 5 = already initialized
-pub unsafe extern "C" fn baals_sdk_init(
-    data_dir: *const c_char,
-    backend: *const c_char,
-) -> c_uint {
+pub unsafe extern "C" fn baals_sdk_init(data_dir: *const c_char, backend: *const c_char) -> c_uint {
     let dir = match unsafe { c_str_to_path(data_dir) } {
         Some(d) => d,
         None => return 1,
@@ -347,9 +344,7 @@ pub unsafe extern "C" fn baals_sdk_query_contract(
 /// # Safety
 ///
 /// `address` must be a valid, null-terminated C string.
-pub unsafe extern "C" fn baals_sdk_add_peer(
-    address: *const c_char,
-) -> c_uint {
+pub unsafe extern "C" fn baals_sdk_add_peer(address: *const c_char) -> c_uint {
     let addr = match unsafe { c_str_to_str(address) } {
         Some(s) => s,
         None => return 1,
@@ -361,9 +356,7 @@ pub unsafe extern "C" fn baals_sdk_add_peer(
 /// # Safety
 ///
 /// `address` must be a valid, null-terminated C string.
-pub unsafe extern "C" fn baals_sdk_remove_peer(
-    address: *const c_char,
-) -> c_uint {
+pub unsafe extern "C" fn baals_sdk_remove_peer(address: *const c_char) -> c_uint {
     let addr = match unsafe { c_str_to_str(address) } {
         Some(s) => s,
         None => return 1,

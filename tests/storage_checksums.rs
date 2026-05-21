@@ -1,4 +1,4 @@
-﻿use baals::{Block, RedbStorage, SledStorage, Storage};
+use baals::{Block, RedbStorage, SledStorage, Storage};
 use sha2::Digest;
 use tempfile::TempDir;
 
@@ -12,11 +12,11 @@ fn sample_block(index: u64, prev_hash: [u8; 32], timestamp: u64) -> Block {
         nonce: 0,
         transactions: vec![],
         metadata: None,
-                total_gas_used: 0,
-                signer: None,
-                signature: None,
-                quorum_signatures: Vec::new(),
-            };
+        total_gas_used: 0,
+        signer: None,
+        signature: None,
+        quorum_signatures: Vec::new(),
+    };
     block.hash = block.calculate_hash().unwrap();
     block
 }
@@ -47,4 +47,3 @@ fn redb_persists_block_checksums() {
     let storage = RedbStorage::new(tmp.path()).unwrap();
     assert_block_checksum_is_persisted(&storage);
 }
-

@@ -135,10 +135,12 @@ fn test_cli_node_lifecycle_start_status_stop() {
                 .arg("--json")
                 .output();
             match status_running {
-                Ok(output) if output.status.success() => serde_json::from_slice::<Value>(&output.stdout)
-                    .ok()
-                    .and_then(|v| v["running"].as_bool())
-                    == Some(true),
+                Ok(output) if output.status.success() => {
+                    serde_json::from_slice::<Value>(&output.stdout)
+                        .ok()
+                        .and_then(|v| v["running"].as_bool())
+                        == Some(true)
+                }
                 _ => false,
             }
         }),
@@ -155,9 +157,8 @@ fn test_cli_node_lifecycle_start_status_stop() {
         "health endpoint should be reachable"
     );
 
-    let (health_v1_status, _) =
-        http_request("GET", api_host.as_str(), "/api/v1/health", None, &[])
-            .expect("GET /api/v1/health");
+    let (health_v1_status, _) = http_request("GET", api_host.as_str(), "/api/v1/health", None, &[])
+        .expect("GET /api/v1/health");
     assert_eq!(health_v1_status, 200, "/api/v1/health should return 200");
 
     let (latest_status, latest_body) =
@@ -179,13 +180,7 @@ fn test_cli_node_lifecycle_start_status_stop() {
     assert_eq!(by_height_json["height"].as_u64(), Some(0));
 
     let (account_status, _) =
-        http_request(
-            "GET",
-            api_host.as_str(),
-            "/api/v1/accounts/not-a-pubkey",
-            None,
-            &[],
-        )
+        http_request("GET", api_host.as_str(), "/api/v1/accounts/not-a-pubkey", None, &[])
             .expect("GET /api/v1/accounts/<addr>");
     assert_eq!(
         account_status, 404,
@@ -193,13 +188,7 @@ fn test_cli_node_lifecycle_start_status_stop() {
     );
 
     let (contract_call_status, _) =
-        http_request(
-            "POST",
-            api_host.as_str(),
-            "/api/v1/contracts/call",
-            Some("{}"),
-            &[],
-        )
+        http_request("POST", api_host.as_str(), "/api/v1/contracts/call", Some("{}"), &[])
             .expect("POST /api/v1/contracts/call");
     assert_eq!(
         contract_call_status, 400,
@@ -207,13 +196,7 @@ fn test_cli_node_lifecycle_start_status_stop() {
     );
 
     let (tx_submit_status, _) =
-        http_request(
-            "POST",
-            api_host.as_str(),
-            "/api/v1/transactions",
-            Some("{}"),
-            &[],
-        )
+        http_request("POST", api_host.as_str(), "/api/v1/transactions", Some("{}"), &[])
             .expect("POST /api/v1/transactions");
     assert_eq!(
         tx_submit_status, 401,
@@ -237,14 +220,8 @@ fn test_cli_node_lifecycle_start_status_stop() {
         "signature": hex::encode(sig.to_bytes())
     });
     let (token_status, token_body) =
-        http_request(
-            "POST",
-            api_host.as_str(),
-            "/auth/token",
-            Some(&token_req.to_string()),
-            &[],
-        )
-        .expect("POST /auth/token");
+        http_request("POST", api_host.as_str(), "/auth/token", Some(&token_req.to_string()), &[])
+            .expect("POST /auth/token");
     assert_eq!(token_status, 200, "/auth/token should return 200");
     let token_json: Value = serde_json::from_str(&token_body).expect("parse /auth/token json");
     let token = token_json["token"].as_str().expect("token in /auth/token response");

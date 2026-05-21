@@ -1,3 +1,4 @@
+use crate::types::FeeMode;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::Component;
@@ -112,12 +113,30 @@ pub struct LoggingConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeeConfig {
+    #[serde(default = "default_fee_mode")]
+    pub mode: FeeMode,
+    #[serde(default)]
+    pub base_fee: u64,
+    #[serde(default = "default_operator_percent")]
+    pub operator_percent: u8,
+    #[serde(default = "default_treasury_percent")]
+    pub treasury_percent: u8,
+    #[serde(default = "default_burn_percent")]
+    pub burn_percent: u8,
+    #[serde(default)]
+    pub treasury_address: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub node: NodeConfig,
     pub consensus: ConsensusConfig,
     pub storage: StorageConfig,
     pub network: NetworkConfig,
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub fees: FeeConfig,
 }
 
 fn default_data_dir() -> String {
@@ -184,6 +203,35 @@ fn default_log_max_files() -> u32 {
     5
 }
 
+fn default_fee_mode() -> FeeMode {
+    FeeMode::Economic
+}
+
+fn default_operator_percent() -> u8 {
+    70
+}
+
+fn default_treasury_percent() -> u8 {
+    20
+}
+
+fn default_burn_percent() -> u8 {
+    10
+}
+
+impl Default for FeeConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_fee_mode(),
+            base_fee: 0,
+            operator_percent: default_operator_percent(),
+            treasury_percent: default_treasury_percent(),
+            burn_percent: default_burn_percent(),
+            treasury_address: None,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -226,6 +274,7 @@ impl Default for Config {
                 log_max_size_mb: default_log_max_size_mb(),
                 log_max_files: default_log_max_files(),
             },
+            fees: FeeConfig::default(),
         }
     }
 }
@@ -284,6 +333,30 @@ impl Config {
         if !["trace", "debug", "info", "warn", "error"].contains(&self.logging.level.as_str()) {
             return Err(ConfigError::Invalid(format!("Invalid log level: {}", self.logging.level)));
         }
+        let fee_split_total = self
+            .fees
+            .operator_percent
+            .saturating_add(self.fees.treasury_percent)
+            .saturating_add(self.fees.burn_percent);
+        if fee_split_total != 100 {
+            return Err(ConfigError::Invalid(format!(
+                "Invalid fee split: operator({}) + treasury({}) + burn({}) must equal 100",
+                self.fees.operator_percent, self.fees.treasury_percent, self.fees.burn_percent
+            )));
+        }
+        if let Some(addr) = self.fees.treasury_address.as_ref() {
+            let trimmed = addr.trim();
+            if !trimmed.is_empty() {
+                let decoded = hex::decode(trimmed).map_err(|_| {
+                    ConfigError::Invalid("Invalid fees.treasury_address hex".into())
+                })?;
+                if decoded.len() != 32 {
+                    return Err(ConfigError::Invalid(
+                        "fees.treasury_address must be 32 bytes (64 hex chars)".into(),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -297,6 +370,10 @@ impl Config {
             "node.health_port" => {
                 self.node.health_port =
                     value.parse().map_err(|_| ConfigError::Invalid("Invalid health_port".into()))?
+            }
+            "node.ws_port" => {
+                self.node.ws_port =
+                    value.parse().map_err(|_| ConfigError::Invalid("Invalid ws_port".into()))?
             }
             "node.mempool_limit" => {
                 self.node.mempool_limit = value
@@ -314,6 +391,15 @@ impl Config {
                 })?
             }
             "consensus.authority_key" => self.consensus.authority_key = value.to_string(),
+            "consensus.chain_id" => {
+                self.consensus.chain_id =
+                    value.parse().map_err(|_| ConfigError::Invalid("Invalid chain_id".into()))?
+            }
+            "consensus.min_gas_price" => {
+                self.consensus.min_gas_price = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid min_gas_price".into()))?
+            }
             "consensus.finality_depth" => {
                 self.consensus.finality_depth = value
                     .parse()
@@ -323,6 +409,11 @@ impl Config {
                 self.consensus.max_reorg_depth = value
                     .parse()
                     .map_err(|_| ConfigError::Invalid("Invalid max_reorg_depth".into()))?
+            }
+            "consensus.quorum_threshold" => {
+                self.consensus.quorum_threshold = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid quorum_threshold".into()))?
             }
             "network.max_peers" => {
                 self.network.max_peers =
@@ -383,9 +474,54 @@ impl Config {
             "network.tls_cert_path" => self.network.tls_cert_path = value.to_string(),
             "network.tls_key_path" => self.network.tls_key_path = value.to_string(),
             "network.tls_ca_cert_path" => self.network.tls_ca_cert_path = value.to_string(),
+            "network.allowed_peers" => {
+                self.network.allowed_peers = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string)
+                    .collect();
+            }
+            "fees.mode" => {
+                self.fees.mode = match value.to_ascii_lowercase().as_str() {
+                    "none" => FeeMode::None,
+                    "metered" => FeeMode::Metered,
+                    "economic" => FeeMode::Economic,
+                    _ => {
+                        return Err(ConfigError::Invalid(
+                            "Invalid fees.mode (expected: none|metered|economic)".into(),
+                        ))
+                    }
+                }
+            }
+            "fees.base_fee" => {
+                self.fees.base_fee = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid fees.base_fee".into()))?
+            }
+            "fees.operator_percent" => {
+                self.fees.operator_percent = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid fees.operator_percent".into()))?
+            }
+            "fees.treasury_percent" => {
+                self.fees.treasury_percent = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid fees.treasury_percent".into()))?
+            }
+            "fees.burn_percent" => {
+                self.fees.burn_percent = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid fees.burn_percent".into()))?
+            }
+            "fees.treasury_address" => {
+                let trimmed = value.trim();
+                self.fees.treasury_address =
+                    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+            }
             _ => return Err(ConfigError::Invalid(format!("Unknown config key: {}", key))),
         }
-        Ok(())
+        self.validate()
     }
 }
 
@@ -546,4 +682,36 @@ pub fn generate_default_config(path: &Path) -> Result<Config, ConfigError> {
     let config = Config::default();
     config.save(path)?;
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn set_supports_consensus_chain_id_and_related_keys() {
+        let mut cfg = Config::default();
+
+        cfg.set("consensus.chain_id", "42").expect("set chain_id");
+        cfg.set("consensus.min_gas_price", "7").expect("set min_gas_price");
+        cfg.set("consensus.quorum_threshold", "2").expect("set quorum_threshold");
+
+        assert_eq!(cfg.consensus.chain_id, 42);
+        assert_eq!(cfg.consensus.min_gas_price, 7);
+        assert_eq!(cfg.consensus.quorum_threshold, 2);
+    }
+
+    #[test]
+    fn set_supports_ws_port_and_allowed_peers() {
+        let mut cfg = Config::default();
+
+        cfg.set("node.ws_port", "9191").expect("set ws_port");
+        cfg.set("network.allowed_peers", "1.2.3.4:9070, 5.6.7.8:9070").expect("set allowed_peers");
+
+        assert_eq!(cfg.node.ws_port, 9191);
+        assert_eq!(
+            cfg.network.allowed_peers,
+            vec!["1.2.3.4:9070".to_string(), "5.6.7.8:9070".to_string()]
+        );
+    }
 }

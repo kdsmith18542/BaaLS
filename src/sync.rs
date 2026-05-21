@@ -299,7 +299,7 @@ pub struct CustomSync {
     tls_config: Option<Arc<TlsConfig>>,
     tls_insecure: bool,
     storage: Arc<Mutex<Option<Box<dyn Storage>>>>,
-    received_blocks: Arc<Mutex<Vec<Block>>>,
+    received_blocks: Arc<std::sync::Mutex<Vec<Block>>>,
     shutdown_tx: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
     connection_semaphore: Arc<tokio::sync::Semaphore>,
     signing_key: Arc<Mutex<Option<SigningKey>>>,
@@ -575,7 +575,7 @@ impl CustomSync {
             tls_config: None,
             tls_insecure: false,
             storage: Arc::new(Mutex::new(None)),
-            received_blocks: Arc::new(Mutex::new(Vec::new())),
+            received_blocks: Arc::new(std::sync::Mutex::new(Vec::new())),
             shutdown_tx: Arc::new(Mutex::new(None)),
             connection_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
             signing_key: Arc::new(Mutex::new(None)),
@@ -868,7 +868,7 @@ impl CustomSync {
         peers: Arc<tokio::sync::RwLock<HashMap<PublicKey, SocketAddr>>>,
         block_cache: Arc<Mutex<HashMap<[u8; 32], Block>>>,
         storage: Arc<Mutex<Option<Box<dyn Storage>>>>,
-        received_blocks: Arc<Mutex<Vec<Block>>>,
+        received_blocks: Arc<std::sync::Mutex<Vec<Block>>>,
         signing_key: Arc<Mutex<Option<SigningKey>>>,
         rate_limiters: Arc<Mutex<HashMap<SocketAddr, PerPeerRateLimiter>>>,
         listen_port: u16,
@@ -900,6 +900,27 @@ impl CustomSync {
                         remote_chain_id,
                         addr
                     );
+                    let mut my_challenge = [0u8; 32];
+                    rand::RngCore::fill_bytes(&mut rand::rng(), &mut my_challenge);
+                    let signature = {
+                        let sig_key_guard = signing_key.lock().await;
+                        sig_key_guard
+                            .as_ref()
+                            .map(|sk| sk.sign(&challenge).to_vec())
+                            .unwrap_or_default()
+                    };
+                    let _ = Self::send_message(
+                        &mut socket,
+                        NetworkMessage::HandshakeAck {
+                            peer_id,
+                            version: 1,
+                            signature,
+                            challenge: my_challenge,
+                            listen_port,
+                            chain_id: local_chain_id,
+                        },
+                    )
+                    .await;
                     return Err(SyncError::SynchronizationError("Chain ID mismatch".to_string()));
                 }
 
@@ -1175,7 +1196,8 @@ impl CustomSync {
                             cache.insert(block.hash, block.clone());
                         }
                         drop(cache);
-                        let mut recv = received_blocks.lock().await;
+                        let mut recv =
+                            received_blocks.lock().expect("received_blocks mutex poisoned");
                         if recv.len() < MAX_RECEIVED_BLOCKS_QUEUE {
                             recv.push(block);
                         }
@@ -1265,7 +1287,7 @@ impl CustomSync {
     async fn handle_block_response_full(
         block: Option<crate::types::Block>,
         block_cache: &Arc<Mutex<HashMap<[u8; 32], Block>>>,
-        received_blocks: &Arc<Mutex<Vec<Block>>>,
+        received_blocks: &Arc<std::sync::Mutex<Vec<Block>>>,
     ) {
         if let Some(block) = block {
             if let Ok(calculated_hash) = block.calculate_hash() {
@@ -1273,7 +1295,7 @@ impl CustomSync {
                     let mut cache = block_cache.lock().await;
                     cache.insert(block.hash, block.clone());
                     drop(cache);
-                    let mut recv = received_blocks.lock().await;
+                    let mut recv = received_blocks.lock().expect("received_blocks mutex poisoned");
                     if recv.len() < MAX_RECEIVED_BLOCKS_QUEUE {
                         recv.push(block);
                     }
@@ -1491,7 +1513,8 @@ impl CustomSync {
                     let mut cache = self.block_cache.lock().await;
                     cache.insert(block.hash, block.clone());
                     drop(cache);
-                    let mut recv = self.received_blocks.lock().await;
+                    let mut recv =
+                        self.received_blocks.lock().expect("received_blocks mutex poisoned");
                     if recv.len() < MAX_RECEIVED_BLOCKS_QUEUE {
                         recv.push(block.clone());
                     }
@@ -1786,11 +1809,18 @@ impl CustomSync {
                                     cache.insert(block.hash, block.clone());
                                 }
                             }
-                            let mut recv = self.received_blocks.lock().await;
-                            if recv.len() + blocks.len() <= MAX_RECEIVED_BLOCKS_QUEUE {
-                                recv.extend(blocks.clone());
-                            } else {
-                                log::warn!("Dropped incoming blocks: received_blocks queue full");
+                            {
+                                let mut recv = self
+                                    .received_blocks
+                                    .lock()
+                                    .expect("received_blocks mutex poisoned");
+                                if recv.len() + blocks.len() <= MAX_RECEIVED_BLOCKS_QUEUE {
+                                    recv.extend(blocks.clone());
+                                } else {
+                                    log::warn!(
+                                        "Dropped incoming blocks: received_blocks queue full"
+                                    );
+                                }
                             }
                             Self::serve_sync_requests(stream, &self.block_cache, &self.storage)
                                 .await;
@@ -1823,7 +1853,10 @@ impl CustomSync {
                             let mut cache = self.block_cache.lock().await;
                             cache.insert(block.hash, block.clone());
                             drop(cache);
-                            let mut recv = self.received_blocks.lock().await;
+                            let mut recv = self
+                                .received_blocks
+                                .lock()
+                                .expect("received_blocks mutex poisoned");
                             if recv.len() < MAX_RECEIVED_BLOCKS_QUEUE {
                                 recv.push(block.clone());
                             }
@@ -1935,11 +1968,11 @@ impl SyncLayer for CustomSync {
     ) -> Result<Block, SyncError> {
         // Skip peers in exponential backoff
         if self.peer_in_backoff(peer.address).await {
-            log::info!("[SYNC] Peer {} is in backoff; skipping", peer.address);
+            log::debug!("[SYNC] Peer {} is in backoff; skipping", peer.address);
             return Err(SyncError::SynchronizationError("Peer in backoff".to_string()));
         }
 
-        log::info!("[SYNC] sync_with_peer_inner starting for {}", peer.address);
+        log::debug!("[SYNC] sync_with_peer_inner starting for {}", peer.address);
         let result = self.sync_with_peer_inner(peer, local_chain_state).await;
 
         match &result {
@@ -2024,10 +2057,7 @@ impl SyncLayer for CustomSync {
     }
 
     fn poll_received_blocks(&self) -> Vec<Block> {
-        let mut recv = match self.received_blocks.try_lock() {
-            Ok(r) => r,
-            Err(_) => return vec![],
-        };
+        let mut recv = self.received_blocks.lock().expect("received_blocks mutex poisoned");
         std::mem::take(&mut *recv)
     }
 

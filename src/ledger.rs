@@ -2,13 +2,14 @@ use log::{info, warn};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::RwLock;
 use thiserror::Error;
 
 use crate::contracts::ContractEngine;
 use crate::storage::{Storage, StorageBatch, StorageError, StorageOperation};
 use crate::types::{
-    contract_account_public_key, Account, Block, ChainState, ContractId, CryptoError, PublicKey,
-    SparseMerkleTree, TransactionPayload,
+    contract_account_public_key, Account, Block, ChainState, ContractId, CryptoError, FeeMode,
+    FeePolicy, PublicKey, SparseMerkleTree, TransactionPayload,
 };
 
 #[derive(Debug, Error)]
@@ -51,6 +52,8 @@ pub enum LedgerError {
     ContractError(#[from] crate::contracts::ContractError),
     #[error("Not found")]
     NotFound,
+    #[error("Invalid fee policy: {0}")]
+    InvalidFeePolicy(String),
 }
 
 #[derive(Debug, Clone)]
@@ -63,13 +66,14 @@ pub struct TransactionExecutionResult {
 pub struct Ledger<S: Storage, C: ContractEngine> {
     storage: Arc<S>,
     contract_engine: Arc<C>,
+    fee_policy: Arc<RwLock<FeePolicy>>,
 }
 
 impl<S: Storage, C: ContractEngine> Ledger<S, C> {
     #[allow(dead_code)]
     const MAX_FUTURE_BLOCK_TIMESTAMP_SECONDS: u64 = 10;
     pub fn new(storage: Arc<S>, contract_engine: Arc<C>) -> Self {
-        Ledger { storage, contract_engine }
+        Ledger { storage, contract_engine, fee_policy: Arc::new(RwLock::new(FeePolicy::default())) }
     }
 
     fn make_contract_code_key(contract_id: &ContractId) -> Vec<u8> {
@@ -78,6 +82,16 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
 
     fn make_contract_deployer_key(contract_id: &ContractId) -> Vec<u8> {
         format!("deployer:{}", hex::encode(contract_id.to_bytes())).into_bytes()
+    }
+
+    pub fn set_fee_policy(&self, policy: FeePolicy) -> Result<(), LedgerError> {
+        policy.validate().map_err(LedgerError::InvalidFeePolicy)?;
+        *self.fee_policy.write().expect("fee policy lock poisoned") = policy;
+        Ok(())
+    }
+
+    pub fn fee_policy(&self) -> FeePolicy {
+        self.fee_policy.read().expect("fee policy lock poisoned").clone()
     }
 
     pub fn initialize_chain(&self) -> Result<(), LedgerError> {
@@ -184,6 +198,44 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         Ok(smt.root())
     }
 
+    fn decode_public_key_hex(pk_hex: &str) -> Option<PublicKey> {
+        let bytes = match hex::decode(pk_hex) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                warn!("[LEDGER] Invalid public key hex '{}': {}", pk_hex, e);
+                return None;
+            }
+        };
+        if bytes.len() != 32 {
+            warn!(
+                "[LEDGER] Invalid public key length for '{}': expected 32 bytes, got {}",
+                pk_hex,
+                bytes.len()
+            );
+            return None;
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        match PublicKey::from_bytes(&arr) {
+            Ok(pk) => Some(pk),
+            Err(e) => {
+                warn!("[LEDGER] Invalid public key bytes '{}': {}", pk_hex, e);
+                None
+            }
+        }
+    }
+
+    fn block_signer_public_key(block: &Block) -> Option<PublicKey> {
+        if let Some(signer_hex) = block.signer.as_deref() {
+            return Self::decode_public_key_hex(signer_hex);
+        }
+        block
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("signer"))
+            .and_then(|hex| Self::decode_public_key_hex(hex))
+    }
+
     pub fn apply_block(&self, block: &Block) -> Result<(), LedgerError> {
         info!("[LEDGER] Applying block {}...", block.index);
 
@@ -192,6 +244,11 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         let mut touched_contracts = HashSet::new();
         let mut sender_cache: HashMap<PublicKey, Account> = HashMap::new();
         let _current_chain_state = self.storage.get_chain_state()?.ok_or(LedgerError::NotFound)?;
+        let fee_policy = self.fee_policy();
+        let block_signer = Self::block_signer_public_key(block);
+        let mut operator_fees_total = 0u64;
+        let mut treasury_fees_total = 0u64;
+        let mut burned_fees_total = 0u64;
 
         // 1. Validate block header and signatures
         self.validate_block(block)?;
@@ -266,6 +323,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                             recipient_pk.to_bytes().to_vec(),
                             bincode::serialize(&recipient_account)?,
                         ));
+                        sender_cache.insert(*recipient_pk, recipient_account);
                         touched_accounts.insert(recipient_pk.to_bytes());
                     }
                 }
@@ -349,13 +407,14 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                                     storage_root_hash,
                                     nonce: 0,
                                 };
-                                let contract_key =
-                                    contract_account_public_key(&deploy_result.contract_id)
-                                        .to_bytes();
+                                let contract_pk =
+                                    contract_account_public_key(&deploy_result.contract_id);
+                                let contract_key = contract_pk.to_bytes();
                                 batch.ops.push(StorageOperation::PutAccount(
                                     contract_key.to_vec(),
                                     bincode::serialize(&contract_account)?,
                                 ));
+                                sender_cache.insert(contract_pk, contract_account);
                                 touched_contracts.insert(contract_key);
                             }
                             Err(e) => {
@@ -439,6 +498,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                                         contract_account_pk.to_bytes().to_vec(),
                                         bincode::serialize(&contract_account)?,
                                     ));
+                                    sender_cache.insert(contract_account_pk, contract_account);
                                     touched_contracts.insert(contract_account_pk.to_bytes());
                                 }
 
@@ -514,6 +574,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                                         contract_account_pk.to_bytes().to_vec(),
                                         bincode::serialize(&contract_account)?,
                                     ));
+                                    sender_cache.insert(contract_account_pk, contract_account);
                                 }
                             }
                             Err(e) => {
@@ -534,11 +595,7 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                         tx_status.error_message = Some(reason);
                     }
                 }
-                TransactionPayload::ValidatorSetChange {
-                    added,
-                    removed,
-                    effective_height,
-                } => {
+                TransactionPayload::ValidatorSetChange { added, removed, effective_height } => {
                     gas_used = gas_used.saturating_add(5_000);
                     if gas_used > tx.gas_limit {
                         let reason = "ValidatorSetChange exceeded gas limit".to_string();
@@ -584,22 +641,86 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                 }
             }
 
-            // Deduct gas fee — never charge more than the user's gas_limit
+            // Deduct transaction fee (mode-aware) — never charge more than tx.gas_limit.
             let billable_gas = gas_used.min(tx.gas_limit);
-            let total_fee = tx
+            let gas_fee = tx
                 .gas_price
                 .checked_mul(billable_gas)
                 .ok_or(LedgerError::StateTransition(StateTransitionError::Overflow))?;
-            if sender_balance < total_fee {
+            let total_fee = fee_policy
+                .base_fee
+                .checked_add(gas_fee)
+                .ok_or(LedgerError::StateTransition(StateTransitionError::Overflow))?;
+            let should_charge_fee = !matches!(fee_policy.mode, FeeMode::None);
+            if should_charge_fee && sender_balance < total_fee {
                 let reason =
                     format!("Gas fee exceeds sender balance: {} < {}", sender_balance, total_fee);
                 warn!("[LEDGER] {}", reason);
                 tx_status.success = false;
                 tx_status.error_message = Some(reason);
-            } else {
+            } else if should_charge_fee {
                 sender_balance = sender_balance
                     .checked_sub(total_fee)
                     .ok_or(LedgerError::StateTransition(StateTransitionError::Overflow))?;
+
+                match fee_policy.mode {
+                    FeeMode::None => {}
+                    FeeMode::Metered => {
+                        // Legacy behavior: all charged fees are effectively burned.
+                        burned_fees_total = burned_fees_total
+                            .checked_add(total_fee)
+                            .ok_or(LedgerError::StateTransition(StateTransitionError::Overflow))?;
+                    }
+                    FeeMode::Economic => {
+                        let fee_u128 = u128::from(total_fee);
+                        let mut operator_part =
+                            (fee_u128 * u128::from(fee_policy.operator_percent) / 100) as u64;
+                        let mut treasury_part =
+                            (fee_u128 * u128::from(fee_policy.treasury_percent) / 100) as u64;
+                        let mut burn_part =
+                            (fee_u128 * u128::from(fee_policy.burn_percent) / 100) as u64;
+
+                        let allocated = operator_part
+                            .checked_add(treasury_part)
+                            .and_then(|v| v.checked_add(burn_part))
+                            .ok_or(LedgerError::StateTransition(StateTransitionError::Overflow))?;
+                        if allocated < total_fee {
+                            let remainder = total_fee - allocated;
+                            burn_part = burn_part.checked_add(remainder).ok_or(
+                                LedgerError::StateTransition(StateTransitionError::Overflow),
+                            )?;
+                        }
+
+                        if block_signer.is_none() && operator_part > 0 {
+                            warn!(
+                                "[LEDGER] Economic fee mode active but block signer is missing; redirecting operator share to burn"
+                            );
+                            burn_part = burn_part.checked_add(operator_part).ok_or(
+                                LedgerError::StateTransition(StateTransitionError::Overflow),
+                            )?;
+                            operator_part = 0;
+                        }
+                        if fee_policy.treasury_address.is_none() && treasury_part > 0 {
+                            warn!(
+                                "[LEDGER] Economic fee mode active but treasury address is missing; redirecting treasury share to burn"
+                            );
+                            burn_part = burn_part.checked_add(treasury_part).ok_or(
+                                LedgerError::StateTransition(StateTransitionError::Overflow),
+                            )?;
+                            treasury_part = 0;
+                        }
+
+                        operator_fees_total = operator_fees_total
+                            .checked_add(operator_part)
+                            .ok_or(LedgerError::StateTransition(StateTransitionError::Overflow))?;
+                        treasury_fees_total = treasury_fees_total
+                            .checked_add(treasury_part)
+                            .ok_or(LedgerError::StateTransition(StateTransitionError::Overflow))?;
+                        burned_fees_total = burned_fees_total
+                            .checked_add(burn_part)
+                            .ok_or(LedgerError::StateTransition(StateTransitionError::Overflow))?;
+                    }
+                }
             }
 
             // Update sender account (nonce and final balance)
@@ -697,12 +818,79 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
             ));
         }
 
+        // 2b. Distribute aggregated fees according to policy.
+        if operator_fees_total > 0 {
+            if let Some(operator_pk) = block_signer {
+                let mut operator_account = if let Some(cached) = sender_cache.get(&operator_pk) {
+                    cached.clone()
+                } else {
+                    self.storage
+                        .get_account(&operator_pk)?
+                        .unwrap_or(Account::Wallet { balance: 0, nonce: 0 })
+                };
+                let new_balance = operator_account
+                    .balance()
+                    .checked_add(operator_fees_total)
+                    .ok_or(LedgerError::StateTransition(StateTransitionError::Overflow))?;
+                match &mut operator_account {
+                    Account::Wallet { balance, .. } => *balance = new_balance,
+                    Account::Contract { balance, .. } => *balance = new_balance,
+                }
+                sender_cache.insert(operator_pk, operator_account.clone());
+                batch.ops.push(StorageOperation::PutAccount(
+                    operator_pk.to_bytes().to_vec(),
+                    bincode::serialize(&operator_account)?,
+                ));
+                touched_accounts.insert(operator_pk.to_bytes());
+            }
+        }
+
+        if treasury_fees_total > 0 {
+            if let Some(treasury_pk) = fee_policy.treasury_address {
+                let mut treasury_account = if let Some(cached) = sender_cache.get(&treasury_pk) {
+                    cached.clone()
+                } else {
+                    self.storage
+                        .get_account(&treasury_pk)?
+                        .unwrap_or(Account::Wallet { balance: 0, nonce: 0 })
+                };
+                let new_balance = treasury_account
+                    .balance()
+                    .checked_add(treasury_fees_total)
+                    .ok_or(LedgerError::StateTransition(StateTransitionError::Overflow))?;
+                match &mut treasury_account {
+                    Account::Wallet { balance, .. } => *balance = new_balance,
+                    Account::Contract { balance, .. } => *balance = new_balance,
+                }
+                sender_cache.insert(treasury_pk, treasury_account.clone());
+                batch.ops.push(StorageOperation::PutAccount(
+                    treasury_pk.to_bytes().to_vec(),
+                    bincode::serialize(&treasury_account)?,
+                ));
+                touched_accounts.insert(treasury_pk.to_bytes());
+            }
+        }
+
+        if !matches!(fee_policy.mode, FeeMode::None) {
+            info!(
+                "[LEDGER] Fee distribution for block #{}: mode={:?}, operator={}, treasury={}, burned={}",
+                block.index,
+                fee_policy.mode,
+                operator_fees_total,
+                treasury_fees_total,
+                burned_fees_total
+            );
+        }
+
         // 3. Finalize State Merkle Root and compute total supply.
         let mut tree = SparseMerkleTree::new();
         let mut total_supply = 0u64;
+        let mut seen_accounts = HashSet::new();
         for (pk, account) in self.storage.get_all_accounts()? {
+            let pk_bytes = pk.to_bytes();
+            seen_accounts.insert(pk_bytes);
             let val_hash: [u8; 32] = Sha256::digest(&bincode::serialize(&account)?).into();
-            tree.insert(pk.to_bytes(), val_hash.to_vec());
+            tree.insert(pk_bytes, val_hash.to_vec());
             // Use updated account from sender_cache if available, otherwise use storage version
             let final_account = sender_cache.get(&pk).unwrap_or(&account);
             total_supply = total_supply.saturating_add(final_account.balance());
@@ -710,7 +898,11 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         // Overlay sender cache updates (nonce, balance changes from this block's txs)
         for (pk, account) in &sender_cache {
             let val_hash: [u8; 32] = Sha256::digest(&bincode::serialize(account)?).into();
-            tree.insert(pk.to_bytes(), val_hash.to_vec());
+            let pk_bytes = pk.to_bytes();
+            tree.insert(pk_bytes, val_hash.to_vec());
+            if !seen_accounts.contains(&pk_bytes) {
+                total_supply = total_supply.saturating_add(account.balance());
+            }
         }
 
         // 4. Update Chain State

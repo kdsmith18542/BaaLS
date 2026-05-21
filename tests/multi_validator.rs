@@ -1,4 +1,4 @@
-﻿use baals::{
+use baals::{
     consensus::{ConsensusEngine, PoAConsensus},
     types::{Block, PublicKey, ValidatorSet},
 };
@@ -17,9 +17,7 @@ fn make_signing_key() -> (SigningKey, PublicKey) {
 fn test_quorum_acceptance_single_threshold() {
     let (sk1, pk1) = make_signing_key();
 
-    let consensus = PoAConsensus::new(pk1, 1000)
-        .with_signing_key(sk1)
-        .with_quorum_threshold(1);
+    let consensus = PoAConsensus::new(pk1, 1000).with_signing_key(sk1).with_quorum_threshold(1);
 
     let chain_state = baals::types::ChainState {
         latest_block_hash: [0u8; 32],
@@ -55,9 +53,7 @@ fn test_quorum_rejection_missing_signatures() {
     let (_, pk2) = make_signing_key();
     let (_, pk3) = make_signing_key();
 
-    let consensus = PoAConsensus::new(pk1, 1000)
-        .with_signing_key(sk1)
-        .with_quorum_threshold(3); // require 3 of 3
+    let consensus = PoAConsensus::new(pk1, 1000).with_signing_key(sk1).with_quorum_threshold(3); // require 3 of 3
     consensus.add_authorized_signer(pk2);
     consensus.add_authorized_signer(pk3);
 
@@ -85,16 +81,9 @@ fn test_quorum_rejection_missing_signatures() {
     // Only pk1 signs â€” quorum requires 3
     let block = consensus.generate_block(&[], &prev, &chain_state).unwrap();
     let result = consensus.validate_block(&block);
-    assert!(
-        result.is_err(),
-        "Quorum of 3 should reject a block with only 1 signature"
-    );
+    assert!(result.is_err(), "Quorum of 3 should reject a block with only 1 signature");
     let err = format!("{}", result.unwrap_err());
-    assert!(
-        err.contains("Quorum not met"),
-        "Error should mention quorum: {}",
-        err
-    );
+    assert!(err.contains("Quorum not met"), "Error should mention quorum: {}", err);
 }
 
 #[test]
@@ -103,9 +92,7 @@ fn test_quorum_acceptance_with_extra_signatures() {
     let (sk2, pk2) = make_signing_key();
     let (_sk3, pk3) = make_signing_key();
 
-    let consensus = PoAConsensus::new(pk1, 1000)
-        .with_signing_key(sk1)
-        .with_quorum_threshold(2); // require 2 of 3
+    let consensus = PoAConsensus::new(pk1, 1000).with_signing_key(sk1).with_quorum_threshold(2); // require 2 of 3
     consensus.add_authorized_signer(pk2);
     consensus.add_authorized_signer(pk3);
 
@@ -136,10 +123,7 @@ fn test_quorum_acceptance_with_extra_signatures() {
     // Add pk2's signature to quorum_signatures
     use ed25519_dalek::Signer;
     let sig2 = sk2.sign(&block.hash);
-    block.quorum_signatures.push((
-        hex::encode(pk2.to_bytes()),
-        sig2.to_bytes().to_vec(),
-    ));
+    block.quorum_signatures.push((hex::encode(pk2.to_bytes()), sig2.to_bytes().to_vec()));
 
     let result = consensus.validate_block(&block);
     assert!(
@@ -154,9 +138,7 @@ fn test_quorum_rejects_invalid_extra_signature() {
     let (sk1, pk1) = make_signing_key();
     let (_, pk2) = make_signing_key();
 
-    let consensus = PoAConsensus::new(pk1, 1000)
-        .with_signing_key(sk1)
-        .with_quorum_threshold(2);
+    let consensus = PoAConsensus::new(pk1, 1000).with_signing_key(sk1).with_quorum_threshold(2);
     consensus.add_authorized_signer(pk2);
 
     let chain_state = baals::types::ChainState {
@@ -189,10 +171,7 @@ fn test_quorum_rejects_invalid_extra_signature() {
     ));
 
     let result = consensus.validate_block(&block);
-    assert!(
-        result.is_err(),
-        "Invalid quorum signature should cause rejection"
-    );
+    assert!(result.is_err(), "Invalid quorum signature should cause rejection");
 }
 
 #[test]
@@ -200,11 +179,7 @@ fn test_validator_set_struct() {
     let (_, pk1) = make_signing_key();
     let (_, pk2) = make_signing_key();
 
-    let vs = ValidatorSet {
-        signers: vec![pk1, pk2],
-        quorum: 2,
-        effective_height: 100,
-    };
+    let vs = ValidatorSet { signers: vec![pk1, pk2], quorum: 2, effective_height: 100 };
     assert_eq!(vs.signers.len(), 2);
     assert_eq!(vs.quorum, 2);
     assert_eq!(vs.effective_height, 100);
@@ -225,7 +200,8 @@ fn test_round_robin_expected_signer() {
     assert_eq!(consensus.expected_signer_for_index(1).to_bytes(), pk2.to_bytes());
     assert_eq!(consensus.expected_signer_for_index(2).to_bytes(), pk3.to_bytes());
     assert_eq!(consensus.expected_signer_for_index(3).to_bytes(), pk1.to_bytes()); // wraps
-    assert_eq!(consensus.expected_signer_for_index(7).to_bytes(), pk2.to_bytes()); // 7 % 3 = 1
+    assert_eq!(consensus.expected_signer_for_index(7).to_bytes(), pk2.to_bytes());
+    // 7 % 3 = 1
 }
 
 #[test]
@@ -235,9 +211,7 @@ fn test_round_robin_violation_rejected() {
     let (_, pk3) = make_signing_key();
 
     // pk1 is the signing key but block 1 should be signed by pk2 in round-robin
-    let consensus = PoAConsensus::new(pk1, 1000)
-        .with_signing_key(sk1)
-        .with_round_robin(true);
+    let consensus = PoAConsensus::new(pk1, 1000).with_signing_key(sk1).with_round_robin(true);
     consensus.add_authorized_signer(pk2);
     consensus.add_authorized_signer(pk3);
 
@@ -281,9 +255,7 @@ fn test_round_robin_clear_violation_rejected() {
     let (_, pk2) = make_signing_key();
     let (_, pk3) = make_signing_key();
 
-    let consensus = PoAConsensus::new(pk1, 1000)
-        .with_signing_key(sk1)
-        .with_round_robin(true);
+    let consensus = PoAConsensus::new(pk1, 1000).with_signing_key(sk1).with_round_robin(true);
     consensus.add_authorized_signer(pk2);
     consensus.add_authorized_signer(pk3);
 
@@ -313,9 +285,5 @@ fn test_round_robin_clear_violation_rejected() {
         "pk1 signing slot-2 block (expected pk3, grace pk2) should be rejected"
     );
     let err = format!("{}", result.unwrap_err());
-    assert!(
-        err.contains("Round-robin"),
-        "Error should mention Round-robin: {}",
-        err
-    );
+    assert!(err.contains("Round-robin"), "Error should mention Round-robin: {}", err);
 }

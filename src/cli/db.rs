@@ -453,11 +453,7 @@ pub fn handle_db(
             } else {
                 format!("Available snapshots at heights: {:?}", heights)
             };
-            Ok(text_or_json(
-                json,
-                &summary,
-                serde_json::json!({"snapshots": heights}),
-            ))
+            Ok(text_or_json(json, &summary, serde_json::json!({"snapshots": heights})))
         }
     }
 }

@@ -1,8 +1,9 @@
-﻿use baals::*;
+use baals::*;
 use ed25519_dalek::Signer;
 use log::info;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -15,6 +16,11 @@ fn init_logging() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .try_init();
+}
+
+fn pick_free_local_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    listener.local_addr().expect("read local address").port()
 }
 
 #[test]
@@ -826,11 +832,11 @@ fn test_storage_and_merkle_root() {
         transactions: vec![],
         nonce: 0,
         metadata: None,
-                total_gas_used: 0,
-                signer: None,
-                signature: None,
-                quorum_signatures: Vec::new(),
-            };
+        total_gas_used: 0,
+        signer: None,
+        signature: None,
+        quorum_signatures: Vec::new(),
+    };
 
     storage.put_block(&test_block).unwrap();
     let retrieved_block = storage.get_block(&test_block.hash).unwrap().unwrap();
@@ -1254,11 +1260,11 @@ fn test_batch_multi_tree_no_cross_contamination() {
         nonce: 0,
         transactions: vec![],
         metadata: None,
-                total_gas_used: 0,
-                signer: None,
-                signature: None,
-                quorum_signatures: Vec::new(),
-            };
+        total_gas_used: 0,
+        signer: None,
+        signature: None,
+        quorum_signatures: Vec::new(),
+    };
     let dummy_tx = Transaction {
         hash: [2u8; 32],
         sender: test_key,
@@ -2215,11 +2221,11 @@ fn test_redb_storage_basic_crud() {
         transactions: vec![],
         nonce: 0,
         metadata: None,
-                total_gas_used: 0,
-                signer: None,
-                signature: None,
-                quorum_signatures: Vec::new(),
-            };
+        total_gas_used: 0,
+        signer: None,
+        signature: None,
+        quorum_signatures: Vec::new(),
+    };
     storage.put_block(&block).unwrap();
     let retrieved_block = storage.get_block(&block.hash).unwrap().unwrap();
     assert_eq!(retrieved_block.index, 1, "RedbStorage put/get block");
@@ -2459,6 +2465,77 @@ fn test_p2p_block_propagation() {
 }
 
 #[test]
+fn test_p2p_chain_id_mismatch_rejects_peer_and_prunes_known_peer() {
+    init_logging();
+
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+    let storage_a = SledStorage::new(dir_a.path()).unwrap();
+    let storage_b = SledStorage::new(dir_b.path()).unwrap();
+
+    let sk_a = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let sk_b = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let pk_a = PublicKey::from(sk_a.verifying_key());
+    let pk_b = PublicKey::from(sk_b.verifying_key());
+
+    let listen_a: std::net::SocketAddr =
+        format!("127.0.0.1:{}", pick_free_local_port()).parse().unwrap();
+    let listen_b: std::net::SocketAddr =
+        format!("127.0.0.1:{}", pick_free_local_port()).parse().unwrap();
+
+    let sync_a = CustomSync::new(pk_a, listen_a, 1)
+        .with_signing_key(sk_a.clone())
+        .with_storage(storage_a.clone_storage());
+    let sync_b = CustomSync::new(pk_b, listen_b, 2)
+        .with_signing_key(sk_b.clone())
+        .with_storage(storage_b.clone_storage());
+
+    let ce_a = BaaLSContractEngine::new(storage_a.clone()).unwrap();
+    let ce_b = BaaLSContractEngine::new(storage_b.clone()).unwrap();
+    let consensus_a = PoAConsensus::new(pk_a, 5000).with_signing_key(sk_a);
+    let consensus_b = PoAConsensus::new(pk_b, 5000).with_signing_key(sk_b);
+
+    let mut rt_a = Runtime::new(storage_a, consensus_a, ce_a, sync_a).unwrap();
+    let rt_b = Runtime::new(storage_b, consensus_b, ce_b, sync_b).unwrap();
+    rt_a.auto_block_interval_ms = 0;
+    rt_a.auto_block_mempool_threshold = 0;
+    rt_a.start().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Add the mismatched peer through known-peers and sync through that record.
+    rt_b.sync_layer().add_peer_by_address(&listen_a.to_string()).unwrap();
+    let chain_state_b = rt_b.get_chain_state().unwrap();
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    let peer = tokio_rt
+        .block_on(async { rt_b.sync_layer().discover_peers().await })
+        .unwrap()
+        .pop()
+        .unwrap();
+    let sync_result =
+        tokio_rt.block_on(async { rt_b.sync_layer().sync_with_peer(&peer, &chain_state_b).await });
+
+    assert!(
+        matches!(sync_result, Err(SyncError::SynchronizationError(ref msg)) if msg.contains("Chain ID mismatch")),
+        "expected chain-id mismatch error, got: {:?}",
+        sync_result
+    );
+    assert!(
+        rt_b.sync_layer().known_peers().is_empty(),
+        "mismatched peer should be pruned from known peer set"
+    );
+
+    rt_a.stop().unwrap();
+}
+
+#[test]
 fn test_p2p_storage_backed_block_serving() {
     init_logging();
     info!("[SYNC-TEST] Starting storage-backed block serving test");
@@ -2655,11 +2732,11 @@ fn test_backup_and_restore() {
         nonce: 0,
         transactions: vec![],
         metadata: None,
-                total_gas_used: 0,
-                signer: None,
-                signature: None,
-                quorum_signatures: Vec::new(),
-            };
+        total_gas_used: 0,
+        signer: None,
+        signature: None,
+        quorum_signatures: Vec::new(),
+    };
     let mut genesis = genesis;
     genesis.hash = genesis.calculate_hash().unwrap();
     storage.put_block(&genesis).unwrap();

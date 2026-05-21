@@ -1,4 +1,4 @@
-﻿use baals::*;
+use baals::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
@@ -126,6 +126,48 @@ fn cq3_balance_check_rejects_insufficient_funds() {
     );
 }
 
+#[test]
+fn cq18_economic_fee_split_70_20_10_applies() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let (runtime, _consensus_sk, consensus_pk) = make_runtime(temp_dir.path());
+
+    let (_treasury_sk, treasury_pk) = make_test_account(&runtime, 0);
+    runtime
+        .set_fee_policy(FeePolicy {
+            mode: FeeMode::Economic,
+            base_fee: 1_000,
+            operator_percent: 70,
+            treasury_percent: 20,
+            burn_percent: 10,
+            treasury_address: Some(treasury_pk),
+        })
+        .unwrap();
+
+    let (sender_sk, sender_pk) = make_test_account(&runtime, 1_000_000);
+    let (_recipient_sk, recipient_pk) = make_test_account(&runtime, 0);
+
+    let tx = make_transfer_tx(sender_pk, &sender_sk, recipient_pk, 100, 1, 21_000, 1, 1);
+    runtime.submit_transaction(tx).unwrap();
+
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    let _ = tokio_rt.block_on(runtime.produce_block()).unwrap();
+
+    let sender_after = runtime.get_account(&sender_pk).unwrap().unwrap();
+    let recipient_after = runtime.get_account(&recipient_pk).unwrap().unwrap();
+    let operator_after = runtime.get_account(&consensus_pk).unwrap().unwrap();
+    let treasury_after = runtime.get_account(&treasury_pk).unwrap().unwrap();
+
+    assert_eq!(sender_after.balance(), 977_900);
+    assert_eq!(recipient_after.balance(), 100);
+    assert_eq!(operator_after.balance(), 15_400);
+    assert_eq!(treasury_after.balance(), 4_400);
+
+    // 1_000_000 initial - 2_200 burned = 997_800 total supply
+    let chain_state = runtime.get_chain_state().unwrap();
+    assert_eq!(chain_state.total_supply, 997_800);
+}
+
 // CQ-4: chain_id validation prevents cross-chain replay
 #[test]
 fn cq4_invalid_chain_id_rejected() {
@@ -202,11 +244,11 @@ fn cq8_monotonic_timestamp_enforced() {
         nonce: 0,
         transactions: vec![],
         metadata: None,
-                total_gas_used: 0,
-                signer: None,
-                signature: None,
-                quorum_signatures: Vec::new(),
-            };
+        total_gas_used: 0,
+        signer: None,
+        signature: None,
+        quorum_signatures: Vec::new(),
+    };
     block2.hash = block2.calculate_hash().unwrap();
 
     let result = runtime.ledger().validate_block(&block2);
@@ -248,11 +290,11 @@ fn cq11_failed_tx_status_recorded() {
         nonce: 0,
         transactions: vec![tx.clone()],
         metadata: None,
-                total_gas_used: 0,
-                signer: None,
-                signature: None,
-                quorum_signatures: Vec::new(),
-            };
+        total_gas_used: 0,
+        signer: None,
+        signature: None,
+        quorum_signatures: Vec::new(),
+    };
 
     // Sign the block with consensus key
     let consensus = PoAConsensus::new(consensus_pk, 1000).with_signing_key(consensus_sk);
@@ -327,11 +369,11 @@ fn cq12_duplicate_tx_rejected_in_block() {
         nonce: 0,
         transactions: vec![tx.clone()],
         metadata: None,
-                total_gas_used: 0,
-                signer: None,
-                signature: None,
-                quorum_signatures: Vec::new(),
-            };
+        total_gas_used: 0,
+        signer: None,
+        signature: None,
+        quorum_signatures: Vec::new(),
+    };
     block2.hash = block2.calculate_hash().unwrap();
 
     let result = runtime.ledger().validate_block(&block2);

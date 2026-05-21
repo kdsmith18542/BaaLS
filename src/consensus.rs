@@ -83,7 +83,7 @@ impl PoAConsensus {
             signing_key: None,
             block_gas_limit: 30_000_000,        // 30M gas per block
             block_size_limit: 10 * 1024 * 1024, // 10MB per block
-            quorum_threshold: 1,                 // default: single-signer
+            quorum_threshold: 1,                // default: single-signer
             round_robin: false,
         }
     }
@@ -103,9 +103,8 @@ impl PoAConsensus {
     /// included in the rotation.
     pub fn expected_signer_for_index(&self, block_index: u64) -> PublicKey {
         let signers = self.authorized_signers.read().unwrap();
-        let all: Vec<&PublicKey> = std::iter::once(&self.authorized_signer_key)
-            .chain(signers.iter())
-            .collect();
+        let all: Vec<&PublicKey> =
+            std::iter::once(&self.authorized_signer_key).chain(signers.iter()).collect();
         *all[(block_index as usize) % all.len()]
     }
 
@@ -180,10 +179,7 @@ impl PoAConsensus {
         let verifier_pk = if is_primary {
             self.authorized_signer_key
         } else {
-            match signers_snapshot
-                .iter()
-                .find(|pk| hex::encode(pk.to_bytes()) == *signer_hex)
-            {
+            match signers_snapshot.iter().find(|pk| hex::encode(pk.to_bytes()) == *signer_hex) {
                 Some(pk) => *pk,
                 None => return Err(ConsensusError::UnauthorizedSigner),
             }

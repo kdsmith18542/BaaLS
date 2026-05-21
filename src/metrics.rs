@@ -436,10 +436,8 @@ impl MetricsCollector {
             false,
             ProcessRefreshKind::nothing().with_memory(),
         );
-        let used_memory = sys
-            .process(pid)
-            .map(|p| p.memory() as f64 / (1024.0 * 1024.0))
-            .unwrap_or(0.0);
+        let used_memory =
+            sys.process(pid).map(|p| p.memory() as f64 / (1024.0 * 1024.0)).unwrap_or(0.0);
 
         let (storage_healthy, latest_block_index, latest_block_hash, mempool_size) = {
             let m = self.metrics.lock().unwrap();

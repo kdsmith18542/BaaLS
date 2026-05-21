@@ -623,7 +623,10 @@ impl Storage for RedbStorage {
         Ok(())
     }
 
-    fn get_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<crate::types::TransactionReceipt>, StorageError> {
+    fn get_receipt(
+        &self,
+        tx_hash: &[u8; 32],
+    ) -> Result<Option<crate::types::TransactionReceipt>, StorageError> {
         let key = hex::encode(tx_hash);
         let txn = self.db_guard()?.begin_read().map_err(map_err)?;
         let table = txn.open_table(RECEIPT_TABLE).map_err(map_err)?;
@@ -1155,7 +1158,8 @@ impl Storage for RedbStorage {
                             txs_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
                         }
                         StorageOperation::PutReceipt(k, v) => {
-                            let mut receipts_table = txn.open_table(RECEIPT_TABLE).map_err(map_err)?;
+                            let mut receipts_table =
+                                txn.open_table(RECEIPT_TABLE).map_err(map_err)?;
                             receipts_table.insert(k.as_slice(), v.as_slice()).map_err(map_err)?;
                         }
                         StorageOperation::PutContractCode(k, v) => {
@@ -1401,7 +1405,10 @@ impl Storage for RedbStorage {
                 .unwrap_or_default()
                 .as_secs(),
             last_block_height: chain_state.as_ref().map(|cs| cs.latest_block_index).unwrap_or(0),
-            last_block_hash: chain_state.as_ref().map(|cs| cs.latest_block_hash).unwrap_or([0u8; 32]),
+            last_block_hash: chain_state
+                .as_ref()
+                .map(|cs| cs.latest_block_hash)
+                .unwrap_or([0u8; 32]),
             backup_type: BackupType::Full,
             previous_manifest: None,
         };
@@ -1463,7 +1470,11 @@ impl Storage for RedbStorage {
         Ok(())
     }
 
-    fn backup_incremental(&self, base_path: &std::path::Path, output_path: &std::path::Path) -> Result<(), StorageError> {
+    fn backup_incremental(
+        &self,
+        base_path: &std::path::Path,
+        output_path: &std::path::Path,
+    ) -> Result<(), StorageError> {
         use std::io::Write;
         let base_manifest_path = if base_path.extension().is_none() {
             base_path.join(BACKUP_MANIFEST_FILENAME)
@@ -1478,7 +1489,8 @@ impl Storage for RedbStorage {
             ));
         }
         let manifest_data = std::fs::read_to_string(&base_manifest_path).map_err(map_err)?;
-        let base_manifest: BackupManifest = serde_json::from_str(&manifest_data).map_err(map_err)?;
+        let base_manifest: BackupManifest =
+            serde_json::from_str(&manifest_data).map_err(map_err)?;
 
         let current_height = self.get_chain_height()?;
         if current_height <= base_manifest.last_block_height {
@@ -1515,7 +1527,8 @@ impl Storage for RedbStorage {
                             "height_to_block.{}.{}",
                             hex::encode(k.value()),
                             hex::encode(v.value())
-                        ).map_err(map_err)?;
+                        )
+                        .map_err(map_err)?;
 
                         // Write block data (fetch original key from blocks table)
                         let block_hash = v.value();
@@ -1526,7 +1539,8 @@ impl Storage for RedbStorage {
                                 "blocks.{}.{}",
                                 hex::encode(block_hash),
                                 hex::encode(block_val.value())
-                            ).map_err(map_err)?;
+                            )
+                            .map_err(map_err)?;
 
                             // Write checksum
                             let checksum: [u8; 32] = sha2::Sha256::digest(block_val.value()).into();
@@ -1536,7 +1550,8 @@ impl Storage for RedbStorage {
                                 "blocks.{}.{}",
                                 hex::encode(checksum_key.as_bytes()),
                                 hex::encode(checksum)
-                            ).map_err(map_err)?;
+                            )
+                            .map_err(map_err)?;
 
                             for tx in &block.transactions {
                                 new_tx_hashes.push(tx.hash.to_vec());
@@ -1552,18 +1567,22 @@ impl Storage for RedbStorage {
                                             "txs.{}.{}",
                                             hex::encode(ik.value()),
                                             hex::encode(iv.value())
-                                        ).map_err(map_err)?;
+                                        )
+                                        .map_err(map_err)?;
                                     }
                                 }
                                 // Write tx-to-block reverse index
                                 let rev_key = format!("tx_block:{}", hex::encode(tx.hash));
-                                if let Some(rev_val) = txs_table.get(rev_key.as_bytes()).map_err(map_err)? {
+                                if let Some(rev_val) =
+                                    txs_table.get(rev_key.as_bytes()).map_err(map_err)?
+                                {
                                     writeln!(
                                         plaintext,
                                         "txs.{}.{}",
                                         hex::encode(rev_key.as_bytes()),
                                         hex::encode(rev_val.value())
-                                    ).map_err(map_err)?;
+                                    )
+                                    .map_err(map_err)?;
                                 }
                             }
                         }
@@ -1575,22 +1594,21 @@ impl Storage for RedbStorage {
         // Write transactions for new blocks
         for tx_hash in &new_tx_hashes {
             if let Some(tx_val) = txs_table.get(tx_hash.as_slice()).map_err(map_err)? {
-                writeln!(
-                    plaintext,
-                    "txs.{}.{}",
-                    hex::encode(tx_hash),
-                    hex::encode(tx_val.value())
-                ).map_err(map_err)?;
+                writeln!(plaintext, "txs.{}.{}", hex::encode(tx_hash), hex::encode(tx_val.value()))
+                    .map_err(map_err)?;
 
                 // Write receipt
                 let receipt_key = hex::encode(tx_hash);
-                if let Some(rec_val) = receipts_table.get(receipt_key.as_bytes()).map_err(map_err)? {
+                if let Some(rec_val) =
+                    receipts_table.get(receipt_key.as_bytes()).map_err(map_err)?
+                {
                     writeln!(
                         plaintext,
                         "receipts.{}.{}",
                         hex::encode(receipt_key.as_bytes()),
                         hex::encode(rec_val.value())
-                    ).map_err(map_err)?;
+                    )
+                    .map_err(map_err)?;
                 }
             }
         }
@@ -1608,12 +1626,8 @@ impl Storage for RedbStorage {
         let accounts_iter = accounts_table.iter().map_err(map_err)?;
         for item in accounts_iter {
             let (k, v) = item.map_err(map_err)?;
-            writeln!(
-                plaintext,
-                "accounts.{}.{}",
-                hex::encode(k.value()),
-                hex::encode(v.value())
-            ).map_err(map_err)?;
+            writeln!(plaintext, "accounts.{}.{}", hex::encode(k.value()), hex::encode(v.value()))
+                .map_err(map_err)?;
         }
 
         // Write full contracts table (code, storage, deployer)
@@ -1621,12 +1635,8 @@ impl Storage for RedbStorage {
         let contracts_iter = contracts_table.iter().map_err(map_err)?;
         for item in contracts_iter {
             let (k, v) = item.map_err(map_err)?;
-            writeln!(
-                plaintext,
-                "contracts.{}.{}",
-                hex::encode(k.value()),
-                hex::encode(v.value())
-            ).map_err(map_err)?;
+            writeln!(plaintext, "contracts.{}.{}", hex::encode(k.value()), hex::encode(v.value()))
+                .map_err(map_err)?;
         }
 
         // Write ABI table
@@ -1634,12 +1644,8 @@ impl Storage for RedbStorage {
         let abi_iter = abi_table.iter().map_err(map_err)?;
         for item in abi_iter {
             let (k, v) = item.map_err(map_err)?;
-            writeln!(
-                plaintext,
-                "abi.{}.{}",
-                hex::encode(k.value()),
-                hex::encode(v.value())
-            ).map_err(map_err)?;
+            writeln!(plaintext, "abi.{}.{}", hex::encode(k.value()), hex::encode(v.value()))
+                .map_err(map_err)?;
         }
 
         // Write events
@@ -1647,12 +1653,8 @@ impl Storage for RedbStorage {
         let events_iter = events_table.iter().map_err(map_err)?;
         for item in events_iter {
             let (k, v) = item.map_err(map_err)?;
-            writeln!(
-                plaintext,
-                "events.{}.{}",
-                hex::encode(k.value()),
-                hex::encode(v.value())
-            ).map_err(map_err)?;
+            writeln!(plaintext, "events.{}.{}", hex::encode(k.value()), hex::encode(v.value()))
+                .map_err(map_err)?;
         }
 
         // Write meta table
@@ -1660,12 +1662,8 @@ impl Storage for RedbStorage {
         let meta_iter = meta_table.iter().map_err(map_err)?;
         for item in meta_iter {
             let (k, v) = item.map_err(map_err)?;
-            writeln!(
-                plaintext,
-                "meta.{}.{}",
-                hex::encode(k.value()),
-                hex::encode(v.value())
-            ).map_err(map_err)?;
+            writeln!(plaintext, "meta.{}.{}", hex::encode(k.value()), hex::encode(v.value()))
+                .map_err(map_err)?;
         }
 
         drop(txn);
@@ -1683,7 +1681,10 @@ impl Storage for RedbStorage {
                 .unwrap_or_default()
                 .as_secs(),
             last_block_height: chain_state.as_ref().map(|cs| cs.latest_block_index).unwrap_or(0),
-            last_block_hash: chain_state.as_ref().map(|cs| cs.latest_block_hash).unwrap_or([0u8; 32]),
+            last_block_hash: chain_state
+                .as_ref()
+                .map(|cs| cs.latest_block_hash)
+                .unwrap_or([0u8; 32]),
             backup_type: BackupType::Incremental,
             previous_manifest: Some(base_manifest_path.to_string_lossy().to_string()),
         };
@@ -1710,7 +1711,10 @@ impl Storage for RedbStorage {
         Ok(())
     }
 
-    fn get_backup_manifest(&self, path: &std::path::Path) -> Result<Option<BackupManifest>, StorageError> {
+    fn get_backup_manifest(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Option<BackupManifest>, StorageError> {
         let manifest_path = if path.extension().is_none() {
             path.join(BACKUP_MANIFEST_FILENAME)
         } else {
@@ -1722,9 +1726,7 @@ impl Storage for RedbStorage {
             return Ok(None);
         }
         let data = std::fs::read_to_string(&manifest_path).map_err(map_err)?;
-        serde_json::from_str(&data)
-            .map(Some)
-            .map_err(|e| StorageError::IndexError(e.to_string()))
+        serde_json::from_str(&data).map(Some).map_err(|e| StorageError::IndexError(e.to_string()))
     }
 
     fn restore_from(&self, path: &std::path::Path) -> Result<(), StorageError> {

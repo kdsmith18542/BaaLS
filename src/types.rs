@@ -702,11 +702,75 @@ pub enum TransactionPayload {
     ContractDeploy { wasm_bytes: Vec<u8>, init_payload: Option<Vec<u8>> },
     ContractCall { method: String, args: Vec<Vec<u8>>, value: Option<u64> },
     Data { data: Vec<u8> },
-    ValidatorSetChange {
-        added: Vec<PublicKey>,
-        removed: Vec<PublicKey>,
-        effective_height: u64,
-    },
+    ValidatorSetChange { added: Vec<PublicKey>, removed: Vec<PublicKey>, effective_height: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FeeMode {
+    None,
+    #[default]
+    Metered,
+    Economic,
+}
+
+fn default_operator_fee_percent() -> u8 {
+    70
+}
+
+fn default_treasury_fee_percent() -> u8 {
+    20
+}
+
+fn default_burn_fee_percent() -> u8 {
+    10
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeePolicy {
+    #[serde(default)]
+    pub mode: FeeMode,
+    #[serde(default)]
+    pub base_fee: u64,
+    #[serde(default = "default_operator_fee_percent")]
+    pub operator_percent: u8,
+    #[serde(default = "default_treasury_fee_percent")]
+    pub treasury_percent: u8,
+    #[serde(default = "default_burn_fee_percent")]
+    pub burn_percent: u8,
+    #[serde(default)]
+    pub treasury_address: Option<PublicKey>,
+}
+
+impl Default for FeePolicy {
+    fn default() -> Self {
+        // Backward-compatible default for non-configured runtimes:
+        // metered mode with full burn semantics (legacy behavior).
+        Self {
+            mode: FeeMode::Metered,
+            base_fee: 0,
+            operator_percent: 0,
+            treasury_percent: 0,
+            burn_percent: 100,
+            treasury_address: None,
+        }
+    }
+}
+
+impl FeePolicy {
+    pub fn validate(&self) -> Result<(), String> {
+        let total = self
+            .operator_percent
+            .saturating_add(self.treasury_percent)
+            .saturating_add(self.burn_percent);
+        if total != 100 {
+            return Err(format!(
+                "fee split must sum to 100, got operator={} treasury={} burn={}",
+                self.operator_percent, self.treasury_percent, self.burn_percent
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

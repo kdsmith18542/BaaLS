@@ -76,7 +76,10 @@ pub trait Storage: Send + Sync {
 
     // Transaction Receipts
     fn put_receipt(&self, receipt: &crate::types::TransactionReceipt) -> Result<(), StorageError>;
-    fn get_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<crate::types::TransactionReceipt>, StorageError>;
+    fn get_receipt(
+        &self,
+        tx_hash: &[u8; 32],
+    ) -> Result<Option<crate::types::TransactionReceipt>, StorageError>;
 
     // Enhanced Transaction indexing for fast lookup
     fn index_transaction(
@@ -236,7 +239,9 @@ pub trait Storage: Send + Sync {
         snapshots_dir: &std::path::Path,
     ) -> Result<(), StorageError> {
         let _ = (height, snapshots_dir);
-        Err(StorageError::IndexError("snapshots not supported by this storage backend".to_string()))
+        Err(StorageError::IndexError(
+            "snapshots not supported by this storage backend".to_string(),
+        ))
     }
 
     fn restore_from_snapshot(
@@ -245,21 +250,20 @@ pub trait Storage: Send + Sync {
         snapshots_dir: &std::path::Path,
     ) -> Result<(), StorageError> {
         let _ = (height, snapshots_dir);
-        Err(StorageError::IndexError("snapshots not supported by this storage backend".to_string()))
+        Err(StorageError::IndexError(
+            "snapshots not supported by this storage backend".to_string(),
+        ))
     }
 
-    fn list_snapshots(
-        &self,
-        snapshots_dir: &std::path::Path,
-    ) -> Result<Vec<u64>, StorageError> {
+    fn list_snapshots(&self, snapshots_dir: &std::path::Path) -> Result<Vec<u64>, StorageError> {
         let manifest_path = snapshots_dir.join("manifest.json");
         if !manifest_path.exists() {
             return Ok(Vec::new());
         }
         let data = std::fs::read_to_string(&manifest_path)
             .map_err(|e| StorageError::IndexError(e.to_string()))?;
-        let heights: Vec<u64> = serde_json::from_str(&data)
-            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+        let heights: Vec<u64> =
+            serde_json::from_str(&data).map_err(|e| StorageError::IndexError(e.to_string()))?;
         Ok(heights)
     }
 
@@ -273,8 +277,15 @@ pub trait Storage: Send + Sync {
     // Backup and restore
     fn backup_to(&self, path: &std::path::Path) -> Result<(), StorageError>;
     fn restore_from(&self, path: &std::path::Path) -> Result<(), StorageError>;
-    fn backup_incremental(&self, base_path: &std::path::Path, output_path: &std::path::Path) -> Result<(), StorageError>;
-    fn get_backup_manifest(&self, path: &std::path::Path) -> Result<Option<BackupManifest>, StorageError>;
+    fn backup_incremental(
+        &self,
+        base_path: &std::path::Path,
+        output_path: &std::path::Path,
+    ) -> Result<(), StorageError>;
+    fn get_backup_manifest(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Option<BackupManifest>, StorageError>;
 
     // Storage metadata
     fn get_storage_metadata(&self, key: &str) -> Result<Option<String>, StorageError>;
@@ -306,9 +317,9 @@ pub trait Storage: Send + Sync {
 
     fn get_validator_set(&self) -> Result<Option<crate::types::ValidatorSet>, StorageError> {
         match self.get_storage_metadata("validator_set")? {
-            Some(json) => serde_json::from_str(&json)
-                .map(Some)
-                .map_err(|e| StorageError::IndexError(format!("Failed to deserialize validator_set: {}", e))),
+            Some(json) => serde_json::from_str(&json).map(Some).map_err(|e| {
+                StorageError::IndexError(format!("Failed to deserialize validator_set: {}", e))
+            }),
             None => Ok(None),
         }
     }
@@ -952,7 +963,10 @@ impl Storage for SledStorage {
         Ok(())
     }
 
-    fn get_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<crate::types::TransactionReceipt>, StorageError> {
+    fn get_receipt(
+        &self,
+        tx_hash: &[u8; 32],
+    ) -> Result<Option<crate::types::TransactionReceipt>, StorageError> {
         let key = hex::encode(tx_hash);
         match self.receipts_tree.get(key.as_bytes())? {
             Some(bytes) => {
@@ -1412,18 +1426,15 @@ impl Storage for SledStorage {
             ops: rollback_ops,
         };
         let log_key = format!("rollback:{}", hex::encode(block_hash));
-        let log_json = serde_json::to_string(&log)
-            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+        let log_json =
+            serde_json::to_string(&log).map_err(|e| StorageError::IndexError(e.to_string()))?;
         self.meta_tree.insert(log_key.as_bytes(), log_json.as_bytes())?;
         self.meta_tree.flush()?;
 
         self.apply_batch(batch)
     }
 
-    fn apply_rollback_log(
-        &self,
-        log: &crate::rollback::RollbackLog,
-    ) -> Result<(), StorageError> {
+    fn apply_rollback_log(&self, log: &crate::rollback::RollbackLog) -> Result<(), StorageError> {
         use crate::rollback::RollbackOp;
         for op in &log.ops {
             match op {
@@ -1431,34 +1442,48 @@ impl Storage for SledStorage {
                     let mut prefixed = b"acc:".to_vec();
                     prefixed.extend_from_slice(key);
                     match old {
-                        Some(v) => { self.accounts_tree.insert(&prefixed, v.as_slice())?; }
-                        None => { self.accounts_tree.remove(&prefixed)?; }
+                        Some(v) => {
+                            self.accounts_tree.insert(&prefixed, v.as_slice())?;
+                        }
+                        None => {
+                            self.accounts_tree.remove(&prefixed)?;
+                        }
                     }
                 }
-                RollbackOp::ChainState(key, old) => {
-                    match old {
-                        Some(v) => { self.chain_state_tree.insert(key.as_slice(), v.as_slice())?; }
-                        None => { self.chain_state_tree.remove(key.as_slice())?; }
+                RollbackOp::ChainState(key, old) => match old {
+                    Some(v) => {
+                        self.chain_state_tree.insert(key.as_slice(), v.as_slice())?;
                     }
-                }
-                RollbackOp::ContractStorage(key, old) => {
-                    match old {
-                        Some(v) => { self.contract_storage_tree.insert(key.as_slice(), v.as_slice())?; }
-                        None => { self.contract_storage_tree.remove(key.as_slice())?; }
+                    None => {
+                        self.chain_state_tree.remove(key.as_slice())?;
                     }
-                }
+                },
+                RollbackOp::ContractStorage(key, old) => match old {
+                    Some(v) => {
+                        self.contract_storage_tree.insert(key.as_slice(), v.as_slice())?;
+                    }
+                    None => {
+                        self.contract_storage_tree.remove(key.as_slice())?;
+                    }
+                },
                 RollbackOp::ContractCode(key, old) | RollbackOp::ContractDeployer(key, old) => {
                     match old {
-                        Some(v) => { self.contract_code_tree.insert(key.as_slice(), v.as_slice())?; }
-                        None => { self.contract_code_tree.remove(key.as_slice())?; }
+                        Some(v) => {
+                            self.contract_code_tree.insert(key.as_slice(), v.as_slice())?;
+                        }
+                        None => {
+                            self.contract_code_tree.remove(key.as_slice())?;
+                        }
                     }
                 }
-                RollbackOp::TxStatus(key, old) => {
-                    match old {
-                        Some(v) => { self.tx_by_block_tree.insert(key.as_slice(), v.as_slice())?; }
-                        None => { self.tx_by_block_tree.remove(key.as_slice())?; }
+                RollbackOp::TxStatus(key, old) => match old {
+                    Some(v) => {
+                        self.tx_by_block_tree.insert(key.as_slice(), v.as_slice())?;
                     }
-                }
+                    None => {
+                        self.tx_by_block_tree.remove(key.as_slice())?;
+                    }
+                },
             }
         }
         self.accounts_tree.flush()?;
@@ -1476,8 +1501,8 @@ impl Storage for SledStorage {
         let key = format!("rollback:{}", hex::encode(block_hash));
         match self.meta_tree.get(key.as_bytes())? {
             Some(v) => {
-                let json = std::str::from_utf8(&v)
-                    .map_err(|e| StorageError::IndexError(e.to_string()))?;
+                let json =
+                    std::str::from_utf8(&v).map_err(|e| StorageError::IndexError(e.to_string()))?;
                 if json.is_empty() {
                     return Ok(None);
                 }
@@ -1607,7 +1632,11 @@ impl Storage for SledStorage {
         Ok(())
     }
 
-    fn backup_incremental(&self, base_path: &std::path::Path, output_path: &std::path::Path) -> Result<(), StorageError> {
+    fn backup_incremental(
+        &self,
+        base_path: &std::path::Path,
+        output_path: &std::path::Path,
+    ) -> Result<(), StorageError> {
         use std::fs;
         let base_manifest_path = base_path.join(BACKUP_MANIFEST_FILENAME);
         if !base_manifest_path.exists() {
@@ -1646,10 +1675,8 @@ impl Storage for SledStorage {
                 hash_key.extend_from_slice(&block.hash);
                 inc_blocks_tree.insert(hash_key, encoded.clone())?;
 
-                inc_blocks_tree.insert(
-                    format!("height:{:0>20}", block.index).as_bytes(),
-                    encoded,
-                )?;
+                inc_blocks_tree
+                    .insert(format!("height:{:0>20}", block.index).as_bytes(), encoded)?;
 
                 inc_blocks_tree.insert(
                     format!("checksum:{}", hex::encode(block.hash)).as_bytes(),
@@ -1740,10 +1767,7 @@ impl Storage for SledStorage {
             last_block_hash: latest.as_ref().map(|b| b.hash).unwrap_or([0u8; 32]),
             backup_type: BackupType::Incremental,
             previous_manifest: Some(
-                base_path
-                    .join(BACKUP_MANIFEST_FILENAME)
-                    .to_string_lossy()
-                    .to_string(),
+                base_path.join(BACKUP_MANIFEST_FILENAME).to_string_lossy().to_string(),
             ),
         };
         let manifest_json = serde_json::to_string_pretty(&manifest)
@@ -1760,16 +1784,17 @@ impl Storage for SledStorage {
         Ok(())
     }
 
-    fn get_backup_manifest(&self, path: &std::path::Path) -> Result<Option<BackupManifest>, StorageError> {
+    fn get_backup_manifest(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Option<BackupManifest>, StorageError> {
         let manifest_path = path.join(BACKUP_MANIFEST_FILENAME);
         if !manifest_path.exists() {
             return Ok(None);
         }
         let data = std::fs::read_to_string(&manifest_path)
             .map_err(|e| StorageError::IndexError(e.to_string()))?;
-        serde_json::from_str(&data)
-            .map(Some)
-            .map_err(|e| StorageError::IndexError(e.to_string()))
+        serde_json::from_str(&data).map(Some).map_err(|e| StorageError::IndexError(e.to_string()))
     }
 
     fn take_snapshot(
@@ -1815,8 +1840,8 @@ impl Storage for SledStorage {
             let oldest = heights.remove(0);
             let _ = std::fs::remove_file(snapshots_dir.join(format!("{}.snap", oldest)));
         }
-        let manifest_json = serde_json::to_string(&heights)
-            .map_err(|e| StorageError::IndexError(e.to_string()))?;
+        let manifest_json =
+            serde_json::to_string(&heights).map_err(|e| StorageError::IndexError(e.to_string()))?;
         std::fs::write(&manifest_path, manifest_json)
             .map_err(|e| StorageError::IndexError(e.to_string()))?;
 

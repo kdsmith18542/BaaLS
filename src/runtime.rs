@@ -4,7 +4,7 @@ use rand::RngCore;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::consensus::{ConsensusEngine, ConsensusError};
 use crate::contracts::BaaLSContractEngine;
@@ -13,7 +13,9 @@ use crate::ledger::{Ledger, LedgerError};
 use crate::metrics::{time_operation_fn, MetricsCollector};
 use crate::storage::{Storage, StorageError};
 use crate::sync::SyncLayer;
-use crate::types::{Account, Block, ChainState, ContractId, CryptoError, PublicKey, Transaction};
+use crate::types::{
+    Account, Block, ChainState, ContractId, CryptoError, FeePolicy, PublicKey, Transaction,
+};
 
 const MAX_NONCE_GAP_SKIP_CYCLES: u32 = 3;
 
@@ -218,6 +220,7 @@ pub struct Runtime<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> {
     metrics: Arc<MetricsCollector>,
     started_at: Arc<Mutex<Option<SystemTime>>>,
     sync_in_flight: Arc<AtomicBool>,
+    sync_pause_until: Arc<Mutex<Option<Instant>>>,
     block_production_shutdown: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
     backup_shutdown: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
     event_sender: Arc<Mutex<Option<tokio::sync::broadcast::Sender<crate::ws_server::ChainEvent>>>>,
@@ -245,6 +248,7 @@ impl<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> Clone for Runtime<S
             metrics: Arc::clone(&self.metrics),
             started_at: Arc::clone(&self.started_at),
             sync_in_flight: Arc::clone(&self.sync_in_flight),
+            sync_pause_until: Arc::clone(&self.sync_pause_until),
             block_production_shutdown: Arc::clone(&self.block_production_shutdown),
             backup_shutdown: Arc::clone(&self.backup_shutdown),
             event_sender: Arc::clone(&self.event_sender),
@@ -305,6 +309,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             metrics: Arc::new(MetricsCollector::new()),
             started_at: Arc::new(Mutex::new(None)),
             sync_in_flight: Arc::new(AtomicBool::new(false)),
+            sync_pause_until: Arc::new(Mutex::new(None)),
             block_production_shutdown: Arc::new(Mutex::new(None)),
             backup_shutdown: Arc::new(Mutex::new(None)),
             event_sender: Arc::new(Mutex::new(None)),
@@ -451,6 +456,15 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         mempool.max_tx_per_sender_per_second = max_tx_per_sender_per_second;
     }
 
+    pub fn set_fee_policy(&self, policy: FeePolicy) -> Result<(), RuntimeError> {
+        self.ledger.set_fee_policy(policy)?;
+        Ok(())
+    }
+
+    pub fn fee_policy(&self) -> FeePolicy {
+        self.ledger.fee_policy()
+    }
+
     fn spawn_block_production(&self) {
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
         *self.block_production_shutdown.lock().unwrap() = Some(shutdown_tx);
@@ -513,7 +527,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                     }
 
                     // Sync with peers to check if we're behind
-                    info!("[TICK] Block production tick; calling sync_with_all_peers");
+                    debug!("[TICK] Block production tick; calling sync_with_all_peers");
                     self_clone.sync_with_all_peers();
                 }
                 debug!("Block production loop terminated");
@@ -710,13 +724,19 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                     _ => 0,
                 };
                 let max_gas_cost = transaction.gas_price.saturating_mul(transaction.gas_limit);
-                let min_balance_required = max_gas_cost.saturating_add(transfer_amount);
+                let fee_policy = self.fee_policy();
+                let max_fee = if matches!(fee_policy.mode, crate::types::FeeMode::None) {
+                    0
+                } else {
+                    max_gas_cost.saturating_add(fee_policy.base_fee)
+                };
+                let min_balance_required = max_fee.saturating_add(transfer_amount);
                 if sender_account.balance() < min_balance_required {
                     return Err(RuntimeError::InvalidTransaction(format!(
-                        "Insufficient balance: have {}, need {} (gas {} + value {})",
+                        "Insufficient balance: have {}, need {} (fee {} + value {})",
                         sender_account.balance(),
                         min_balance_required,
-                        max_gas_cost,
+                        max_fee,
                         transfer_amount
                     )));
                 }
@@ -901,7 +921,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                 .sum::<usize>();
         self.metrics.update_average_block_size(block_size);
 
-        println!("Block produced and applied: {}", crate::types::format_hex(&new_block.hash));
+        info!("Block produced and applied: {}", crate::types::format_hex(&new_block.hash));
         debug!("[PRODUCE_BLOCK] Block production completed successfully");
 
         // Optionally broadcast the new block
@@ -1473,12 +1493,15 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                         "[SYNC] Invalid chain_id in block {} tx: expected {}, got {}",
                         block.index, self.chain_id, tx.chain_id
                     );
+                    let pause_until = Instant::now() + std::time::Duration::from_secs(60);
+                    *self.sync_pause_until.lock().unwrap() = Some(pause_until);
+                    warn!("[SYNC] Pausing sync attempts for 60s due to cross-chain block data");
                     chain_id_valid = false;
                     break;
                 }
             }
             if !chain_id_valid {
-                continue;
+                break;
             }
 
             let consensus_result = {
@@ -1487,10 +1510,24 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             };
             if let Err(e) = consensus_result {
                 let chain_state = self.chain_state.lock().unwrap();
+                let unauthorized_signer = matches!(&e, ConsensusError::UnauthorizedSigner)
+                    || matches!(
+                        &e,
+                        ConsensusError::ValidationFailed(msg)
+                            if msg.to_ascii_lowercase().contains("unauthorized signer")
+                    );
                 warn!(
                     "[APPLY] Consensus validation FAILED for block #{}: {} (chain height={})",
                     block.index, e, chain_state.latest_block_index
                 );
+                if unauthorized_signer {
+                    let pause_until = Instant::now() + std::time::Duration::from_secs(60);
+                    *self.sync_pause_until.lock().unwrap() = Some(pause_until);
+                    warn!(
+                        "[APPLY] Peer blocks are signed by an unauthorized signer. Pausing sync attempts for 60s."
+                    );
+                    break;
+                }
                 continue;
             }
 
@@ -1501,6 +1538,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
             match self.ledger.apply_block(&block) {
                 Ok(()) => {
+                    *self.sync_pause_until.lock().unwrap() = None;
                     self.broadcast_event(crate::ws_server::ChainEvent::NewBlock {
                         hash: crate::types::format_hex(&block.hash),
                         height: block.index,
@@ -1529,7 +1567,21 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                     }
                 }
                 Err(e) => {
+                    let missing_sender_state = matches!(
+                        &e,
+                        LedgerError::StateTransition(
+                            crate::ledger::StateTransitionError::AccountNotFound(_)
+                        )
+                    );
                     warn!("[APPLY] apply_block FAILED for block #{}: {}", block.index, e);
+                    if missing_sender_state {
+                        let pause_until = Instant::now() + std::time::Duration::from_secs(30);
+                        *self.sync_pause_until.lock().unwrap() = Some(pause_until);
+                        warn!(
+                            "[APPLY] Possible chain-state mismatch detected (missing sender account). Pausing sync attempts for 30s."
+                        );
+                        break;
+                    }
                 }
             }
         }
@@ -1537,16 +1589,26 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
     /// Check all known peers and sync with any that are ahead.
     fn sync_with_all_peers(&self) {
-        info!(
+        debug!(
             "[SYNC] sync_with_all_peers called (sync_in_flight={})",
             self.sync_in_flight.load(Ordering::Acquire)
         );
+        {
+            let mut pause_guard = self.sync_pause_until.lock().unwrap();
+            if let Some(until) = *pause_guard {
+                if Instant::now() < until {
+                    debug!("[SYNC] Sync temporarily paused due to prior state-mismatch failure");
+                    return;
+                }
+                *pause_guard = None;
+            }
+        }
         if self
             .sync_in_flight
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            info!("[SYNC] Skipping sync tick because a sync worker is already in flight");
+            debug!("[SYNC] Skipping sync tick because a sync worker is already in flight");
             return;
         }
 
@@ -1555,43 +1617,43 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         // Spawn on the current tokio runtime instead of creating a new one per tick
         tokio::runtime::Handle::current().spawn(async move {
-            log::info!("[SYNC] sync_with_all_peers: starting discovery");
+            log::debug!("[SYNC] sync_with_all_peers: starting discovery");
             let peers = match sync_layer.discover_peers().await {
                 Ok(p) => p,
                 Err(e) => {
-                    log::info!("[SYNC] discover_peers failed: {}", e);
+                    log::warn!("[SYNC] discover_peers failed: {}", e);
                     self_clone.sync_in_flight.store(false, Ordering::Release);
                     return;
                 }
             };
-            log::info!("[SYNC] sync_with_all_peers: found {} peers", peers.len());
+            log::debug!("[SYNC] sync_with_all_peers: found {} peers", peers.len());
             if peers.is_empty() {
                 self_clone.sync_in_flight.store(false, Ordering::Release);
                 return;
             }
             for peer in &peers {
-                log::info!(
+                log::debug!(
                     "[SYNC] Attempting sync with peer {} (id={:?})",
                     peer.address,
                     &peer.id.to_bytes()[..4]
                 );
                 // Re-read chain state after each peer to avoid stale comparisons
                 let chain_state = self_clone.chain_state.lock().unwrap().clone();
-                log::info!(
+                log::debug!(
                     "[SYNC] Local chain state: height={}, hash={}",
                     chain_state.latest_block_index,
                     crate::types::format_hex(&chain_state.latest_block_hash)
                 );
                 match sync_layer.sync_with_peer(peer, &chain_state).await {
                     Ok(_block) => {
-                        info!(
-                            "[SYNC] Synced with peer {} — applying received blocks",
+                        debug!(
+                            "[SYNC] Synced with peer {} - applying received blocks",
                             peer.address
                         );
                         self_clone.apply_received_blocks();
                     }
                     Err(e) => {
-                        info!("[SYNC] Sync with {} result: {}", peer.address, e);
+                        debug!("[SYNC] Sync with {} result: {}", peer.address, e);
                     }
                 }
             }
