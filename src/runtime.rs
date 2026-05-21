@@ -513,8 +513,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                     }
 
                     // Sync with peers to check if we're behind
-                    eprintln!("[TICK] Block production tick — calling sync_with_all_peers");
-                    info!("[TICK] Block production tick — calling sync_with_all_peers");
+                    info!("[TICK] Block production tick; calling sync_with_all_peers");
                     self_clone.sync_with_all_peers();
                 }
                 debug!("Block production loop terminated");
@@ -1404,10 +1403,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             // Persist the updated signer list
             let signers = self.consensus.list_signers();
             self.storage.put_authorized_signers(&signers)?;
-            info!(
-                "[ADMIN] Added authorized signer: {}",
-                hex::encode(pk.to_bytes())
-            );
+            info!("[ADMIN] Added authorized signer: {}", hex::encode(pk.to_bytes()));
         }
         Ok(added)
     }
@@ -1418,10 +1414,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         if removed {
             let signers = self.consensus.list_signers();
             self.storage.put_authorized_signers(&signers)?;
-            info!(
-                "[ADMIN] Removed authorized signer: {}",
-                hex::encode(pk.to_bytes())
-            );
+            info!("[ADMIN] Removed authorized signer: {}", hex::encode(pk.to_bytes()));
         }
         Ok(removed)
     }
@@ -1444,12 +1437,12 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         if blocks.is_empty() {
             return;
         }
-        eprintln!("[APPLY] Processing {} blocks received from peers", blocks.len());
+        log::info!("[APPLY] Processing {} blocks received from peers", blocks.len());
 
         let latest_hash = self.chain_state.lock().unwrap().latest_block_hash;
         let latest_index = self.chain_state.lock().unwrap().latest_block_index;
         if let Some(first_block) = blocks.first() {
-            eprintln!(
+            log::info!(
                 "[APPLY] First block #{} prev_hash={} local_hash={} local_height={}",
                 first_block.index,
                 crate::types::format_hex(&first_block.prev_hash),
@@ -1457,13 +1450,13 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                 latest_index
             );
             if first_block.prev_hash != latest_hash {
-                eprintln!("[APPLY] prev_hash mismatch — attempting reorg");
+                warn!("[APPLY] prev_hash mismatch; attempting reorg");
                 match self.reorganize_chain(&blocks) {
                     Ok(new_height) => {
-                        eprintln!("[APPLY] Chain reorganized to height {}", new_height);
+                        log::info!("[APPLY] Chain reorganized to height {}", new_height);
                     }
                     Err(e) => {
-                        eprintln!("[APPLY] Chain reorganization failed: {}", e);
+                        warn!("[APPLY] Chain reorganization failed: {}", e);
                     }
                 }
                 return;
@@ -1494,7 +1487,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             };
             if let Err(e) = consensus_result {
                 let chain_state = self.chain_state.lock().unwrap();
-                eprintln!(
+                warn!(
                     "[APPLY] Consensus validation FAILED for block #{}: {} (chain height={})",
                     block.index, e, chain_state.latest_block_index
                 );
@@ -1502,7 +1495,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             }
 
             if let Err(e) = self.ledger.validate_block(&block) {
-                eprintln!("[APPLY] Ledger validation FAILED for block #{}: {}", block.index, e);
+                warn!("[APPLY] Ledger validation FAILED for block #{}: {}", block.index, e);
                 continue;
             }
 
@@ -1521,16 +1514,22 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                             block_hash: crate::types::format_hex(&block.hash),
                         });
                     }
-                    eprintln!("[APPLY] Applied block #{} OK", block.index);
+                    log::info!("[APPLY] Applied block #{} OK", block.index);
                     if let Ok(Some(new_state)) = self.storage.get_chain_state() {
-                        eprintln!("[APPLY] Chain state updated to height {}", new_state.latest_block_index);
+                        debug!(
+                            "[APPLY] Chain state updated to height {}",
+                            new_state.latest_block_index
+                        );
                         *self.chain_state.lock().unwrap() = new_state;
                     } else {
-                        eprintln!("[APPLY] WARNING: failed to reload chain state after applying block #{}", block.index);
+                        warn!(
+                            "[APPLY] Failed to reload chain state after applying block #{}",
+                            block.index
+                        );
                     }
                 }
                 Err(e) => {
-                    eprintln!("[APPLY] apply_block FAILED for block #{}: {}", block.index, e);
+                    warn!("[APPLY] apply_block FAILED for block #{}: {}", block.index, e);
                 }
             }
         }
@@ -1538,8 +1537,10 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
     /// Check all known peers and sync with any that are ahead.
     fn sync_with_all_peers(&self) {
-        eprintln!("[SYNC] sync_with_all_peers called (sync_in_flight={})", self.sync_in_flight.load(Ordering::Acquire));
-        info!("[SYNC] sync_with_all_peers called (sync_in_flight={})", self.sync_in_flight.load(Ordering::Acquire));
+        info!(
+            "[SYNC] sync_with_all_peers called (sync_in_flight={})",
+            self.sync_in_flight.load(Ordering::Acquire)
+        );
         if self
             .sync_in_flight
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -1569,13 +1570,24 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                 return;
             }
             for peer in &peers {
-                log::info!("[SYNC] Attempting sync with peer {} (id={:?})", peer.address, &peer.id.to_bytes()[..4]);
+                log::info!(
+                    "[SYNC] Attempting sync with peer {} (id={:?})",
+                    peer.address,
+                    &peer.id.to_bytes()[..4]
+                );
                 // Re-read chain state after each peer to avoid stale comparisons
                 let chain_state = self_clone.chain_state.lock().unwrap().clone();
-                log::info!("[SYNC] Local chain state: height={}, hash={}", chain_state.latest_block_index, crate::types::format_hex(&chain_state.latest_block_hash));
+                log::info!(
+                    "[SYNC] Local chain state: height={}, hash={}",
+                    chain_state.latest_block_index,
+                    crate::types::format_hex(&chain_state.latest_block_hash)
+                );
                 match sync_layer.sync_with_peer(peer, &chain_state).await {
                     Ok(_block) => {
-                        info!("[SYNC] Synced with peer {} — applying received blocks", peer.address);
+                        info!(
+                            "[SYNC] Synced with peer {} — applying received blocks",
+                            peer.address
+                        );
                         self_clone.apply_received_blocks();
                     }
                     Err(e) => {

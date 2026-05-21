@@ -1566,10 +1566,10 @@ fn test_p2p_auto_announcement_and_import() {
     let listen_a: std::net::SocketAddr = "127.0.0.1:19091".parse().unwrap();
     let listen_b: std::net::SocketAddr = "127.0.0.1:19092".parse().unwrap();
 
-    let sync_a = CustomSync::new(pk_a, listen_a)
+    let sync_a = CustomSync::new(pk_a, listen_a, 1)
         .with_signing_key(sk_a.clone())
         .with_storage(storage_a.clone_storage());
-    let sync_b = CustomSync::new(pk_b, listen_b)
+    let sync_b = CustomSync::new(pk_b, listen_b, 1)
         .with_signing_key(sk_b.clone())
         .with_storage(storage_b.clone_storage());
 
@@ -2343,10 +2343,10 @@ fn test_p2p_block_propagation() {
     // Create CustomSync for each node
     let listen_a: std::net::SocketAddr = "127.0.0.1:19071".parse().unwrap();
     let listen_b: std::net::SocketAddr = "127.0.0.1:19072".parse().unwrap();
-    let sync_a = CustomSync::new(pk_a, listen_a)
+    let sync_a = CustomSync::new(pk_a, listen_a, 1)
         .with_signing_key(sk_a.clone())
         .with_storage(storage_a.clone_storage());
-    let sync_b = CustomSync::new(pk_b, listen_b)
+    let sync_b = CustomSync::new(pk_b, listen_b, 1)
         .with_signing_key(sk_b.clone())
         .with_storage(storage_b.clone_storage());
 
@@ -2483,10 +2483,10 @@ fn test_p2p_storage_backed_block_serving() {
 
     let listen_a: std::net::SocketAddr = "127.0.0.1:19081".parse().unwrap();
     let listen_b: std::net::SocketAddr = "127.0.0.1:19082".parse().unwrap();
-    let sync_a = CustomSync::new(pk_a, listen_a)
+    let sync_a = CustomSync::new(pk_a, listen_a, 1)
         .with_signing_key(sk_a.clone())
         .with_storage(storage_a.clone_storage());
-    let sync_b = CustomSync::new(pk_b, listen_b)
+    let sync_b = CustomSync::new(pk_b, listen_b, 1)
         .with_signing_key(sk_b.clone())
         .with_storage(storage_b.clone_storage());
 
@@ -3029,4 +3029,3 @@ fn test_tx_vec_args_roundtrip() {
     init_logging();
     golden::test_tx_roundtrip_vec_args();
 }
-

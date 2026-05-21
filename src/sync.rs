@@ -49,28 +49,69 @@ pub struct Peer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NetworkMessage {
     // Handshake messages
-    Handshake { peer_id: PublicKey, version: u32, challenge: [u8; 32], listen_port: u16 },
-    HandshakeAck { peer_id: PublicKey, version: u32, signature: Vec<u8>, challenge: [u8; 32], listen_port: u16 },
-    HandshakeVerify { signature: Vec<u8> },
+    Handshake {
+        peer_id: PublicKey,
+        version: u32,
+        challenge: [u8; 32],
+        listen_port: u16,
+        chain_id: u64,
+    },
+    HandshakeAck {
+        peer_id: PublicKey,
+        version: u32,
+        signature: Vec<u8>,
+        challenge: [u8; 32],
+        listen_port: u16,
+        chain_id: u64,
+    },
+    HandshakeVerify {
+        signature: Vec<u8>,
+    },
 
     // Sync protocol messages
     GetChainHead,
-    ChainHeadResponse { latest_block_hash: [u8; 32], height: u64 },
-    GetBlocks { from_height: u64, to_height: u64 },
-    BlocksResponse { blocks: Vec<Block> },
-    NewBlockAnnouncement { block_hash: [u8; 32], height: u64 },
+    ChainHeadResponse {
+        latest_block_hash: [u8; 32],
+        height: u64,
+    },
+    GetBlocks {
+        from_height: u64,
+        to_height: u64,
+    },
+    BlocksResponse {
+        blocks: Vec<Block>,
+    },
+    NewBlockAnnouncement {
+        block_hash: [u8; 32],
+        height: u64,
+    },
 
     // Fork resolution
-    ForkResolution { common_height: u64, fork_blocks: Vec<Block> },
-    GetForkBlocks { from_height: u64, to_height: u64 },
-    ForkBlocksResponse { blocks: Vec<Block>, total_height: u64 },
+    ForkResolution {
+        common_height: u64,
+        fork_blocks: Vec<Block>,
+    },
+    GetForkBlocks {
+        from_height: u64,
+        to_height: u64,
+    },
+    ForkBlocksResponse {
+        blocks: Vec<Block>,
+        total_height: u64,
+    },
 
     // Keep-alive
     Ping,
     Pong,
-    PeerList { peers: Vec<(PublicKey, String)> },
-    RequestBlock { hash: [u8; 32] },
-    BlockResponse { block: Option<crate::types::Block> },
+    PeerList {
+        peers: Vec<(PublicKey, String)>,
+    },
+    RequestBlock {
+        hash: [u8; 32],
+    },
+    BlockResponse {
+        block: Option<crate::types::Block>,
+    },
 }
 
 #[derive(Debug)]
@@ -226,14 +267,13 @@ impl PeerHealth {
         self.total_failures += 1;
     }
 
-    /// Exponential backoff: 2^failures seconds, capped at 300s (5 min).
+    /// Exponential backoff: 2^failures seconds, capped at 600s (10 min).
     fn backoff_remaining(&self) -> Option<std::time::Duration> {
         let last = self.last_failure?;
         if self.consecutive_failures == 0 {
             return None;
         }
-        let backoff_secs =
-            (2u64.saturating_pow(self.consecutive_failures.min(8))).min(300);
+        let backoff_secs = (2u64.saturating_pow(self.consecutive_failures.min(10))).min(600);
         let elapsed = last.elapsed();
         let backoff = std::time::Duration::from_secs(backoff_secs);
         if elapsed < backoff {
@@ -265,6 +305,9 @@ pub struct CustomSync {
     signing_key: Arc<Mutex<Option<SigningKey>>>,
     peer_rate_limiters: Arc<Mutex<HashMap<SocketAddr, PerPeerRateLimiter>>>,
     peer_health: Arc<Mutex<HashMap<SocketAddr, PeerHealth>>>,
+    outbound_connections: Arc<Mutex<HashMap<SocketAddr, Box<dyn AsyncStream>>>>,
+    chain_id: u64,
+    announcement_tx: tokio::sync::broadcast::Sender<NetworkMessage>,
 }
 
 const MAX_CONCURRENT_CONNECTIONS: usize = 128;
@@ -520,7 +563,8 @@ impl rustls::client::danger::ServerCertVerifier for CertificatePinner {
 }
 
 impl CustomSync {
-    pub fn new(peer_id: PublicKey, listen_addr: SocketAddr) -> Self {
+    pub fn new(peer_id: PublicKey, listen_addr: SocketAddr, chain_id: u64) -> Self {
+        let (announcement_tx, _) = tokio::sync::broadcast::channel(16);
         Self {
             peer_id,
             known_peers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -537,6 +581,9 @@ impl CustomSync {
             signing_key: Arc::new(Mutex::new(None)),
             peer_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             peer_health: Arc::new(Mutex::new(HashMap::new())),
+            outbound_connections: Arc::new(Mutex::new(HashMap::new())),
+            chain_id,
+            announcement_tx,
         }
     }
 
@@ -603,7 +650,13 @@ impl CustomSync {
         rand::rng().fill_bytes(&mut challenge);
         Self::send_message(
             &mut stream,
-            NetworkMessage::Handshake { peer_id: self.peer_id, version: 1, challenge, listen_port: self.listen_addr.port() },
+            NetworkMessage::Handshake {
+                peer_id: self.peer_id,
+                version: 1,
+                challenge,
+                listen_port: self.listen_addr.port(),
+                chain_id: self.chain_id,
+            },
         )
         .await?;
 
@@ -613,15 +666,23 @@ impl CustomSync {
                 peer_id: remote_peer_id,
                 signature,
                 challenge: remote_challenge,
+                chain_id: remote_chain_id,
                 ..
             } => {
+                if remote_chain_id != self.chain_id {
+                    log::warn!(
+                        "[P2P] Chain ID mismatch in resolve_fork: local={}, remote={}",
+                        self.chain_id,
+                        remote_chain_id
+                    );
+                    return Err(SyncError::SynchronizationError("Chain ID mismatch".to_string()));
+                }
                 let sig = Signature::from_slice(&signature)
                     .map_err(|_| SyncError::AuthenticationFailed)?;
                 let remote_pk = ed25519_dalek::VerifyingKey::from_bytes(&remote_peer_id.to_bytes())
                     .map_err(|_| SyncError::AuthenticationFailed)?;
                 remote_pk.verify(&challenge, &sig).map_err(|_| SyncError::AuthenticationFailed)?;
 
-                // Check if peer is authorized
                 if !self.is_peer_authorized(&remote_peer_id).await {
                     log::warn!(
                         "[SYNC] Peer {} is not authorized",
@@ -680,17 +741,19 @@ impl CustomSync {
         let fetch_from = common_ancestor_height + 1;
         Self::send_message(
             &mut stream,
-            NetworkMessage::GetForkBlocks {
-                from_height: fetch_from,
-                to_height: peer_height,
-            },
+            NetworkMessage::GetForkBlocks { from_height: fetch_from, to_height: peer_height },
         )
         .await?;
 
         let fork_response = Self::receive_message(&mut stream).await?;
         match fork_response {
             NetworkMessage::ForkBlocksResponse { blocks, total_height: _ } => {
-                log::info!("Received {} fork blocks (heights {}-{})", blocks.len(), fetch_from, peer_height);
+                log::info!(
+                    "Received {} fork blocks (heights {}-{})",
+                    blocks.len(),
+                    fetch_from,
+                    peer_height
+                );
                 for block in &blocks {
                     self.cache_block(block.clone()).await;
                 }
@@ -754,6 +817,8 @@ impl CustomSync {
                     let signing_key = Arc::clone(&self.signing_key);
                     let rate_limiters = Arc::clone(&self.peer_rate_limiters);
                     let listen_port = self.listen_addr.port();
+                    let local_chain_id = self.chain_id;
+                    let ann_tx = self.announcement_tx.clone();
                     let permit = semaphore.clone().acquire_owned().await;
 
                     tokio::spawn(async move {
@@ -762,7 +827,7 @@ impl CustomSync {
                             match acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
                                     if let Err(e) = Self::handle_connection(
-                                        tls_stream, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters, listen_port,
+                                        tls_stream, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters, listen_port, local_chain_id, ann_tx,
                                     ).await {
                                         log::error!("TLS connection error: {}", e);
                                     }
@@ -770,7 +835,7 @@ impl CustomSync {
                                 Err(e) => log::error!("TLS handshake error from {}: {}", addr, e),
                             }
                         } else if let Err(e) = Self::handle_connection(
-                            socket, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters, listen_port,
+                            socket, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters, listen_port, local_chain_id, ann_tx,
                         ).await {
                             log::error!("Connection error: {}", e);
                         }
@@ -807,21 +872,37 @@ impl CustomSync {
         signing_key: Arc<Mutex<Option<SigningKey>>>,
         rate_limiters: Arc<Mutex<HashMap<SocketAddr, PerPeerRateLimiter>>>,
         listen_port: u16,
+        local_chain_id: u64,
+        announcement_tx: tokio::sync::broadcast::Sender<NetworkMessage>,
     ) -> Result<(), SyncError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        // Expect inbound handshake from peer, then ack with signature of their challenge.
         let inbound = timeout(Duration::from_secs(30), Self::receive_message(&mut socket))
             .await
             .map_err(|_| SyncError::ConnectionTimeout)??;
 
         match inbound {
-            NetworkMessage::Handshake { peer_id: remote_peer_id, version, challenge, listen_port: remote_listen_port } => {
+            NetworkMessage::Handshake {
+                peer_id: remote_peer_id,
+                version,
+                challenge,
+                listen_port: remote_listen_port,
+                chain_id: remote_chain_id,
+            } => {
                 if version != 1 {
                     return Err(SyncError::NetworkError("Version mismatch".to_string()));
                 }
-                // Sign their challenge and send our own
+                if remote_chain_id != local_chain_id {
+                    log::warn!(
+                        "[P2P] Chain ID mismatch: local={}, remote={}, peer={}",
+                        local_chain_id,
+                        remote_chain_id,
+                        addr
+                    );
+                    return Err(SyncError::SynchronizationError("Chain ID mismatch".to_string()));
+                }
+
                 let mut my_challenge = [0u8; 32];
                 rand::RngCore::fill_bytes(&mut rand::rng(), &mut my_challenge);
 
@@ -839,11 +920,11 @@ impl CustomSync {
                         signature,
                         challenge: my_challenge,
                         listen_port,
+                        chain_id: local_chain_id,
                     },
                 )
                 .await?;
 
-                // Expect verification of our challenge
                 let verify = timeout(Duration::from_secs(10), Self::receive_message(&mut socket))
                     .await
                     .map_err(|_| SyncError::ConnectionTimeout)??;
@@ -862,21 +943,17 @@ impl CustomSync {
                     _ => return Err(SyncError::AuthenticationFailed),
                 }
 
-                // Construct correct peer address using the remote's reported listen port.
-                // Do NOT use the TCP source port (ephemeral) for outbound connections.
                 let peer_listen_addr = SocketAddr::new(addr.ip(), remote_listen_port);
 
                 log::info!(
-                    "Inbound peer connected and mutually authenticated: {} at {} (listen port {})",
+                    "Inbound peer authenticated: {} at {} (listen port {})",
                     hex::encode(remote_peer_id.to_bytes()),
                     addr,
                     remote_listen_port
                 );
 
-                // Register inbound peer with their listen address
                 {
                     let mut peers_guard = peers.write().await;
-                    // Remove stale entries with same address but different (dummy) ID
                     let stale: Vec<PublicKey> = peers_guard
                         .iter()
                         .filter(|(id, a)| **a == peer_listen_addr && **id != remote_peer_id)
@@ -892,10 +969,11 @@ impl CustomSync {
             }
             _ => return Err(SyncError::InvalidMessage),
         }
-        eprintln!("[P2P] Inbound peer {} authenticated, entering message loop", addr);
-        // After handshake, enter message loop
+        log::debug!("[P2P] Inbound peer {} authenticated, entering message loop", addr);
+
+        let mut announcement_rx = announcement_tx.subscribe();
+
         loop {
-            // Per-peer rate limit: max MAX_P2P_MESSAGES_PER_SECOND messages/sec
             {
                 let mut rl_guard = rate_limiters.lock().await;
                 let rl = rl_guard.entry(addr).or_insert_with(PerPeerRateLimiter::new);
@@ -905,22 +983,39 @@ impl CustomSync {
                 }
             }
 
-            let msg = match Self::receive_message(&mut socket).await {
-                Ok(m) => m,
-                Err(SyncError::NetworkError(err_msg))
-                    if err_msg.contains("early eof")
-                        || err_msg.contains("connection reset")
-                        || err_msg.contains("Connection reset") =>
-                {
-                    log::debug!("Peer {} closed connection: {}", addr, err_msg);
-                    break;
+            let msg = tokio::select! {
+                recv_result = Self::receive_message(&mut socket) => {
+                    match recv_result {
+                        Ok(m) => m,
+                        Err(SyncError::NetworkError(err_msg))
+                            if err_msg.contains("early eof")
+                                || err_msg.contains("connection reset")
+                                || err_msg.contains("Connection reset") =>
+                        {
+                            log::debug!("Peer {} closed connection: {}", addr, err_msg);
+                            break;
+                        }
+                        Err(e) => {
+                            log::error!("Error receiving message from {}: {}", addr, e);
+                            break;
+                        }
+                    }
                 }
-                Err(e) => {
-                    log::error!("Error receiving message from {}: {}", addr, e);
-                    break;
+                announcement = announcement_rx.recv() => {
+                    match announcement {
+                        Ok(ann_msg) => {
+                            let _ = Self::send_message(&mut socket, ann_msg).await;
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            log::debug!("[P2P] Announcement channel lagged by {} for {}", n, addr);
+                            continue;
+                        }
+                        Err(_) => break,
+                    }
                 }
             };
-            eprintln!("[P2P] Inbound msg from {}: {:?}", addr, std::mem::discriminant(&msg));
+            log::trace!("[P2P] Inbound msg from {}: {:?}", addr, std::mem::discriminant(&msg));
             match msg {
                 NetworkMessage::PeerList { peers: peer_list } => {
                     let mut peers_guard = peers.write().await;
@@ -941,29 +1036,23 @@ impl CustomSync {
                     Self::handle_block_response_full(block, &block_cache, &received_blocks).await;
                 }
                 NetworkMessage::NewBlockAnnouncement { block_hash, height } => {
-                    eprintln!("[P2P] Inbound: NewBlockAnnouncement height={} from {}", height, addr);
-                    let have_it = {
-                        let cache = block_cache.lock().await;
-                        cache.contains_key(&block_hash)
-                    } || {
+                    log::debug!("[P2P] NewBlockAnnouncement height={} from {}", height, addr);
+                    let already_applied = {
                         let storage_guard = storage.lock().await;
                         storage_guard
                             .as_ref()
                             .is_some_and(|s| s.get_block(&block_hash).ok().flatten().is_some())
                     };
-                    if have_it {
-                        eprintln!("[P2P] Inbound: already have announced block, skipping");
+                    if already_applied {
+                        log::trace!("[P2P] Already have block {} in storage, skipping", height);
                         continue;
                     }
 
                     let (local_head_hash, local_height) =
                         Self::chain_head_from_storage(&block_cache, &storage).await;
-                    eprintln!("[P2P] Inbound: local_height={}, announced height={}", local_height, height);
+                    log::debug!("[P2P] local_height={}, announced height={}", local_height, height);
 
                     if height > local_height.saturating_add(1) {
-                        // Include local height to allow fork recovery when chains
-                        // diverged at the current tip (same height, different hash).
-                        // We'll drop the first block if it is identical to local head.
                         let from_height = if local_height > 0 {
                             local_height
                         } else {
@@ -971,34 +1060,35 @@ impl CustomSync {
                         };
                         let to_height = height;
                         log::info!(
-                            "Peer announced block at height {} while local height is {}. Requesting backfill [{}..={}]",
+                            "Peer announced height {} (local {}), requesting backfill [{}..={}]",
                             height,
                             local_height,
                             from_height,
                             to_height
                         );
-                        eprintln!("[P2P] Inbound: sending GetBlocks {}..={} to {}", from_height, to_height, addr);
                         let send_result = Self::send_message(
                             &mut socket,
                             NetworkMessage::GetBlocks { from_height, to_height },
                         )
                         .await;
-                        eprintln!("[P2P] Inbound: GetBlocks send result: {:?}", send_result.is_ok());
+                        if let Err(e) = &send_result {
+                            log::debug!("[P2P] GetBlocks send failed: {}", e);
+                        }
 
                         match timeout(Duration::from_secs(10), Self::receive_message(&mut socket))
                             .await
                         {
                             Ok(Ok(NetworkMessage::BlocksResponse { mut blocks })) => {
-                                eprintln!("[P2P] Inbound: received {} blocks from {}", blocks.len(), addr);
+                                log::debug!(
+                                    "[P2P] Received {} backfill blocks from {}",
+                                    blocks.len(),
+                                    addr
+                                );
                                 blocks.sort_by_key(|b| b.index);
 
-                                if blocks
-                                    .first()
-                                    .is_some_and(|b| {
-                                        b.index == local_height
-                                            && b.hash == local_head_hash
-                                    })
-                                {
+                                if blocks.first().is_some_and(|b| {
+                                    b.index == local_height && b.hash == local_head_hash
+                                }) {
                                     let _ = blocks.remove(0);
                                 }
 
@@ -1024,10 +1114,7 @@ impl CustomSync {
                                 );
                             }
                             Ok(Err(e)) => {
-                                log::debug!(
-                                    "Failed receiving announced backfill response: {}",
-                                    e
-                                );
+                                log::debug!("Failed receiving announced backfill response: {}", e);
                             }
                             Err(_) => {
                                 log::debug!("Timed out waiting for announced backfill response");
@@ -1285,9 +1372,7 @@ impl CustomSync {
             let peers = self.known_peers.read().await;
             peers
                 .iter()
-                .filter(|(_, addr)| {
-                    health.get(addr).map(|h| h.is_dead()).unwrap_or(false)
-                })
+                .filter(|(_, addr)| health.get(addr).map(|h| h.is_dead()).unwrap_or(false))
                 .map(|(id, addr)| (*id, *addr))
                 .collect()
         };
@@ -1345,11 +1430,7 @@ impl CustomSync {
         peer_height: u64,
     ) -> Result<Block, SyncError> {
         let local_height = local_chain_state.latest_block_index;
-        log::warn!(
-            "Resolving fork: local height={}, peer height={}",
-            local_height,
-            peer_height
-        );
+        log::warn!("Resolving fork: local height={}, peer height={}", local_height, peer_height);
 
         // Walk backwards from min(local, peer) to find the common ancestor.
         // At each height, request that block from the peer and compare its hash
@@ -1360,12 +1441,9 @@ impl CustomSync {
 
         for h in (search_limit..=search_from).rev() {
             // Get the peer's block at this height
-            Self::send_message(
-                stream,
-                NetworkMessage::GetBlocks { from_height: h, to_height: h },
-            )
-            .await?;
-            let resp = Self::receive_message(stream).await?;
+            Self::send_message(stream, NetworkMessage::GetBlocks { from_height: h, to_height: h })
+                .await?;
+            let resp = self.receive_sync_message(stream, Duration::from_secs(10)).await?;
             let peer_block_hash = match resp {
                 NetworkMessage::BlocksResponse { ref blocks } if !blocks.is_empty() => {
                     blocks[0].hash
@@ -1393,25 +1471,22 @@ impl CustomSync {
 
         // Now fetch all peer blocks from common_ancestor+1 to peer_height
         let fetch_from = common_ancestor_height + 1;
-        log::info!(
-            "Fetching fork blocks from height {} to {} from peer",
-            fetch_from,
-            peer_height
-        );
+        log::info!("Fetching fork blocks from height {} to {} from peer", fetch_from, peer_height);
         Self::send_message(
             stream,
-            NetworkMessage::GetForkBlocks {
-                from_height: fetch_from,
-                to_height: peer_height,
-            },
+            NetworkMessage::GetForkBlocks { from_height: fetch_from, to_height: peer_height },
         )
         .await?;
 
-        let response = Self::receive_message(stream).await?;
+        let response = self.receive_sync_message(stream, Duration::from_secs(15)).await?;
         match response {
             NetworkMessage::ForkBlocksResponse { blocks, .. } => {
-                log::info!("Received {} fork blocks from peer (heights {}-{})",
-                    blocks.len(), fetch_from, peer_height);
+                log::info!(
+                    "Received {} fork blocks from peer (heights {}-{})",
+                    blocks.len(),
+                    fetch_from,
+                    peer_height
+                );
                 for block in &blocks {
                     let mut cache = self.block_cache.lock().await;
                     cache.insert(block.hash, block.clone());
@@ -1431,80 +1506,204 @@ impl CustomSync {
         }
     }
 
-    /// Core sync-with-peer logic, called by the trait method which wraps it
-    /// with health tracking and backoff checks.
-    async fn sync_with_peer_inner(
-        &self,
-        peer: &Peer,
-        local_chain_state: &ChainState,
-    ) -> Result<Block, SyncError> {
-        let mut stream = self.connect_to_peer(peer.address).await?;
+    fn is_connection_error(err: &SyncError) -> bool {
+        matches!(
+            err,
+            SyncError::NetworkError(_)
+                | SyncError::SerializationError(_)
+                | SyncError::ConnectionTimeout
+                | SyncError::AuthenticationFailed
+                | SyncError::InvalidMessage
+        )
+    }
 
-        // Perform handshake with challenge
+    async fn perform_outbound_handshake<S>(
+        &self,
+        stream: &mut S,
+        peer: &Peer,
+    ) -> Result<(), SyncError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
         let mut challenge = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::rng(), &mut challenge);
 
         Self::send_message(
-            &mut stream,
-            NetworkMessage::Handshake { peer_id: self.peer_id, version: 1, challenge, listen_port: self.listen_addr.port() },
+            stream,
+            NetworkMessage::Handshake {
+                peer_id: self.peer_id,
+                version: 1,
+                challenge,
+                listen_port: self.listen_addr.port(),
+                chain_id: self.chain_id,
+            },
         )
         .await?;
 
-        let response = Self::receive_message(&mut stream).await?;
+        let response = timeout(Duration::from_secs(10), Self::receive_message(stream))
+            .await
+            .map_err(|_| SyncError::ConnectionTimeout)??;
+
         match response {
             NetworkMessage::HandshakeAck {
                 peer_id: remote_peer_id,
                 signature,
                 challenge: remote_challenge,
                 listen_port: remote_listen_port,
+                chain_id: remote_chain_id,
                 ..
             } => {
-                // 1. Verify their signature of our challenge
+                if remote_chain_id != self.chain_id {
+                    log::warn!(
+                        "[P2P] Chain ID mismatch: local={}, remote={}, peer={}",
+                        self.chain_id,
+                        remote_chain_id,
+                        peer.address
+                    );
+                    return Err(SyncError::SynchronizationError("Chain ID mismatch".to_string()));
+                }
+
                 let sig = Signature::from_slice(&signature)
                     .map_err(|_| SyncError::AuthenticationFailed)?;
                 let remote_pk = ed25519_dalek::VerifyingKey::from_bytes(&remote_peer_id.to_bytes())
                     .map_err(|_| SyncError::AuthenticationFailed)?;
                 remote_pk.verify(&challenge, &sig).map_err(|_| SyncError::AuthenticationFailed)?;
 
-                // 2. Sign their challenge
                 let my_sig = {
                     let sig_key_guard = self.signing_key.lock().await;
                     let sig_key = sig_key_guard.as_ref().ok_or(SyncError::AuthenticationFailed)?;
                     sig_key.sign(&remote_challenge).to_vec()
                 };
 
-                Self::send_message(
-                    &mut stream,
-                    NetworkMessage::HandshakeVerify { signature: my_sig },
-                )
-                .await?;
+                Self::send_message(stream, NetworkMessage::HandshakeVerify { signature: my_sig })
+                    .await?;
 
-                // Register peer with the server's reported listen port
                 let peer_addr = SocketAddr::new(peer.address.ip(), remote_listen_port);
                 self.dedup_peer(remote_peer_id, peer_addr).await;
 
-                log::info!(
-                    "Outbound peer mutually authenticated: {} at {}",
+                log::debug!(
+                    "Outbound peer authenticated: {} at {}",
                     hex::encode(remote_peer_id.to_bytes()),
                     peer_addr
                 );
+                Ok(())
             }
-            _ => return Err(SyncError::AuthenticationFailed),
+            _ => Err(SyncError::AuthenticationFailed),
         }
+    }
 
-        eprintln!("[P2P] Outbound: sending GetChainHead to {}", peer.address);
-        Self::send_message(&mut stream, NetworkMessage::GetChainHead).await?;
-        let chain_head = Self::receive_message(&mut stream).await?;
-        eprintln!("[P2P] Outbound: received response from {}", peer.address);
+    async fn connect_and_authenticate_peer(
+        &self,
+        peer: &Peer,
+    ) -> Result<Box<dyn AsyncStream>, SyncError> {
+        let mut stream = self.connect_to_peer(peer.address).await?;
+        self.perform_outbound_handshake(&mut stream, peer).await?;
+        Ok(stream)
+    }
+
+    async fn receive_sync_message<S>(
+        &self,
+        stream: &mut S,
+        timeout_duration: Duration,
+    ) -> Result<NetworkMessage, SyncError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let deadline = tokio::time::Instant::now() + timeout_duration;
+
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(SyncError::ConnectionTimeout);
+            }
+            let remaining = deadline.saturating_duration_since(now);
+
+            let msg = timeout(remaining, Self::receive_message(stream))
+                .await
+                .map_err(|_| SyncError::ConnectionTimeout)??;
+
+            match msg {
+                NetworkMessage::RequestBlock { hash } => {
+                    Self::handle_block_request_full(stream, hash, &self.block_cache, &self.storage)
+                        .await?;
+                }
+                NetworkMessage::GetChainHead => {
+                    let (latest_hash, latest_height) =
+                        Self::chain_head_from_storage(&self.block_cache, &self.storage).await;
+                    Self::send_message(
+                        stream,
+                        NetworkMessage::ChainHeadResponse {
+                            latest_block_hash: latest_hash,
+                            height: latest_height,
+                        },
+                    )
+                    .await?;
+                }
+                NetworkMessage::GetBlocks { from_height, to_height } => {
+                    let clamped_to = to_height.min(from_height.saturating_add(MAX_BLOCK_RANGE));
+                    let blocks = Self::blocks_in_range(
+                        &self.block_cache,
+                        &self.storage,
+                        from_height,
+                        clamped_to,
+                    )
+                    .await;
+                    Self::send_message(stream, NetworkMessage::BlocksResponse { blocks }).await?;
+                }
+                NetworkMessage::GetForkBlocks { from_height, to_height } => {
+                    let clamped_to = to_height.min(from_height.saturating_add(MAX_BLOCK_RANGE));
+                    let blocks = Self::blocks_in_range(
+                        &self.block_cache,
+                        &self.storage,
+                        from_height,
+                        clamped_to,
+                    )
+                    .await;
+                    let (_, total_height) =
+                        Self::chain_head_from_storage(&self.block_cache, &self.storage).await;
+                    Self::send_message(
+                        stream,
+                        NetworkMessage::ForkBlocksResponse { blocks, total_height },
+                    )
+                    .await?;
+                }
+                NetworkMessage::Ping => {
+                    let _ = Self::send_message(stream, NetworkMessage::Pong).await;
+                }
+                NetworkMessage::Pong => {}
+                NetworkMessage::NewBlockAnnouncement { block_hash, height } => {
+                    log::debug!(
+                        "[P2P] Received async announcement while syncing: height={}, hash={}",
+                        height,
+                        crate::types::format_hex(&block_hash)
+                    );
+                }
+                other => return Ok(other),
+            }
+        }
+    }
+
+    async fn sync_with_peer_stream<S>(
+        &self,
+        peer: &Peer,
+        local_chain_state: &ChainState,
+        stream: &mut S,
+    ) -> Result<Block, SyncError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        Self::send_message(stream, NetworkMessage::GetChainHead).await?;
+        let chain_head = self.receive_sync_message(stream, Duration::from_secs(10)).await?;
 
         match chain_head {
             NetworkMessage::ChainHeadResponse { latest_block_hash, height } => {
-                eprintln!(
-                    "[P2P] Outbound: peer {} height={} local_height={}",
-                    peer.address, height, local_chain_state.latest_block_index
+                log::debug!(
+                    "[P2P] Outbound: peer {} height={} local={}",
+                    peer.address,
+                    height,
+                    local_chain_state.latest_block_index
                 );
 
-                // Detect fork at same height with different hash
                 if self.detect_fork(
                     &latest_block_hash,
                     height,
@@ -1517,31 +1716,33 @@ impl CustomSync {
                         crate::types::format_hex(&latest_block_hash),
                         crate::types::format_hex(&local_chain_state.latest_block_hash)
                     );
-                    let fork_result = self
-                        .resolve_fork_blocks(peer, &mut stream, local_chain_state, height)
-                        .await;
-                    Self::serve_sync_requests(&mut stream, &self.block_cache, &self.storage).await;
+                    let fork_result =
+                        self.resolve_fork_blocks(peer, stream, local_chain_state, height).await;
+                    Self::serve_sync_requests(stream, &self.block_cache, &self.storage).await;
                     return fork_result;
                 }
 
                 if height <= local_chain_state.latest_block_index {
                     log::info!(
                         "Peer is behind or equal (peer={}, local={}), announcing our chain head",
-                        height, local_chain_state.latest_block_index
+                        height,
+                        local_chain_state.latest_block_index
                     );
-                    eprintln!("[P2P] Outbound: sending NewBlockAnnouncement height={} to {}", local_chain_state.latest_block_index, peer.address);
                     let _ = Self::send_message(
-                        &mut stream,
+                        stream,
                         NetworkMessage::NewBlockAnnouncement {
                             block_hash: local_chain_state.latest_block_hash,
                             height: local_chain_state.latest_block_index,
                         },
-                    ).await;
-                    eprintln!("[P2P] Outbound: entering serve_sync_requests (10s) for {}", peer.address);
+                    )
+                    .await;
                     Self::serve_sync_requests_with_timeout(
-                        &mut stream, &self.block_cache, &self.storage, 10,
-                    ).await;
-                    eprintln!("[P2P] Outbound: done serving sync requests for {}", peer.address);
+                        stream,
+                        &self.block_cache,
+                        &self.storage,
+                        10,
+                    )
+                    .await;
                     return Err(SyncError::SynchronizationError(
                         "Peer is not ahead of local chain".to_string(),
                     ));
@@ -1549,37 +1750,34 @@ impl CustomSync {
 
                 if height > local_chain_state.latest_block_index + 1 {
                     Self::send_message(
-                        &mut stream,
+                        stream,
                         NetworkMessage::GetBlocks {
                             from_height: local_chain_state.latest_block_index + 1,
                             to_height: height,
                         },
                     )
                     .await?;
-                    let blocks_response = Self::receive_message(&mut stream).await?;
+                    let blocks_response =
+                        self.receive_sync_message(stream, Duration::from_secs(15)).await?;
                     match blocks_response {
                         NetworkMessage::BlocksResponse { blocks } => {
                             if blocks.is_empty() {
-                                Self::serve_sync_requests(&mut stream, &self.block_cache, &self.storage).await;
+                                Self::serve_sync_requests(stream, &self.block_cache, &self.storage)
+                                    .await;
                                 return Err(SyncError::SynchronizationError(
                                     "Empty blocks response".to_string(),
                                 ));
                             }
                             if blocks[0].prev_hash != local_chain_state.latest_block_hash {
                                 log::warn!(
-                                    "Fork detected: received block #{} prev_hash \
-                                     doesn't match local head",
+                                    "Fork detected: received block #{} prev_hash doesn't match local head",
                                     blocks[0].index
                                 );
                                 let fork_result = self
-                                    .resolve_fork_blocks(
-                                        peer,
-                                        &mut stream,
-                                        local_chain_state,
-                                        height,
-                                    )
+                                    .resolve_fork_blocks(peer, stream, local_chain_state, height)
                                     .await;
-                                Self::serve_sync_requests(&mut stream, &self.block_cache, &self.storage).await;
+                                Self::serve_sync_requests(stream, &self.block_cache, &self.storage)
+                                    .await;
                                 return fork_result;
                             }
                             for block in &blocks {
@@ -1587,7 +1785,6 @@ impl CustomSync {
                                 if cache.len() < MAX_BLOCK_CACHE_SIZE {
                                     cache.insert(block.hash, block.clone());
                                 }
-                                drop(cache);
                             }
                             let mut recv = self.received_blocks.lock().await;
                             if recv.len() + blocks.len() <= MAX_RECEIVED_BLOCKS_QUEUE {
@@ -1595,11 +1792,13 @@ impl CustomSync {
                             } else {
                                 log::warn!("Dropped incoming blocks: received_blocks queue full");
                             }
-                            Self::serve_sync_requests(&mut stream, &self.block_cache, &self.storage).await;
+                            Self::serve_sync_requests(stream, &self.block_cache, &self.storage)
+                                .await;
                             return Ok(blocks.last().unwrap().clone());
                         }
                         _ => {
-                            Self::serve_sync_requests(&mut stream, &self.block_cache, &self.storage).await;
+                            Self::serve_sync_requests(stream, &self.block_cache, &self.storage)
+                                .await;
                             return Err(SyncError::SynchronizationError(
                                 "Unexpected response for GetBlocks".to_string(),
                             ));
@@ -1607,13 +1806,13 @@ impl CustomSync {
                     }
                 }
 
-                // Peer is ahead by exactly 1
                 Self::send_message(
-                    &mut stream,
+                    stream,
                     NetworkMessage::RequestBlock { hash: latest_block_hash },
                 )
                 .await?;
-                let block_response = Self::receive_message(&mut stream).await?;
+                let block_response =
+                    self.receive_sync_message(stream, Duration::from_secs(10)).await?;
                 let block_result = match block_response {
                     NetworkMessage::BlockResponse { block: Some(block) } => {
                         if block.hash != latest_block_hash {
@@ -1634,14 +1833,96 @@ impl CustomSync {
                     NetworkMessage::BlockResponse { block: None } => Err(SyncError::BlockNotFound),
                     _ => Err(SyncError::InvalidMessage),
                 };
-                Self::serve_sync_requests(&mut stream, &self.block_cache, &self.storage).await;
-                return block_result;
+                Self::serve_sync_requests(stream, &self.block_cache, &self.storage).await;
+                block_result
             }
             _ => {
-                Self::serve_sync_requests(&mut stream, &self.block_cache, &self.storage).await;
-                return Err(SyncError::InvalidMessage);
+                Self::serve_sync_requests(stream, &self.block_cache, &self.storage).await;
+                Err(SyncError::InvalidMessage)
             }
         }
+    }
+
+    /// Core sync-with-peer logic, called by the trait method which wraps it
+    /// with health tracking and backoff checks.
+    async fn sync_with_peer_inner(
+        &self,
+        peer: &Peer,
+        local_chain_state: &ChainState,
+    ) -> Result<Block, SyncError> {
+        let existing_connection = {
+            let mut connections = self.outbound_connections.lock().await;
+            connections.remove(&peer.address)
+        };
+        let reused_connection = existing_connection.is_some();
+        let mut stream = match existing_connection {
+            Some(existing) => existing,
+            None => self.connect_and_authenticate_peer(peer).await?,
+        };
+
+        let mut result = self.sync_with_peer_stream(peer, local_chain_state, &mut stream).await;
+
+        if reused_connection && result.as_ref().err().is_some_and(Self::is_connection_error) {
+            log::debug!("[SYNC] Reconnecting dropped persistent connection to {}", peer.address);
+            stream = self.connect_and_authenticate_peer(peer).await?;
+            result = self.sync_with_peer_stream(peer, local_chain_state, &mut stream).await;
+        }
+
+        let keep_connection = match &result {
+            Ok(_) => true,
+            Err(SyncError::SynchronizationError(msg)) if msg.contains("Chain ID mismatch") => false,
+            Err(e) => !Self::is_connection_error(e),
+        };
+        if keep_connection {
+            let mut connections = self.outbound_connections.lock().await;
+            if connections.len() < MAX_KNOWN_PEERS {
+                connections.insert(peer.address, stream);
+            }
+        }
+
+        result
+    }
+
+    async fn send_announcement_to_peer(
+        &self,
+        peer: &Peer,
+        announcement: &NetworkMessage,
+    ) -> Result<(), SyncError> {
+        let existing_connection = {
+            let mut connections = self.outbound_connections.lock().await;
+            connections.remove(&peer.address)
+        };
+        let reused_connection = existing_connection.is_some();
+        let mut stream = match existing_connection {
+            Some(existing) => existing,
+            None => self.connect_and_authenticate_peer(peer).await?,
+        };
+
+        let mut send_result = Self::send_message(&mut stream, announcement.clone()).await;
+        if reused_connection && send_result.as_ref().err().is_some_and(Self::is_connection_error) {
+            log::debug!(
+                "[P2P] Reconnecting outbound peer {} before announcement retry",
+                peer.address
+            );
+            stream = self.connect_and_authenticate_peer(peer).await?;
+            send_result = Self::send_message(&mut stream, announcement.clone()).await;
+        }
+
+        if send_result.is_ok() {
+            Self::serve_sync_requests_with_timeout(
+                &mut stream,
+                &self.block_cache,
+                &self.storage,
+                2,
+            )
+            .await;
+            let mut connections = self.outbound_connections.lock().await;
+            if connections.len() < MAX_KNOWN_PEERS {
+                connections.insert(peer.address, stream);
+            }
+        }
+
+        send_result
     }
 }
 
@@ -1654,23 +1935,25 @@ impl SyncLayer for CustomSync {
     ) -> Result<Block, SyncError> {
         // Skip peers in exponential backoff
         if self.peer_in_backoff(peer.address).await {
-            log::info!("[SYNC] Peer {} is in backoff — skipping", peer.address);
-            return Err(SyncError::SynchronizationError(
-                "Peer in backoff".to_string(),
-            ));
+            log::info!("[SYNC] Peer {} is in backoff; skipping", peer.address);
+            return Err(SyncError::SynchronizationError("Peer in backoff".to_string()));
         }
 
         log::info!("[SYNC] sync_with_peer_inner starting for {}", peer.address);
-        let result = self
-            .sync_with_peer_inner(peer, local_chain_state)
-            .await;
+        let result = self.sync_with_peer_inner(peer, local_chain_state).await;
 
         match &result {
             Ok(_) => self.record_peer_success(peer.address).await,
+            Err(SyncError::SynchronizationError(msg)) if msg.contains("Chain ID mismatch") => {
+                self.record_peer_failure(peer.address).await;
+                let mut peers = self.known_peers.write().await;
+                peers.retain(|_, addr| *addr != peer.address);
+                log::warn!("[P2P] Removed peer {} due to chain ID mismatch", peer.address);
+            }
             Err(e) if !matches!(e, SyncError::SynchronizationError(_)) => {
                 self.record_peer_failure(peer.address).await;
             }
-            _ => {} // "not ahead" is not a real failure
+            _ => {}
         }
 
         result
@@ -1689,135 +1972,30 @@ impl SyncLayer for CustomSync {
         let announcement =
             NetworkMessage::NewBlockAnnouncement { block_hash: block.hash, height: block.index };
 
+        // Push announcement to all inbound-connected peers via the broadcast channel.
+        // then proactively announce to outbound peers as well.
+        let receivers = self.announcement_tx.send(announcement.clone()).unwrap_or(0);
+        let mut outbound_ok = 0usize;
+        let mut outbound_failed = 0usize;
         for peer in peers {
-            if let Ok(mut stream) = self.connect_to_peer(peer.address).await {
-                // Perform mutual handshake
-                let mut challenge = [0u8; 32];
-                rand::RngCore::fill_bytes(&mut rand::rng(), &mut challenge);
-
-                if Self::send_message(
-                    &mut stream,
-                    NetworkMessage::Handshake { peer_id: self.peer_id, version: 1, challenge, listen_port: self.listen_addr.port() },
-                )
-                .await
-                .is_ok()
-                {
-                    if let Ok(NetworkMessage::HandshakeAck {
-                        peer_id: remote_peer_id,
-                        signature,
-                        challenge: remote_challenge,
-                        ..
-                    }) = Self::receive_message(&mut stream).await
-                    {
-                        // Verify their signature
-                        let sig_res = Signature::from_slice(&signature);
-                        let pk_res =
-                            ed25519_dalek::VerifyingKey::from_bytes(&remote_peer_id.to_bytes());
-
-                        if let (Ok(sig), Ok(pk)) = (sig_res, pk_res) {
-                            if pk.verify(&challenge, &sig).is_ok() {
-                                // Sign their challenge
-                                let my_sig = {
-                                    let sig_key_guard = self.signing_key.lock().await;
-                                    if let Some(sig_key) = sig_key_guard.as_ref() {
-                                        sig_key.sign(&remote_challenge).to_vec()
-                                    } else {
-                                        Vec::new()
-                                    }
-                                };
-                                if !my_sig.is_empty() {
-                                    let _ = Self::send_message(
-                                        &mut stream,
-                                        NetworkMessage::HandshakeVerify { signature: my_sig },
-                                    )
-                                    .await;
-                                    let _ =
-                                        Self::send_message(&mut stream, announcement.clone()).await;
-                                }
-                            }
-                        }
-                    }
-                }
-                // Serve a small set of follow-up sync requests for a short window.
-                // This allows a lagging peer to backfill missing ranges immediately
-                // after receiving our announcement on this connection.
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-                loop {
-                    let now = tokio::time::Instant::now();
-                    if now >= deadline {
-                        break;
-                    }
-                    let remaining = deadline.saturating_duration_since(now);
-                    let incoming =
-                        timeout(remaining, Self::receive_message(&mut stream)).await;
-
-                    match incoming {
-                        Ok(Ok(NetworkMessage::RequestBlock { hash })) => {
-                            let _ = Self::handle_block_request_full(
-                                &mut stream,
-                                hash,
-                                &self.block_cache,
-                                &self.storage,
-                            )
-                            .await;
-                        }
-                        Ok(Ok(NetworkMessage::GetChainHead)) => {
-                            let (latest_hash, latest_height) =
-                                Self::chain_head_from_storage(&self.block_cache, &self.storage)
-                                    .await;
-                            let _ = Self::send_message(
-                                &mut stream,
-                                NetworkMessage::ChainHeadResponse {
-                                    latest_block_hash: latest_hash,
-                                    height: latest_height,
-                                },
-                            )
-                            .await;
-                        }
-                        Ok(Ok(NetworkMessage::GetBlocks { from_height, to_height })) => {
-                            let clamped_to =
-                                to_height.min(from_height.saturating_add(MAX_BLOCK_RANGE));
-                            let blocks = Self::blocks_in_range(
-                                &self.block_cache,
-                                &self.storage,
-                                from_height,
-                                clamped_to,
-                            )
-                            .await;
-                            let _ = Self::send_message(
-                                &mut stream,
-                                NetworkMessage::BlocksResponse { blocks },
-                            )
-                            .await;
-                        }
-                        Ok(Ok(NetworkMessage::GetForkBlocks { from_height, to_height })) => {
-                            let clamped_to =
-                                to_height.min(from_height.saturating_add(MAX_BLOCK_RANGE));
-                            let blocks = Self::blocks_in_range(
-                                &self.block_cache,
-                                &self.storage,
-                                from_height,
-                                clamped_to,
-                            )
-                            .await;
-                            let (_, total_height) =
-                                Self::chain_head_from_storage(&self.block_cache, &self.storage)
-                                    .await;
-                            let _ = Self::send_message(
-                                &mut stream,
-                                NetworkMessage::ForkBlocksResponse { blocks, total_height },
-                            )
-                            .await;
-                        }
-                        Ok(Ok(NetworkMessage::Ping)) => {
-                            let _ = Self::send_message(&mut stream, NetworkMessage::Pong).await;
-                        }
-                        Ok(Ok(_)) => {}
-                        Ok(Err(_)) | Err(_) => break,
-                    }
+            if peer.address == self.listen_addr {
+                continue;
+            }
+            match self.send_announcement_to_peer(peer, &announcement).await {
+                Ok(()) => outbound_ok = outbound_ok.saturating_add(1),
+                Err(e) => {
+                    outbound_failed = outbound_failed.saturating_add(1);
+                    log::debug!("[P2P] Failed proactive announcement to {}: {}", peer.address, e);
                 }
             }
         }
+        log::info!(
+            "[P2P] Broadcast block #{} (inbound peers={}, outbound ok={}, outbound failed={})",
+            block.index,
+            receivers,
+            outbound_ok,
+            outbound_failed
+        );
 
         Ok(())
     }
@@ -1855,10 +2033,8 @@ impl SyncLayer for CustomSync {
 
     fn remove_peer(&self, addr: &str) -> Result<(), SyncError> {
         let peers = self.known_peers.blocking_read();
-        let target: Option<crate::types::PublicKey> = peers
-            .iter()
-            .find(|(_, sock)| sock.to_string() == addr)
-            .map(|(pk, _)| *pk);
+        let target: Option<crate::types::PublicKey> =
+            peers.iter().find(|(_, sock)| sock.to_string() == addr).map(|(pk, _)| *pk);
         drop(peers);
         if let Some(pk) = target {
             self.known_peers.blocking_write().remove(&pk);
@@ -1868,11 +2044,7 @@ impl SyncLayer for CustomSync {
     }
 
     fn known_peers(&self) -> Vec<String> {
-        self.known_peers
-            .blocking_read()
-            .values()
-            .map(|sock| sock.to_string())
-            .collect()
+        self.known_peers.blocking_read().values().map(|sock| sock.to_string()).collect()
     }
 
     fn trigger_sync(&self) -> Result<(), SyncError> {
@@ -1886,6 +2058,7 @@ impl SyncLayer for CustomSync {
             let _ = tx.send(true);
             log::info!("P2P listener shutdown signal sent");
         }
+        self.outbound_connections.blocking_lock().clear();
     }
 }
 
@@ -1917,27 +2090,37 @@ impl CustomSync {
             match incoming {
                 Ok(Ok(NetworkMessage::GetChainHead)) => {
                     let (lh, lh2) = Self::chain_head_from_storage(block_cache, storage).await;
-                    let _ = Self::send_message(stream, NetworkMessage::ChainHeadResponse {
-                        latest_block_hash: lh, height: lh2,
-                    }).await;
+                    let _ = Self::send_message(
+                        stream,
+                        NetworkMessage::ChainHeadResponse { latest_block_hash: lh, height: lh2 },
+                    )
+                    .await;
                 }
                 Ok(Ok(NetworkMessage::GetBlocks { from_height, to_height })) => {
                     let clamped_to = to_height.min(from_height.saturating_add(MAX_BLOCK_RANGE));
-                    let blocks = Self::blocks_in_range(block_cache, storage, from_height, clamped_to).await;
+                    let blocks =
+                        Self::blocks_in_range(block_cache, storage, from_height, clamped_to).await;
                     let count = blocks.len();
-                    eprintln!("[P2P] serve_sync: serving {} blocks ({}..={})", count, from_height, clamped_to);
-                    let _ = Self::send_message(stream, NetworkMessage::BlocksResponse { blocks }).await;
+                    log::trace!(
+                        "[P2P] serve_sync: serving {} blocks ({}..={})",
+                        count,
+                        from_height,
+                        clamped_to
+                    );
+                    let _ =
+                        Self::send_message(stream, NetworkMessage::BlocksResponse { blocks }).await;
                 }
                 Ok(Ok(NetworkMessage::RequestBlock { hash })) => {
-                    eprintln!("[P2P] serve_sync: serving block request {}", hex::encode(hash));
-                    let _ = Self::handle_block_request_full(stream, hash, block_cache, storage).await;
+                    log::trace!("[P2P] serve_sync: serving block request {}", hex::encode(hash));
+                    let _ =
+                        Self::handle_block_request_full(stream, hash, block_cache, storage).await;
                 }
                 Ok(Ok(other)) => {
-                    eprintln!("[P2P] serve_sync: ignoring {:?}", std::mem::discriminant(&other));
+                    log::trace!("[P2P] serve_sync: ignoring {:?}", std::mem::discriminant(&other));
                 }
                 Err(_) => break,
                 Ok(Err(e)) => {
-                    eprintln!("[P2P] serve_sync: receive error: {}", e);
+                    log::debug!("[P2P] serve_sync: receive error: {}", e);
                     break;
                 }
             }
@@ -2097,6 +2280,9 @@ impl Clone for SyncWrapper {
                 signing_key: Arc::clone(&cs.signing_key),
                 peer_rate_limiters: Arc::clone(&cs.peer_rate_limiters),
                 peer_health: Arc::clone(&cs.peer_health),
+                outbound_connections: Arc::clone(&cs.outbound_connections),
+                chain_id: cs.chain_id,
+                announcement_tx: cs.announcement_tx.clone(),
             })),
         }
     }

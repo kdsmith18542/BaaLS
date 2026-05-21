@@ -276,7 +276,7 @@ pub fn build_runtime(
     let sync_layer = if peers.is_empty() && !mdns {
         SyncWrapper::Noop(NoopSync)
     } else {
-        let mut cs = CustomSync::new(public_key, listen_socket)
+        let mut cs = CustomSync::new(public_key, listen_socket, config.consensus.chain_id)
             .with_signing_key(signing_key.clone())
             .with_storage(storage.clone_storage());
         if config.network.tls_enabled {

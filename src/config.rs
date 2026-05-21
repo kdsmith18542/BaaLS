@@ -458,7 +458,7 @@ pub fn setup_logging(config: &Config, default_level: &str) -> Result<(), ConfigE
         let max_files = config.logging.log_max_files;
         let writer = RotatingFileWriter::new(log_path, max_size, max_files)
             .map_err(|e| ConfigError::Invalid(format!("Failed to open log file: {}", e)))?;
-        builder.target(env_logger::Target::Pipe(Box::new(writer)));
+        builder.target(env_logger::Target::Pipe(Box::new(TeeWriter { file: writer })));
     }
 
     let _ = builder.try_init();
@@ -511,6 +511,22 @@ impl std::io::Write for RotatingFileWriter {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+struct TeeWriter {
+    file: RotatingFileWriter,
+}
+
+impl std::io::Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = std::io::stderr().write_all(buf);
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::stderr().flush();
         self.file.flush()
     }
 }
