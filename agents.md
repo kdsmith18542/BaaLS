@@ -58,7 +58,7 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 - **Monitor alerting is implemented.** `/etc/baals/monitor.sh` now supports webhook/email notifications, cooldown-based alert suppression, and recovery notifications.
 - **P2P timeout tuning is implemented.** `network.connection_timeout_ms` is now wired into `CustomSync`, and expected idle disconnects are logged at debug level instead of error.
 - **TLS hardening is implemented.** Both nodes now run CA-signed certs with configured trust pinning (`tls_ca_cert_path = "/etc/baals/tls/ca.crt"`).
-- **Empty-block policy was tested and reverted.** Enabling `produce_empty_blocks=true` with current 2-node quorum/round-robin caused same-height competing empty blocks and persistent fork churn, so production configs were reset to event-driven mode.
+- **Empty-block policy was re-enabled safely.** With quorum signature collection + proposer gating, `produce_empty_blocks=true` is now enabled on both VPS nodes and chain height advances while converging.
 - **Heartbeat safety guard is implemented in code.** Empty block production is now proposer-gated in round-robin mode (deterministic signer ordering), and empty heartbeat blocks are intentionally suppressed when `quorum_threshold > 1` to avoid timed same-height fork churn.
 - **Quorum signature collection is implemented.** Proposers now request and attach peer quorum signatures over P2P before applying/broadcasting blocks when `quorum_threshold > 1`, and imported quorum-signed blocks validate correctly.
 - **Quorum heartbeat path is now enabled and tested.** With reachable peers, `produce_empty_blocks=true` + `quorum_threshold > 1` + `round_robin=true` now produces converged empty blocks under quorum signatures; without quorum peers, heartbeat proposals are skipped.
@@ -68,6 +68,7 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 ### Moderate
 
 - **Heartbeat with quorum requires healthy peer quorum.** If quorum peers are unreachable, empty heartbeat proposals are skipped until signatures are available.
+- **Transient one-block lag/reorg warnings may appear.** Nodes can briefly differ by one height before converging to the same tip under active heartbeat traffic.
 - **P2P connection churn still occurs.** Peers may still close/reconnect on timeout windows, but expected idle timeout events are now debug-level rather than error-level.
 - **Admin endpoints need JWT for writes.** POST/DELETE on `/api/v1/admin/signers` requires a token from `/auth/token`.
 
