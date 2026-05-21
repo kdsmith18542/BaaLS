@@ -117,6 +117,8 @@ Minimum gas limit: 21,000. Signature: Ed25519 over the 32-byte hash.
 
 - Script path: `/etc/baals/monitor.sh` (cron: `*/2 * * * *`)
 - Versioned source: `scripts/monitor.sh`
+- Config example: `scripts/baals-monitor.env.example`
+- Optional config file: `/etc/default/baals-monitor` (override via `BAALS_MONITOR_CONFIG_FILE`)
 - Optional environment variables:
   - `BAALS_MONITOR_WEBHOOK_URL` - webhook endpoint for alert/recovery JSON payloads
   - `BAALS_MONITOR_EMAIL_TO` - destination email address (requires `mail` or `mailx`)

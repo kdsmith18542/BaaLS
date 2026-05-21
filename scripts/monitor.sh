@@ -5,6 +5,12 @@ HEALTH_URLS=("http://127.0.0.1:18082/health" "http://127.0.0.1:18092/health")
 NODE_NAMES=("node1" "node2")
 LOG="/var/log/baals-monitor.log"
 
+CONFIG_FILE="${BAALS_MONITOR_CONFIG_FILE:-/etc/default/baals-monitor}"
+if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+fi
+
 STATE_DIR="${BAALS_MONITOR_STATE_DIR:-/var/lib/baals-monitor}"
 ALERT_COOLDOWN_SECONDS="${BAALS_MONITOR_ALERT_COOLDOWN_SECONDS:-900}"
 WEBHOOK_URL="${BAALS_MONITOR_WEBHOOK_URL:-}"
