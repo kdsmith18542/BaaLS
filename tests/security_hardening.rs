@@ -148,6 +148,7 @@ async fn test_incremental_smt_integrity() {
 #[test]
 #[cfg(unix)]
 fn test_consensus_key_permissions() {
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     init_logging();
     info!("[SECURITY_TEST] Starting test_consensus_key_permissions");
@@ -171,4 +172,3 @@ fn test_consensus_key_permissions() {
 
     info!("[SECURITY_TEST] test_consensus_key_permissions passed");
 }
-

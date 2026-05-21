@@ -1575,8 +1575,8 @@ fn test_p2p_auto_announcement_and_import() {
 
     let ce_a = BaaLSContractEngine::new(storage_a.clone()).unwrap();
     let ce_b = BaaLSContractEngine::new(storage_b.clone()).unwrap();
-    let mut consensus_a = PoAConsensus::new(pk_a, 5000).with_signing_key(sk_a.clone());
-    let mut consensus_b = PoAConsensus::new(pk_b, 5000).with_signing_key(sk_b.clone());
+    let consensus_a = PoAConsensus::new(pk_a, 5000).with_signing_key(sk_a.clone());
+    let consensus_b = PoAConsensus::new(pk_b, 5000).with_signing_key(sk_b.clone());
 
     // Authorize each other's consensus keys for cross-node block validation
     consensus_a.add_authorized_signer(pk_b);
@@ -2353,8 +2353,8 @@ fn test_p2p_block_propagation() {
     // Build runtimes with auto-block disabled
     let ce_a = BaaLSContractEngine::new(storage_a.clone()).unwrap();
     let ce_b = BaaLSContractEngine::new(storage_b.clone()).unwrap();
-    let mut consensus_a = PoAConsensus::new(pk_a, 5000).with_signing_key(sk_a.clone());
-    let mut consensus_b = PoAConsensus::new(pk_b, 5000).with_signing_key(sk_b.clone());
+    let consensus_a = PoAConsensus::new(pk_a, 5000).with_signing_key(sk_a.clone());
+    let consensus_b = PoAConsensus::new(pk_b, 5000).with_signing_key(sk_b.clone());
 
     // Authorize each other's consensus keys for cross-node block validation
     consensus_a.add_authorized_signer(pk_b);
@@ -2492,8 +2492,8 @@ fn test_p2p_storage_backed_block_serving() {
 
     let ce_a = BaaLSContractEngine::new(storage_a.clone()).unwrap();
     let ce_b = BaaLSContractEngine::new(storage_b.clone()).unwrap();
-    let mut consensus_a = PoAConsensus::new(pk_a, 5000).with_signing_key(sk_a.clone());
-    let mut consensus_b = PoAConsensus::new(pk_b, 5000).with_signing_key(sk_b.clone());
+    let consensus_a = PoAConsensus::new(pk_a, 5000).with_signing_key(sk_a.clone());
+    let consensus_b = PoAConsensus::new(pk_b, 5000).with_signing_key(sk_b.clone());
 
     // Authorize each other's consensus keys for cross-node block validation
     consensus_a.add_authorized_signer(pk_b);

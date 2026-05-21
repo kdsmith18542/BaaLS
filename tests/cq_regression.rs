@@ -420,16 +420,16 @@ fn cq7_authorized_signers_persisted() {
         Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
     let test_key2 = PublicKey::from(consensus_sk2.verifying_key());
     let _contract_engine2 = BaaLSContractEngine::new(storage2.clone()).unwrap();
-    let mut consensus2 = PoAConsensus::new(test_key2, 1000).with_signing_key(consensus_sk2);
+    let consensus2 = PoAConsensus::new(test_key2, 1000).with_signing_key(consensus_sk2);
     consensus2.load_authorized_signers_from_storage(&storage2).unwrap();
 
     // Verify both signers were loaded
     assert!(
-        consensus2.authorized_signers().contains(&consensus_pk),
+        consensus2.authorized_signers_list().contains(&consensus_pk),
         "CQ-7: Primary signer should be persisted and reloaded"
     );
     assert!(
-        consensus2.authorized_signers().contains(&pk2),
+        consensus2.authorized_signers_list().contains(&pk2),
         "CQ-7: Added signer should be persisted and reloaded"
     );
 }
@@ -532,4 +532,3 @@ fn phase2_tx_status_and_finality_progress_with_confirmations() {
     assert_eq!(finality2.confirmations, 2);
     assert!(finality2.is_final);
 }
-

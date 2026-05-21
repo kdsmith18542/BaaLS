@@ -55,7 +55,7 @@ fn test_quorum_rejection_missing_signatures() {
     let (_, pk2) = make_signing_key();
     let (_, pk3) = make_signing_key();
 
-    let mut consensus = PoAConsensus::new(pk1, 1000)
+    let consensus = PoAConsensus::new(pk1, 1000)
         .with_signing_key(sk1)
         .with_quorum_threshold(3); // require 3 of 3
     consensus.add_authorized_signer(pk2);
@@ -103,7 +103,7 @@ fn test_quorum_acceptance_with_extra_signatures() {
     let (sk2, pk2) = make_signing_key();
     let (_sk3, pk3) = make_signing_key();
 
-    let mut consensus = PoAConsensus::new(pk1, 1000)
+    let consensus = PoAConsensus::new(pk1, 1000)
         .with_signing_key(sk1)
         .with_quorum_threshold(2); // require 2 of 3
     consensus.add_authorized_signer(pk2);
@@ -154,7 +154,7 @@ fn test_quorum_rejects_invalid_extra_signature() {
     let (sk1, pk1) = make_signing_key();
     let (_, pk2) = make_signing_key();
 
-    let mut consensus = PoAConsensus::new(pk1, 1000)
+    let consensus = PoAConsensus::new(pk1, 1000)
         .with_signing_key(sk1)
         .with_quorum_threshold(2);
     consensus.add_authorized_signer(pk2);
@@ -216,7 +216,7 @@ fn test_round_robin_expected_signer() {
     let (_, pk2) = make_signing_key();
     let (_, pk3) = make_signing_key();
 
-    let mut consensus = PoAConsensus::new(pk1, 1000).with_round_robin(true);
+    let consensus = PoAConsensus::new(pk1, 1000).with_round_robin(true);
     consensus.add_authorized_signer(pk2);
     consensus.add_authorized_signer(pk3);
 
@@ -235,7 +235,7 @@ fn test_round_robin_violation_rejected() {
     let (_, pk3) = make_signing_key();
 
     // pk1 is the signing key but block 1 should be signed by pk2 in round-robin
-    let mut consensus = PoAConsensus::new(pk1, 1000)
+    let consensus = PoAConsensus::new(pk1, 1000)
         .with_signing_key(sk1)
         .with_round_robin(true);
     consensus.add_authorized_signer(pk2);
@@ -281,7 +281,7 @@ fn test_round_robin_clear_violation_rejected() {
     let (_, pk2) = make_signing_key();
     let (_, pk3) = make_signing_key();
 
-    let mut consensus = PoAConsensus::new(pk1, 1000)
+    let consensus = PoAConsensus::new(pk1, 1000)
         .with_signing_key(sk1)
         .with_round_robin(true);
     consensus.add_authorized_signer(pk2);
