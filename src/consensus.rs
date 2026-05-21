@@ -377,22 +377,22 @@ impl crate::consensus::ConsensusEngine for PoAConsensus {
             total_size.min(self.block_size_limit)
         );
 
-        // Determine signer: round-robin from all authorized keys, or primary
+        // Determine signer for metadata/signature.
+        // We always sign with the local authority key; runtime-level proposer
+        // gating decides when empty heartbeat blocks are emitted.
         let signers_snapshot: Vec<PublicKey> = self.authorized_signers.read().unwrap().clone();
-        let block_signer_pk = if self.round_robin && !signers_snapshot.is_empty() {
+        if self.round_robin && !signers_snapshot.is_empty() {
             let all_rr: Vec<&PublicKey> = std::iter::once(&self.authorized_signer_key)
                 .chain(signers_snapshot.iter())
                 .collect();
-            let chosen = *all_rr[(index as usize) % all_rr.len()];
+            let expected = *all_rr[(index as usize) % all_rr.len()];
             info!(
-                "[CONSENSUS] Round-robin: block {} assigned to signer {}",
+                "[CONSENSUS] Round-robin: block {} expected signer {}",
                 index,
-                &hex::encode(chosen.to_bytes())[..8]
+                &hex::encode(expected.to_bytes())[..8]
             );
-            chosen
-        } else {
-            self.authorized_signer_key
-        };
+        }
+        let block_signer_pk = self.authorized_signer_key;
 
         // Set signer in metadata BEFORE calculating hash
         // This ensures the block hash covers signer identity

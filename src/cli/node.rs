@@ -345,6 +345,8 @@ pub fn build_runtime(
     runtime.finality_depth = config.consensus.finality_depth;
     runtime.max_reorg_depth = config.consensus.max_reorg_depth;
     runtime.produce_empty_blocks = config.consensus.produce_empty_blocks;
+    runtime.round_robin_enabled = config.consensus.round_robin;
+    runtime.consensus_quorum_threshold = config.consensus.quorum_threshold;
     let treasury_address =
         match config.fees.treasury_address.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(addr_hex) => Some(

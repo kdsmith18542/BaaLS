@@ -218,6 +218,8 @@ pub struct Runtime<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> {
     pub finality_depth: u64,
     pub max_reorg_depth: u64,
     pub produce_empty_blocks: bool,
+    pub round_robin_enabled: bool,
+    pub consensus_quorum_threshold: usize,
     metrics: Arc<MetricsCollector>,
     started_at: Arc<Mutex<Option<SystemTime>>>,
     sync_in_flight: Arc<AtomicBool>,
@@ -247,6 +249,8 @@ impl<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> Clone for Runtime<S
             finality_depth: self.finality_depth,
             max_reorg_depth: self.max_reorg_depth,
             produce_empty_blocks: self.produce_empty_blocks,
+            round_robin_enabled: self.round_robin_enabled,
+            consensus_quorum_threshold: self.consensus_quorum_threshold,
             metrics: Arc::clone(&self.metrics),
             started_at: Arc::clone(&self.started_at),
             sync_in_flight: Arc::clone(&self.sync_in_flight),
@@ -302,6 +306,8 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             finality_depth: 12,
             max_reorg_depth: 50,
             produce_empty_blocks: false,
+            round_robin_enabled: false,
+            consensus_quorum_threshold: 1,
             consensus: Arc::new(consensus),
             mempool: Arc::new(Mutex::new(Mempool::new(mempool_size_limit))),
             chain_state: Arc::new(Mutex::new(initial_chain_state)),
@@ -536,6 +542,25 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                 debug!("Block production loop terminated");
             });
         });
+    }
+
+    fn is_local_round_robin_proposer_for_index(&self, block_index: u64) -> bool {
+        if !self.round_robin_enabled {
+            return true;
+        }
+        let primary = match self.consensus.primary_signer() {
+            Some(pk) => pk,
+            None => return true,
+        };
+        let mut all_signers = self.consensus.list_signers();
+        all_signers.push(primary);
+        all_signers.sort_unstable();
+        all_signers.dedup();
+        if all_signers.len() <= 1 {
+            return true;
+        }
+        let expected = all_signers[(block_index as usize) % all_signers.len()];
+        expected == primary
     }
 
     pub fn stop(&self) -> Result<(), RuntimeError> {
@@ -805,6 +830,24 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             prev_block.index,
             crate::types::format_hex(&prev_block.hash)
         );
+
+        let next_index = prev_block.index.saturating_add(1);
+        if mempool.is_empty() && self.produce_empty_blocks {
+            if self.consensus_quorum_threshold > 1 {
+                debug!(
+                    "[HEARTBEAT] Skipping empty block #{}: quorum_threshold={} requires quorum signatures; heartbeat empty blocks are disabled in this mode",
+                    next_index, self.consensus_quorum_threshold
+                );
+                return Err(ConsensusError::NoPendingTransactions.into());
+            }
+            if !self.is_local_round_robin_proposer_for_index(next_index) {
+                debug!(
+                    "[HEARTBEAT] Skipping empty block #{}: local validator is not the scheduled round-robin proposer",
+                    next_index
+                );
+                return Err(ConsensusError::NoPendingTransactions.into());
+            }
+        }
 
         debug!("[PRODUCE_BLOCK] Collecting transactions from mempool (priority-ordered)");
         mempool.evict_expired();

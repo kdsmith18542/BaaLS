@@ -3198,6 +3198,40 @@ fn test_empty_block_production() {
 }
 
 #[test]
+fn test_empty_block_production_disabled_when_quorum_gt_one() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let data_dir = temp_dir.path().to_path_buf();
+
+    let mut config = Config::default();
+    config.node.data_dir = data_dir.to_string_lossy().to_string();
+    config.consensus.produce_empty_blocks = true;
+    config.consensus.block_time_ms = 100;
+    config.consensus.quorum_threshold = 2;
+
+    let sk = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let key_path = data_dir.join("consensus.key");
+    std::fs::write(&key_path, sk.to_bytes()).unwrap();
+
+    let (runtime, _public_key, _signing_key) = baals::cli::node::build_runtime(
+        &data_dir,
+        &config,
+        &[],
+        "127.0.0.1:0",
+        false,
+    ).unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    let state = runtime.get_chain_state().unwrap();
+    assert_eq!(
+        state.latest_block_index, 0,
+        "Empty heartbeat blocks must be suppressed when quorum_threshold > 1"
+    );
+
+    runtime.stop().unwrap();
+}
+
+#[test]
 fn test_state_snapshot_sync() {
     init_logging();
     info!("[SNAPSHOT_TEST] Starting State Snapshot Sync Integration Test");
