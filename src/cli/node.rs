@@ -1667,10 +1667,12 @@ pub fn handle_node(
                     cmd.arg("--mdns");
                 }
 
+                let stdout_file = std::fs::File::create(data_dir.join("node-out.txt"))?;
+                let stderr_file = std::fs::File::create(data_dir.join("node-err.txt"))?;
                 let child = cmd
                     .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
+                    .stdout(stdout_file)
+                    .stderr(stderr_file)
                     .spawn()?;
 
                 let pid_path = node_pid_path(&data_dir);

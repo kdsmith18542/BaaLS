@@ -941,7 +941,7 @@ impl CustomSync {
                     Self::handle_block_response_full(block, &block_cache, &received_blocks).await;
                 }
                 NetworkMessage::NewBlockAnnouncement { block_hash, height } => {
-                    // Check if we already have the announced block.
+                    eprintln!("[P2P] Inbound: NewBlockAnnouncement height={} from {}", height, addr);
                     let have_it = {
                         let cache = block_cache.lock().await;
                         cache.contains_key(&block_hash)
@@ -952,14 +952,14 @@ impl CustomSync {
                             .is_some_and(|s| s.get_block(&block_hash).ok().flatten().is_some())
                     };
                     if have_it {
+                        eprintln!("[P2P] Inbound: already have announced block, skipping");
                         continue;
                     }
 
                     let (local_head_hash, local_height) =
                         Self::chain_head_from_storage(&block_cache, &storage).await;
+                    eprintln!("[P2P] Inbound: local_height={}, announced height={}", local_height, height);
 
-                    // If the peer is several blocks ahead, request a contiguous range
-                    // instead of only the tip block hash.
                     if height > local_height.saturating_add(1) {
                         // Include local height to allow fork recovery when chains
                         // diverged at the current tip (same height, different hash).
@@ -977,16 +977,19 @@ impl CustomSync {
                             from_height,
                             to_height
                         );
-                        let _ = Self::send_message(
+                        eprintln!("[P2P] Inbound: sending GetBlocks {}..={} to {}", from_height, to_height, addr);
+                        let send_result = Self::send_message(
                             &mut socket,
                             NetworkMessage::GetBlocks { from_height, to_height },
                         )
                         .await;
+                        eprintln!("[P2P] Inbound: GetBlocks send result: {:?}", send_result.is_ok());
 
-                        match timeout(Duration::from_secs(2), Self::receive_message(&mut socket))
+                        match timeout(Duration::from_secs(10), Self::receive_message(&mut socket))
                             .await
                         {
                             Ok(Ok(NetworkMessage::BlocksResponse { mut blocks })) => {
+                                eprintln!("[P2P] Inbound: received {} blocks from {}", blocks.len(), addr);
                                 blocks.sort_by_key(|b| b.index);
 
                                 if blocks
