@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "baals"
+version = "0.1.0"
+description = "Python client SDK for BaaLS (Blockchain as a Local Service)"
+requires-python = ">=3.9"
+dependencies = [
+    "PyNaCl>=1.5.0",
+    "httpx>=0.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["baals*"]

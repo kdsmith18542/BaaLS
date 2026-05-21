@@ -1032,6 +1032,36 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_hash_vector() {
+        let sender_sk = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+        let sender = PublicKey::from(sender_sk.verifying_key());
+        let recipient_sk = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]);
+        let recipient = PublicKey::from(recipient_sk.verifying_key());
+
+        let tx = Transaction {
+            hash: [0; 32],
+            sender,
+            nonce: 42,
+            timestamp: 1700000000,
+            recipient: Address::Wallet(recipient),
+            payload: TransactionPayload::Transfer { amount: 1000 },
+            signature: TransactionSignature::from_bytes(&[0; 64]).unwrap(),
+            gas_limit: 100_000,
+            gas_price: 1,
+            priority: 0,
+            metadata: None,
+            chain_id: 1,
+        };
+
+        let hash = tx.calculate_hash().unwrap();
+        // Shared test vector — must match sdk/python/tests/test_transaction.py
+        assert_eq!(
+            hex::encode(hash),
+            "616107ff2c9c85c227275c6e1c0c7cf3d7cfff3f0e479c8bd2e68706d3ec9cfc"
+        );
+    }
+
+    #[test]
     fn test_merkle_tree_single_leaf() {
         let mut tree = MerkleTree::new();
         tree.add_leaf(b"hello");

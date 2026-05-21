@@ -62,6 +62,7 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 - **Heartbeat safety guard is implemented in code.** Empty block production is now proposer-gated in round-robin mode (deterministic signer ordering), and empty heartbeat blocks are intentionally suppressed when `quorum_threshold > 1` to avoid timed same-height fork churn.
 - **Quorum signature collection is implemented.** Proposers now request and attach peer quorum signatures over P2P before applying/broadcasting blocks when `quorum_threshold > 1`, and imported quorum-signed blocks validate correctly.
 - **Quorum heartbeat path is now enabled and tested.** With reachable peers, `produce_empty_blocks=true` + `quorum_threshold > 1` + `round_robin=true` now produces converged empty blocks under quorum signatures; without quorum peers, heartbeat proposals are skipped.
+- **Python SDK is implemented.** `sdk/python/baals/` provides a pure-Python HTTP client with bincode-compatible transaction hashing, Ed25519 signing, JWT auth, and full API coverage. Cross-validated against Rust's `test_deterministic_hash_vector` — the shared test vector `616107ff...` confirms hash parity.
 
 ## Known Issues
 
@@ -76,7 +77,7 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 
 ### Medium Priority
 
-1. **Python SDK** - client library matching Rust's bincode transaction hashing (prototype exists in e2e test scripts).
+1. ~~**Python SDK**~~ — done, see `sdk/python/`.
 
 ### Lower Priority
 
@@ -113,6 +114,7 @@ Minimum gas limit: 21,000. Signature: Ed25519 over the 32-byte hash.
 - `tests/cq_regression.rs` - fee system tests (4 modes + validation)
 - `tests/multi_validator.rs` - multi-signer PoA tests
 - `tests/integration.rs` - includes `test_state_snapshot_sync`, `test_empty_block_production`, `test_p2p_quorum_signature_collection`, and quorum heartbeat convergence tests
+- `sdk/python/baals/` - Python SDK: client.py (HTTP API), transaction.py (hash/sign), types.py (bincode), auth.py (JWT)
 
 ## Monitor Alerting Notes
 
