@@ -892,64 +892,7 @@ impl CustomSync {
             }
             _ => return Err(SyncError::InvalidMessage),
         }
-        // After handshake, proactively check if the connecting peer is ahead
-        // and backfill blocks. This enables sync even when only one side can
-        // initiate outbound connections (e.g. behind NAT).
-        // Handles race where both sides send GetChainHead simultaneously.
-        {
-            let mut retries = 2;
-            let mut got_response = false;
-            while retries > 0 && !got_response {
-                let _ = Self::send_message(&mut socket, NetworkMessage::GetChainHead).await;
-                match timeout(Duration::from_secs(5), Self::receive_message(&mut socket)).await {
-                    Ok(Ok(NetworkMessage::ChainHeadResponse { latest_block_hash: _, height })) => {
-                        let (local_head_hash, local_height) =
-                            Self::chain_head_from_storage(&block_cache, &storage).await;
-
-                        if height > local_height {
-                            log::info!(
-                                "Inbound peer is ahead (peer_height={}, local_height={}), requesting backfill",
-                                height, local_height
-                            );
-                            let from_height = local_height.saturating_add(1);
-                            let to_height = height;
-                            let _ = Self::send_message(
-                                &mut socket,
-                                NetworkMessage::GetBlocks { from_height, to_height },
-                            )
-                            .await;
-
-                            if let Ok(Ok(NetworkMessage::BlocksResponse { mut blocks })) =
-                                timeout(Duration::from_secs(10), Self::receive_message(&mut socket)).await
-                            {
-                                blocks.sort_by_key(|b| b.index);
-                                if blocks.first().is_some_and(|b| b.index == local_height && b.hash == local_head_hash) {
-                                    let _ = blocks.remove(0);
-                                }
-                                let mut recv = received_blocks.lock().await;
-                                for block in blocks {
-                                    if recv.len() < MAX_RECEIVED_BLOCKS_QUEUE {
-                                        recv.push(block);
-                                    }
-                                }
-                                log::info!("Queued {} backfill blocks from inbound peer", recv.len());
-                            }
-                        }
-                        got_response = true;
-                    }
-                    Ok(Ok(NetworkMessage::GetChainHead)) => {
-                        // Peer also sent GetChainHead simultaneously; respond and retry
-                        log::debug!("Received GetChainHead during bidirectional sync, responding and retrying");
-                        let (lh, lh2) = Self::chain_head_from_storage(&block_cache, &storage).await;
-                        let _ = Self::send_message(&mut socket, NetworkMessage::ChainHeadResponse {
-                            latest_block_hash: lh, height: lh2,
-                        }).await;
-                        retries -= 1;
-                    }
-                    _ => break,
-                }
-            }
-        }
+        log::info!("Inbound peer authenticated, entering message loop");
         // After handshake, enter message loop
         loop {
             // Per-peer rate limit: max MAX_P2P_MESSAGES_PER_SECOND messages/sec
@@ -1545,25 +1488,8 @@ impl CustomSync {
             _ => return Err(SyncError::AuthenticationFailed),
         }
 
-        // Request chain head (with retry for bidirectional sync race)
-        let mut retries = 2;
-        let chain_head = loop {
-            Self::send_message(&mut stream, NetworkMessage::GetChainHead).await?;
-            let msg = Self::receive_message(&mut stream).await?;
-            match msg {
-                NetworkMessage::ChainHeadResponse { .. } => break msg,
-                NetworkMessage::GetChainHead if retries > 0 => {
-                    // Server also sent GetChainHead simultaneously; respond and retry
-                    log::debug!("Received GetChainHead during sync, responding and retrying");
-                    let (lh, lh2) = Self::chain_head_from_storage(&self.block_cache, &self.storage).await;
-                    let _ = Self::send_message(&mut stream, NetworkMessage::ChainHeadResponse {
-                        latest_block_hash: lh, height: lh2,
-                    }).await;
-                    retries -= 1;
-                }
-                _ => return Err(SyncError::InvalidMessage),
-            }
-        };
+        Self::send_message(&mut stream, NetworkMessage::GetChainHead).await?;
+        let chain_head = Self::receive_message(&mut stream).await?;
 
         match chain_head {
             NetworkMessage::ChainHeadResponse { latest_block_hash, height } => {
@@ -1587,25 +1513,28 @@ impl CustomSync {
                         crate::types::format_hex(&latest_block_hash),
                         crate::types::format_hex(&local_chain_state.latest_block_hash)
                     );
-                    return self
+                    let fork_result = self
                         .resolve_fork_blocks(peer, &mut stream, local_chain_state, height)
                         .await;
+                    Self::serve_sync_requests(&mut stream, &self.block_cache, &self.storage).await;
+                    return fork_result;
                 }
 
-                if height < local_chain_state.latest_block_index {
-                    let peer_state = ChainState {
-                        latest_block_hash,
-                        latest_block_index: height,
-                        accounts_root_hash: [0u8; 32],
-                        total_supply: 0,
-                    };
-                    self.resolve_fork(&peer_state, local_chain_state, peer).await?;
-                    return Err(SyncError::SynchronizationError(
-                        "Peer is not ahead of local chain".to_string(),
-                    ));
-                }
-
-                if height == local_chain_state.latest_block_index {
+                if height <= local_chain_state.latest_block_index {
+                    log::info!(
+                        "Peer is behind or equal (peer={}, local={}), announcing our chain head",
+                        height, local_chain_state.latest_block_index
+                    );
+                    let _ = Self::send_message(
+                        &mut stream,
+                        NetworkMessage::NewBlockAnnouncement {
+                            block_hash: local_chain_state.latest_block_hash,
+                            height: local_chain_state.latest_block_index,
+                        },
+                    ).await;
+                    Self::serve_sync_requests_with_timeout(
+                        &mut stream, &self.block_cache, &self.storage, 10,
+                    ).await;
                     return Err(SyncError::SynchronizationError(
                         "Peer is not ahead of local chain".to_string(),
                     ));
@@ -1624,6 +1553,7 @@ impl CustomSync {
                     match blocks_response {
                         NetworkMessage::BlocksResponse { blocks } => {
                             if blocks.is_empty() {
+                                Self::serve_sync_requests(&mut stream, &self.block_cache, &self.storage).await;
                                 return Err(SyncError::SynchronizationError(
                                     "Empty blocks response".to_string(),
                                 ));
@@ -1634,7 +1564,7 @@ impl CustomSync {
                                      doesn't match local head",
                                     blocks[0].index
                                 );
-                                return self
+                                let fork_result = self
                                     .resolve_fork_blocks(
                                         peer,
                                         &mut stream,
@@ -1642,6 +1572,8 @@ impl CustomSync {
                                         height,
                                     )
                                     .await;
+                                Self::serve_sync_requests(&mut stream, &self.block_cache, &self.storage).await;
+                                return fork_result;
                             }
                             for block in &blocks {
                                 let mut cache = self.block_cache.lock().await;
@@ -1656,9 +1588,11 @@ impl CustomSync {
                             } else {
                                 log::warn!("Dropped incoming blocks: received_blocks queue full");
                             }
+                            Self::serve_sync_requests(&mut stream, &self.block_cache, &self.storage).await;
                             return Ok(blocks.last().unwrap().clone());
                         }
                         _ => {
+                            Self::serve_sync_requests(&mut stream, &self.block_cache, &self.storage).await;
                             return Err(SyncError::SynchronizationError(
                                 "Unexpected response for GetBlocks".to_string(),
                             ));
@@ -1673,27 +1607,33 @@ impl CustomSync {
                 )
                 .await?;
                 let block_response = Self::receive_message(&mut stream).await?;
-                match block_response {
+                let block_result = match block_response {
                     NetworkMessage::BlockResponse { block: Some(block) } => {
                         if block.hash != latest_block_hash {
-                            return Err(SyncError::SynchronizationError(
+                            Err(SyncError::SynchronizationError(
                                 "Peer returned unexpected block hash".to_string(),
-                            ));
+                            ))
+                        } else {
+                            let mut cache = self.block_cache.lock().await;
+                            cache.insert(block.hash, block.clone());
+                            drop(cache);
+                            let mut recv = self.received_blocks.lock().await;
+                            if recv.len() < MAX_RECEIVED_BLOCKS_QUEUE {
+                                recv.push(block.clone());
+                            }
+                            Ok(block)
                         }
-                        let mut cache = self.block_cache.lock().await;
-                        cache.insert(block.hash, block.clone());
-                        drop(cache);
-                        let mut recv = self.received_blocks.lock().await;
-                        if recv.len() < MAX_RECEIVED_BLOCKS_QUEUE {
-                            recv.push(block.clone());
-                        }
-                        Ok(block)
                     }
                     NetworkMessage::BlockResponse { block: None } => Err(SyncError::BlockNotFound),
                     _ => Err(SyncError::InvalidMessage),
-                }
+                };
+                Self::serve_sync_requests(&mut stream, &self.block_cache, &self.storage).await;
+                return block_result;
             }
-            _ => Err(SyncError::InvalidMessage),
+            _ => {
+                Self::serve_sync_requests(&mut stream, &self.block_cache, &self.storage).await;
+                return Err(SyncError::InvalidMessage);
+            }
         }
     }
 }
@@ -1943,6 +1883,53 @@ impl SyncLayer for CustomSync {
 }
 
 impl CustomSync {
+    /// Serve pending sync requests briefly on an outbound connection before closing.
+    /// This allows the server's bidirectional sync to request backfill blocks.
+    async fn serve_sync_requests<S: AsyncRead + AsyncWrite + Unpin + Send>(
+        stream: &mut S,
+        block_cache: &Arc<Mutex<HashMap<[u8; 32], Block>>>,
+        storage: &Arc<Mutex<Option<Box<dyn Storage>>>>,
+    ) {
+        Self::serve_sync_requests_with_timeout(stream, block_cache, storage, 2).await;
+    }
+
+    async fn serve_sync_requests_with_timeout<S: AsyncRead + AsyncWrite + Unpin + Send>(
+        stream: &mut S,
+        block_cache: &Arc<Mutex<HashMap<[u8; 32], Block>>>,
+        storage: &Arc<Mutex<Option<Box<dyn Storage>>>>,
+        timeout_secs: u64,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let incoming = timeout(remaining, Self::receive_message(stream)).await;
+            match incoming {
+                Ok(Ok(NetworkMessage::GetChainHead)) => {
+                    let (lh, lh2) = Self::chain_head_from_storage(block_cache, storage).await;
+                    let _ = Self::send_message(stream, NetworkMessage::ChainHeadResponse {
+                        latest_block_hash: lh, height: lh2,
+                    }).await;
+                }
+                Ok(Ok(NetworkMessage::GetBlocks { from_height, to_height })) => {
+                    let clamped_to = to_height.min(from_height.saturating_add(MAX_BLOCK_RANGE));
+                    let blocks = Self::blocks_in_range(block_cache, storage, from_height, clamped_to).await;
+                    let count = blocks.len();
+                    let _ = Self::send_message(stream, NetworkMessage::BlocksResponse { blocks }).await;
+                    log::info!("Served {} blocks to peer via follow-up", count);
+                }
+                Ok(Ok(NetworkMessage::RequestBlock { hash })) => {
+                    let _ = Self::handle_block_request_full(stream, hash, block_cache, storage).await;
+                }
+                Ok(Ok(_)) => {}
+                _ => break,
+            }
+        }
+    }
+
     async fn connect_to_peer(
         &self,
         address: SocketAddr,
