@@ -55,6 +55,8 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 - **Quorum + round-robin are enabled on both VPS nodes.** `/etc/baals/config.toml` and `/etc/baals/config-node2.toml` set `quorum_threshold = 2` and `round_robin = true`.
 - **Signer sets are clean.** Node 1 and Node 2 signer lists include only each other; stale historical keys are removed.
 - **Optional empty block production is implemented.** `consensus.produce_empty_blocks` config flag exists (default `false`).
+- **Monitor alerting is implemented.** `/etc/baals/monitor.sh` now supports webhook/email notifications, cooldown-based alert suppression, and recovery notifications.
+- **P2P timeout tuning is implemented.** `network.connection_timeout_ms` is now wired into `CustomSync`, and expected idle disconnects are logged at debug level instead of error.
 
 ## Known Issues
 
@@ -68,14 +70,12 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 
 ### High Priority
 
-1. **P2P timeout tuning** - increase connection read timeout and/or add keep-alive to reduce timeout log noise.
-2. **Monitor alerting** - add webhook or email notifications to `/etc/baals/monitor.sh`.
-3. **TLS hardening** - replace self-signed certs with Let's Encrypt or an internal CA.
+1. **TLS hardening** - replace self-signed certs with Let's Encrypt or an internal CA.
 
 ### Medium Priority
 
-4. **Heartbeat / empty block policy** - decide whether to enable `consensus.produce_empty_blocks = true` in production configs.
-5. **Python SDK** - client library matching Rust's bincode transaction hashing (prototype exists in e2e test scripts).
+2. **Heartbeat / empty block policy** - decide whether to enable `consensus.produce_empty_blocks = true` in production configs.
+3. **Python SDK** - client library matching Rust's bincode transaction hashing (prototype exists in e2e test scripts).
 
 ### Lower Priority
 
@@ -112,3 +112,13 @@ Minimum gas limit: 21,000. Signature: Ed25519 over the 32-byte hash.
 - `tests/cq_regression.rs` - fee system tests (4 modes + validation)
 - `tests/multi_validator.rs` - multi-signer PoA tests
 - `tests/integration.rs` - includes `test_state_snapshot_sync` and `test_empty_block_production`
+
+## Monitor Alerting Notes
+
+- Script path: `/etc/baals/monitor.sh` (cron: `*/2 * * * *`)
+- Versioned source: `scripts/monitor.sh`
+- Optional environment variables:
+  - `BAALS_MONITOR_WEBHOOK_URL` - webhook endpoint for alert/recovery JSON payloads
+  - `BAALS_MONITOR_EMAIL_TO` - destination email address (requires `mail` or `mailx`)
+  - `BAALS_MONITOR_ALERT_COOLDOWN_SECONDS` - suppression window for repeated alerts (default `900`)
+  - `BAALS_MONITOR_STATE_DIR` - alert state directory (default `/var/lib/baals-monitor`)
