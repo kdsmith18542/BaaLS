@@ -3106,3 +3106,48 @@ fn test_tx_vec_args_roundtrip() {
     init_logging();
     golden::test_tx_roundtrip_vec_args();
 }
+
+#[test]
+fn test_genesis_alloc_and_round_robin() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let data_dir = temp_dir.path().to_path_buf();
+
+    // Create a config with genesis_alloc and round_robin
+    let mut config = Config::default();
+    config.node.data_dir = data_dir.to_string_lossy().to_string();
+
+    let genesis_sk = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let genesis_pk = PublicKey::from(genesis_sk.verifying_key());
+    let genesis_pk_hex = hex::encode(genesis_pk.to_bytes());
+
+    config.consensus.genesis_alloc.insert(genesis_pk_hex.clone(), 100_000_000);
+    config.consensus.round_robin = true;
+    config.consensus.quorum_threshold = 1;
+
+    // Save consensus key so build_runtime can load it
+    let key_path = data_dir.join("consensus.key");
+    std::fs::write(&key_path, genesis_sk.to_bytes()).unwrap();
+
+    let (runtime, public_key, _signing_key) = baals::cli::node::build_runtime(
+        &data_dir,
+        &config,
+        &[],
+        "127.0.0.1:0",
+        false,
+    ).unwrap();
+
+    assert_eq!(public_key, genesis_pk);
+
+    // Verify genesis account has the allocated balance
+    let account = runtime.get_account(&genesis_pk).unwrap().unwrap();
+    if let Account::Wallet { balance, nonce } = account {
+        assert_eq!(balance, 100_000_000);
+        assert_eq!(nonce, 0);
+    } else {
+        panic!("Allocated account should be a wallet");
+    }
+
+    // Stop the runtime
+    runtime.stop().unwrap();
+}

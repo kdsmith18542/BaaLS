@@ -53,6 +53,10 @@ pub struct ConsensusConfig {
     pub max_reorg_depth: u64,
     #[serde(default = "default_quorum_threshold")]
     pub quorum_threshold: usize,
+    #[serde(default = "default_round_robin")]
+    pub round_robin: bool,
+    #[serde(default)]
+    pub genesis_alloc: std::collections::HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +179,9 @@ fn default_max_reorg_depth() -> u64 {
 fn default_quorum_threshold() -> usize {
     1
 }
+fn default_round_robin() -> bool {
+    false
+}
 fn default_cache_mb() -> u64 {
     256
 }
@@ -251,6 +258,8 @@ impl Default for Config {
                 finality_depth: default_finality_depth(),
                 max_reorg_depth: default_max_reorg_depth(),
                 quorum_threshold: default_quorum_threshold(),
+                round_robin: default_round_robin(),
+                genesis_alloc: std::collections::HashMap::new(),
             },
             storage: StorageConfig {
                 cache_size_mb: default_cache_mb(),
@@ -333,6 +342,18 @@ impl Config {
         if !["trace", "debug", "info", "warn", "error"].contains(&self.logging.level.as_str()) {
             return Err(ConfigError::Invalid(format!("Invalid log level: {}", self.logging.level)));
         }
+        for pk_hex in self.consensus.genesis_alloc.keys() {
+            let decoded = hex::decode(pk_hex).map_err(|_| {
+                ConfigError::Invalid(format!("Invalid genesis_alloc key hex: {}", pk_hex))
+            })?;
+            if decoded.len() != 32 {
+                return Err(ConfigError::Invalid(format!(
+                    "genesis_alloc key must be 32 bytes (64 hex chars), got {} bytes: {}",
+                    decoded.len(),
+                    pk_hex
+                )));
+            }
+        }
         let fee_split_total = self
             .fees
             .operator_percent
@@ -414,6 +435,11 @@ impl Config {
                 self.consensus.quorum_threshold = value
                     .parse()
                     .map_err(|_| ConfigError::Invalid("Invalid quorum_threshold".into()))?
+            }
+            "consensus.round_robin" => {
+                self.consensus.round_robin = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid round_robin (true/false)".into()))?
             }
             "network.max_peers" => {
                 self.network.max_peers =
@@ -695,10 +721,12 @@ mod tests {
         cfg.set("consensus.chain_id", "42").expect("set chain_id");
         cfg.set("consensus.min_gas_price", "7").expect("set min_gas_price");
         cfg.set("consensus.quorum_threshold", "2").expect("set quorum_threshold");
+        cfg.set("consensus.round_robin", "true").expect("set round_robin");
 
         assert_eq!(cfg.consensus.chain_id, 42);
         assert_eq!(cfg.consensus.min_gas_price, 7);
         assert_eq!(cfg.consensus.quorum_threshold, 2);
+        assert_eq!(cfg.consensus.round_robin, true);
     }
 
     #[test]
@@ -713,5 +741,26 @@ mod tests {
             cfg.network.allowed_peers,
             vec!["1.2.3.4:9070".to_string(), "5.6.7.8:9070".to_string()]
         );
+    }
+
+    #[test]
+    fn test_genesis_alloc_validation() {
+        let mut cfg = Config::default();
+        // Valid 32-byte hex public key
+        let valid_pk = "0a82b7b0d6be0cde841d31fda2a0c9ceff7636c81332bc2ed9cc981f5f537abc";
+        cfg.consensus.genesis_alloc.insert(valid_pk.to_string(), 1000);
+        assert!(cfg.validate().is_ok());
+
+        // Invalid hex character
+        let invalid_hex = "0a82b7b0d6be0cde841d31fda2a0c9ceff7636c81332bc2ed9cc981f5f537abg";
+        let mut cfg2 = Config::default();
+        cfg2.consensus.genesis_alloc.insert(invalid_hex.to_string(), 1000);
+        assert!(cfg2.validate().is_err());
+
+        // Wrong key size (31 bytes instead of 32)
+        let invalid_size = "0a82b7b0d6be0cde841d31fda2a0c9ceff7636c81332bc2ed9cc981f5f537ab";
+        let mut cfg3 = Config::default();
+        cfg3.consensus.genesis_alloc.insert(invalid_size.to_string(), 1000);
+        assert!(cfg3.validate().is_err());
     }
 }

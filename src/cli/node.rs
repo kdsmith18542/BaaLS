@@ -13,7 +13,7 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use crate::{
     config::{Config, NodeStatus, StorageBackend},
-    Account, AnyStorage, BaaLSContractEngine, CustomSync, FeePolicy, Keystore, NoopSync,
+    Account, AnyStorage, BaaLSContractEngine, CustomSync, FeePolicy, Keystore, Ledger, NoopSync,
     PoAConsensus, PublicKey, RedbStorage, Runtime, SledStorage, Storage, SyncLayer, SyncWrapper,
     TlsConfig, Transaction,
 };
@@ -273,13 +273,30 @@ pub fn build_runtime(
         let pk = PublicKey::from(signing_key.verifying_key());
         let consensus = PoAConsensus::new(pk, config.consensus.block_time_ms)
             .with_signing_key(signing_key.clone())
-            .with_quorum_threshold(config.consensus.quorum_threshold);
+            .with_quorum_threshold(config.consensus.quorum_threshold)
+            .with_round_robin(config.consensus.round_robin);
         (pk, consensus, signing_key)
     };
 
     consensus.load_authorized_signers_from_storage(&storage)?;
 
     let contract_engine = BaaLSContractEngine::new(storage.clone())?;
+
+    // Seed the genesis state with genesis_alloc if configured
+    if !config.consensus.genesis_alloc.is_empty() {
+        let mut parsed_alloc = std::collections::HashMap::new();
+        for (pk_hex, balance) in &config.consensus.genesis_alloc {
+            let pk = parse_pubkey_hex(pk_hex)
+                .map_err(|e| format!("Invalid genesis_alloc key '{}': {}", pk_hex, e))?;
+            parsed_alloc.insert(pk, *balance);
+        }
+        let temp_contract_engine = BaaLSContractEngine::new(storage.clone())?;
+        let temp_ledger = Ledger::new(
+            std::sync::Arc::new(storage.clone()),
+            std::sync::Arc::new(temp_contract_engine),
+        );
+        temp_ledger.initialize_chain_with_alloc(&parsed_alloc)?;
+    }
 
     let listen_socket: std::net::SocketAddr =
         listen_addr.parse().unwrap_or_else(|_| "0.0.0.0:9070".parse().unwrap());

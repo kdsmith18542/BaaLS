@@ -95,16 +95,38 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
     }
 
     pub fn initialize_chain(&self) -> Result<(), LedgerError> {
+        self.initialize_chain_with_alloc(&HashMap::new())
+    }
+
+    pub fn initialize_chain_with_alloc(
+        &self,
+        genesis_alloc: &HashMap<PublicKey, u64>,
+    ) -> Result<(), LedgerError> {
         let chain_state_exists = self.storage.get_chain_state()?.is_some();
         if chain_state_exists {
             return Ok(());
         }
 
+        let mut tree = SparseMerkleTree::new();
+        let mut total_supply = 0u64;
+
+        for (pk, balance) in genesis_alloc {
+            let account = Account::Wallet { balance: *balance, nonce: 0 };
+            self.storage.put_account(pk, &account)?;
+
+            let pk_bytes = pk.to_bytes();
+            let val_hash: [u8; 32] = Sha256::digest(&bincode::serialize(&account)?).into();
+            tree.insert(pk_bytes, val_hash.to_vec());
+            total_supply = total_supply.saturating_add(*balance);
+        }
+
+        let state_root = tree.root();
+
         let genesis_block = Block {
             index: 0,
             timestamp: 0,
             prev_hash: [0; 32],
-            state_root: [0; 32],
+            state_root,
             hash: [0; 32],
             nonce: 0,
             transactions: Vec::new(),
@@ -122,8 +144,8 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
         let initial_chain_state = ChainState {
             latest_block_hash: genesis_block.hash,
             latest_block_index: 0,
-            accounts_root_hash: [0; 32],
-            total_supply: 0,
+            accounts_root_hash: state_root,
+            total_supply,
         };
 
         self.storage.put_block(&genesis_block)?;
