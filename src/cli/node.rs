@@ -632,7 +632,11 @@ fn spawn_health_server(
                                 | "/contract/call"
                                 | "/api/v1/contracts/invoke"
                         );
-                    if (is_mutating_endpoint || is_auth_token_endpoint) && !is_loopback {
+                    let is_admin_endpoint = matches!(request_url_str, "/api/v1/admin/signers")
+                        || request_url_str.starts_with("/api/v1/admin/signers/");
+                    if (is_mutating_endpoint || is_auth_token_endpoint || is_admin_endpoint)
+                        && !is_loopback
+                    {
                         respond_json(
                             request,
                             403,
@@ -643,7 +647,9 @@ fn spawn_health_server(
                         );
                         continue;
                     }
-                    if is_mutating_endpoint {
+                    let is_admin_write = is_admin_endpoint
+                        && matches!(*request.method(), Method::Post | Method::Delete);
+                    if is_mutating_endpoint || is_admin_write {
                         let Some(token) = extract_bearer_token(&request) else {
                             respond_json(
                                 request,
