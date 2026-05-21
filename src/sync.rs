@@ -308,6 +308,7 @@ pub struct CustomSync {
     outbound_connections: Arc<Mutex<HashMap<SocketAddr, Box<dyn AsyncStream>>>>,
     chain_id: u64,
     announcement_tx: tokio::sync::broadcast::Sender<NetworkMessage>,
+    bootstrap_peers: Arc<std::sync::Mutex<Vec<SocketAddr>>>,
 }
 
 const MAX_CONCURRENT_CONNECTIONS: usize = 128;
@@ -584,6 +585,7 @@ impl CustomSync {
             outbound_connections: Arc::new(Mutex::new(HashMap::new())),
             chain_id,
             announcement_tx,
+            bootstrap_peers: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -1996,6 +1998,37 @@ impl SyncLayer for CustomSync {
         // Opportunistically clean up dead peers every discovery cycle
         self.cleanup_dead_peers().await;
 
+        // Re-add bootstrap peers that were removed by cleanup
+        let bootstrap_addrs: Vec<SocketAddr> =
+            self.bootstrap_peers.lock().expect("bootstrap lock").clone();
+        if !bootstrap_addrs.is_empty() {
+            let active_addrs: HashSet<SocketAddr> = {
+                let peers = self.known_peers.read().await;
+                peers.values().cloned().collect()
+            };
+            let missing: Vec<SocketAddr> = bootstrap_addrs
+                .iter()
+                .filter(|a| !active_addrs.contains(a))
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                let mut peers = self.known_peers.write().await;
+                for addr in &missing {
+                    let mut dummy_bytes = [0u8; 32];
+                    rand::RngCore::fill_bytes(&mut rand::rng(), &mut dummy_bytes);
+                    let dummy_sk = SigningKey::from_bytes(&dummy_bytes);
+                    let pid = PublicKey::from(dummy_sk.verifying_key());
+                    peers.insert(pid, *addr);
+                    log::info!("[SYNC] Re-added bootstrap peer {}", addr);
+                }
+                drop(peers);
+                let mut health = self.peer_health.lock().await;
+                for addr in &missing {
+                    health.remove(addr);
+                }
+            }
+        }
+
         let peers = self.known_peers.read().await;
         Ok(peers.iter().map(|(id, addr)| Peer { id: *id, address: *addr }).collect())
     }
@@ -2052,6 +2085,7 @@ impl SyncLayer for CustomSync {
         let dummy_sk = SigningKey::from_bytes(&dummy_bytes);
         let peer_id = PublicKey::from(dummy_sk.verifying_key());
         self.known_peers.blocking_write().insert(peer_id, sock_addr);
+        self.bootstrap_peers.lock().expect("bootstrap lock").push(sock_addr);
         log::info!("Added peer: {}", addr);
         Ok(())
     }
@@ -2313,6 +2347,7 @@ impl Clone for SyncWrapper {
                 outbound_connections: Arc::clone(&cs.outbound_connections),
                 chain_id: cs.chain_id,
                 announcement_tx: cs.announcement_tx.clone(),
+                bootstrap_peers: Arc::clone(&cs.bootstrap_peers),
             })),
         }
     }

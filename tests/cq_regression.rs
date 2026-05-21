@@ -168,6 +168,158 @@ fn cq18_economic_fee_split_70_20_10_applies() {
     assert_eq!(chain_state.total_supply, 997_800);
 }
 
+#[test]
+fn fee_mode_none_charges_nothing() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let (runtime, _consensus_sk, _consensus_pk) = make_runtime(temp_dir.path());
+
+    runtime
+        .set_fee_policy(FeePolicy {
+            mode: FeeMode::None,
+            base_fee: 0,
+            operator_percent: 0,
+            treasury_percent: 0,
+            burn_percent: 100,
+            treasury_address: None,
+        })
+        .unwrap();
+
+    let (sender_sk, sender_pk) = make_test_account(&runtime, 1_000);
+    let (_recipient_sk, recipient_pk) = make_test_account(&runtime, 0);
+
+    let tx = make_transfer_tx(sender_pk, &sender_sk, recipient_pk, 500, 1, 21_000, 1, 1);
+    runtime.submit_transaction(tx).unwrap();
+
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    let _ = tokio_rt.block_on(runtime.produce_block()).unwrap();
+
+    let sender_after = runtime.get_account(&sender_pk).unwrap().unwrap();
+    let recipient_after = runtime.get_account(&recipient_pk).unwrap().unwrap();
+
+    // No fee charged — sender loses only the transfer amount
+    assert_eq!(sender_after.balance(), 500);
+    assert_eq!(recipient_after.balance(), 500);
+}
+
+#[test]
+fn fee_mode_metered_burns_all_fees() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let (runtime, _consensus_sk, consensus_pk) = make_runtime(temp_dir.path());
+
+    runtime
+        .set_fee_policy(FeePolicy {
+            mode: FeeMode::Metered,
+            base_fee: 0,
+            operator_percent: 0,
+            treasury_percent: 0,
+            burn_percent: 100,
+            treasury_address: None,
+        })
+        .unwrap();
+
+    let (sender_sk, sender_pk) = make_test_account(&runtime, 1_000_000);
+    let (_recipient_sk, recipient_pk) = make_test_account(&runtime, 0);
+
+    let tx = make_transfer_tx(sender_pk, &sender_sk, recipient_pk, 100, 1, 100_000, 1, 1);
+    runtime.submit_transaction(tx).unwrap();
+
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    let _ = tokio_rt.block_on(runtime.produce_block()).unwrap();
+
+    let sender_after = runtime.get_account(&sender_pk).unwrap().unwrap();
+    let recipient_after = runtime.get_account(&recipient_pk).unwrap().unwrap();
+
+    // Metered: fee = gas_price * gas_used, all burned (operator gets nothing)
+    assert_eq!(recipient_after.balance(), 100);
+    assert!(sender_after.balance() < 1_000_000 - 100, "sender should have paid gas fee");
+    let operator_after = runtime.get_account(&consensus_pk).unwrap();
+    assert!(
+        operator_after.is_none() || operator_after.unwrap().balance() == 0,
+        "operator should not receive fees in metered mode"
+    );
+}
+
+#[test]
+fn fee_economic_no_treasury_redirects_to_burn() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let (runtime, _consensus_sk, consensus_pk) = make_runtime(temp_dir.path());
+
+    runtime
+        .set_fee_policy(FeePolicy {
+            mode: FeeMode::Economic,
+            base_fee: 1_000,
+            operator_percent: 70,
+            treasury_percent: 20,
+            burn_percent: 10,
+            treasury_address: None, // no treasury — 20% should redirect to burn
+        })
+        .unwrap();
+
+    let (sender_sk, sender_pk) = make_test_account(&runtime, 1_000_000);
+    let (_recipient_sk, recipient_pk) = make_test_account(&runtime, 0);
+
+    let tx = make_transfer_tx(sender_pk, &sender_sk, recipient_pk, 100, 1, 21_000, 1, 1);
+    runtime.submit_transaction(tx).unwrap();
+
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    let _ = tokio_rt.block_on(runtime.produce_block()).unwrap();
+
+    // total_fee = base_fee(1000) + gas_price(1)*gas_used
+    // operator gets 70%, treasury share (20%) goes to burn, burn gets 10%+20%=30%
+    let operator_after = runtime.get_account(&consensus_pk).unwrap().unwrap();
+    assert!(operator_after.balance() > 0, "operator should receive 70% of fees");
+
+    let sender_after = runtime.get_account(&sender_pk).unwrap().unwrap();
+    let recipient_after = runtime.get_account(&recipient_pk).unwrap().unwrap();
+    assert_eq!(recipient_after.balance(), 100);
+
+    // Total supply should reflect the burn (30% of fees)
+    let chain_state = runtime.get_chain_state().unwrap();
+    let total_remaining =
+        sender_after.balance() + recipient_after.balance() + operator_after.balance();
+    assert!(
+        chain_state.total_supply < 1_000_000,
+        "total supply should decrease due to burned fees"
+    );
+    assert_eq!(chain_state.total_supply, total_remaining);
+}
+
+#[test]
+fn fee_policy_validate_rejects_bad_split() {
+    let good = FeePolicy {
+        mode: FeeMode::Economic,
+        base_fee: 0,
+        operator_percent: 70,
+        treasury_percent: 20,
+        burn_percent: 10,
+        treasury_address: None,
+    };
+    assert!(good.validate().is_ok());
+
+    let bad = FeePolicy {
+        mode: FeeMode::Economic,
+        base_fee: 0,
+        operator_percent: 50,
+        treasury_percent: 20,
+        burn_percent: 10,
+        treasury_address: None,
+    };
+    assert!(bad.validate().is_err(), "split summing to 80 should fail validation");
+
+    let overflow = FeePolicy {
+        mode: FeeMode::Economic,
+        base_fee: 0,
+        operator_percent: 200,
+        treasury_percent: 200,
+        burn_percent: 200,
+        treasury_address: None,
+    };
+    assert!(overflow.validate().is_err(), "saturating add should not accept >100 total");
+}
+
 // CQ-4: chain_id validation prevents cross-chain replay
 #[test]
 fn cq4_invalid_chain_id_rejected() {
