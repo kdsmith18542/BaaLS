@@ -306,7 +306,10 @@ pub fn build_runtime(
         let mut cs = CustomSync::new(public_key, listen_socket, config.consensus.chain_id)
             .with_signing_key(signing_key.clone())
             .with_storage(storage.clone_storage())
-            .with_snapshots_dir(data_dir.join("snapshots"));
+            .with_snapshots_dir(data_dir.join("snapshots"))
+            .with_connection_timeout(std::time::Duration::from_millis(
+                config.network.connection_timeout_ms,
+            ));
         if config.network.tls_enabled {
             let tls = TlsConfig::load(
                 &config.network.tls_cert_path,

@@ -318,6 +318,7 @@ pub struct CustomSync {
     announcement_tx: tokio::sync::broadcast::Sender<NetworkMessage>,
     bootstrap_peers: Arc<std::sync::Mutex<Vec<SocketAddr>>>,
     snapshots_dir: Option<std::path::PathBuf>,
+    connection_timeout: Duration,
 }
 
 const MAX_CONCURRENT_CONNECTIONS: usize = 128;
@@ -596,11 +597,18 @@ impl CustomSync {
             announcement_tx,
             bootstrap_peers: Arc::new(std::sync::Mutex::new(Vec::new())),
             snapshots_dir: None,
+            connection_timeout: Duration::from_secs(10),
         }
     }
 
     pub fn with_snapshots_dir(mut self, path: std::path::PathBuf) -> Self {
         self.snapshots_dir = Some(path);
+        self
+    }
+
+    pub fn with_connection_timeout(mut self, timeout: Duration) -> Self {
+        // Avoid degenerate values that cause immediate disconnect churn.
+        self.connection_timeout = timeout.max(Duration::from_secs(1));
         self
     }
 
@@ -836,6 +844,7 @@ impl CustomSync {
                     let listen_port = self.listen_addr.port();
                     let local_chain_id = self.chain_id;
                     let ann_tx = self.announcement_tx.clone();
+                    let connection_timeout = self.connection_timeout;
                     let permit = semaphore.clone().acquire_owned().await;
 
                     let snapshots_dir = self.snapshots_dir.clone();
@@ -845,17 +854,31 @@ impl CustomSync {
                             match acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
                                     if let Err(e) = Self::handle_connection(
-                                        tls_stream, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters, listen_port, local_chain_id, ann_tx, snapshots_dir,
+                                        tls_stream, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters, listen_port, local_chain_id, ann_tx, snapshots_dir, connection_timeout,
                                     ).await {
-                                        log::error!("TLS connection error: {}", e);
+                                        match e {
+                                            SyncError::ConnectionTimeout => {
+                                                log::debug!("TLS connection to {} closed after timeout", addr);
+                                            }
+                                            _ => {
+                                                log::error!("TLS connection error: {}", e);
+                                            }
+                                        }
                                     }
                                 }
                                 Err(e) => log::error!("TLS handshake error from {}: {}", addr, e),
                             }
                         } else if let Err(e) = Self::handle_connection(
-                            socket, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters, listen_port, local_chain_id, ann_tx, snapshots_dir,
+                            socket, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters, listen_port, local_chain_id, ann_tx, snapshots_dir, connection_timeout,
                         ).await {
-                            log::error!("Connection error: {}", e);
+                            match e {
+                                SyncError::ConnectionTimeout => {
+                                    log::debug!("Connection to {} closed after timeout", addr);
+                                }
+                                _ => {
+                                    log::error!("Connection error: {}", e);
+                                }
+                            }
                         }
                     });
                 }
@@ -893,11 +916,15 @@ impl CustomSync {
         local_chain_id: u64,
         announcement_tx: tokio::sync::broadcast::Sender<NetworkMessage>,
         snapshots_dir: Option<std::path::PathBuf>,
+        connection_timeout: Duration,
     ) -> Result<(), SyncError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let inbound = timeout(Duration::from_secs(30), Self::receive_message(&mut socket))
+        let inbound = timeout(
+            connection_timeout,
+            Self::receive_message_with_timeout(&mut socket, connection_timeout),
+        )
             .await
             .map_err(|_| SyncError::ConnectionTimeout)??;
 
@@ -965,7 +992,10 @@ impl CustomSync {
                 )
                 .await?;
 
-                let verify = timeout(Duration::from_secs(10), Self::receive_message(&mut socket))
+                let verify = timeout(
+                    connection_timeout,
+                    Self::receive_message_with_timeout(&mut socket, connection_timeout),
+                )
                     .await
                     .map_err(|_| SyncError::ConnectionTimeout)??;
 
@@ -1024,7 +1054,7 @@ impl CustomSync {
             }
 
             let msg = tokio::select! {
-                recv_result = Self::receive_message(&mut socket) => {
+                recv_result = Self::receive_message_with_timeout(&mut socket, connection_timeout) => {
                     match recv_result {
                         Ok(m) => m,
                         Err(SyncError::NetworkError(err_msg))
@@ -1033,6 +1063,10 @@ impl CustomSync {
                                 || err_msg.contains("Connection reset") =>
                         {
                             log::debug!("Peer {} closed connection: {}", addr, err_msg);
+                            break;
+                        }
+                        Err(SyncError::ConnectionTimeout) => {
+                            log::debug!("Peer {} idle timeout, closing connection", addr);
                             break;
                         }
                         Err(e) => {
@@ -1252,15 +1286,21 @@ impl CustomSync {
     where
         S: AsyncRead + Unpin,
     {
+        Self::receive_message_with_timeout(stream, Duration::from_secs(10)).await
+    }
+
+    async fn receive_message_with_timeout<S>(
+        stream: &mut S,
+        io_timeout: Duration,
+    ) -> Result<NetworkMessage, SyncError>
+    where
+        S: AsyncRead + Unpin,
+    {
         let mut length_buffer = [0u8; 4];
-        // Use a reasonable timeout for the header
-        timeout(
-            Duration::from_secs(10),
-            tokio::io::AsyncReadExt::read_exact(stream, &mut length_buffer),
-        )
-        .await
-        .map_err(|_| SyncError::ConnectionTimeout)?
-        .map_err(|e| SyncError::NetworkError(e.to_string()))?;
+        timeout(io_timeout, tokio::io::AsyncReadExt::read_exact(stream, &mut length_buffer))
+            .await
+            .map_err(|_| SyncError::ConnectionTimeout)?
+            .map_err(|e| SyncError::NetworkError(e.to_string()))?;
 
         let length = u32::from_le_bytes(length_buffer);
         const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024; // 16MB
@@ -1269,8 +1309,8 @@ impl CustomSync {
         }
 
         let mut message_buffer = vec![0u8; length as usize];
-        // Use a timeout for the body based on the expected size (min 10s)
-        let body_timeout = Duration::from_secs(10 + (length as u64 / 1_000_000));
+        // Use a timeout for the body based on payload size while respecting minimum I/O timeout.
+        let body_timeout = io_timeout.max(Duration::from_secs(10 + (length as u64 / 1_000_000)));
         timeout(body_timeout, tokio::io::AsyncReadExt::read_exact(stream, &mut message_buffer))
             .await
             .map_err(|_| SyncError::ConnectionTimeout)?
@@ -2519,6 +2559,7 @@ impl Clone for SyncWrapper {
                 announcement_tx: cs.announcement_tx.clone(),
                 bootstrap_peers: Arc::clone(&cs.bootstrap_peers),
                 snapshots_dir: cs.snapshots_dir.clone(),
+                connection_timeout: cs.connection_timeout,
             })),
         }
     }
