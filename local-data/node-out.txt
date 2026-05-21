@@ -1,5 +1,0 @@
-WebSocket server started on ws://127.0.0.1:8081
-Block produced and applied: 07d30cf4ce305f78cee1d13ca77bcab46481aa9dfb4e0a73db981ec9fc54835d
-Block produced and applied: bfd13bd437265adbeadf3beac70e9568d6f3315415fb328d31bc2f661d9ef412
-Block produced and applied: 9ded2223788845446e85521e245c720c8715257e42f11ad964fa5829866a45ec
-Block produced and applied: e47eb27b34bd5402b1116e328adfbc87d46298532e3e4cfcfbd26fde7bf40c13

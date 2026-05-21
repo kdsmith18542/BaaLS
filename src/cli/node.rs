@@ -1710,6 +1710,27 @@ pub fn handle_node(
             mdns: _mdns,
         } => {
             if daemon && !foreground_internal {
+                #[cfg(windows)]
+                {
+                    #[link(name = "kernel32")]
+                    extern "system" {
+                        fn GetStdHandle(nStdHandle: i32) -> *mut std::ffi::c_void;
+                        fn SetHandleInformation(hObject: *mut std::ffi::c_void, dwMask: u32, dwFlags: u32) -> i32;
+                    }
+                    const STD_OUTPUT_HANDLE: i32 = -11;
+                    const STD_ERROR_HANDLE: i32 = -12;
+                    const HANDLE_FLAG_INHERIT: u32 = 1;
+                    unsafe {
+                        let stdout_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+                        if !stdout_handle.is_null() && stdout_handle != -1isize as *mut std::ffi::c_void {
+                            SetHandleInformation(stdout_handle, HANDLE_FLAG_INHERIT, 0);
+                        }
+                        let stderr_handle = GetStdHandle(STD_ERROR_HANDLE);
+                        if !stderr_handle.is_null() && stderr_handle != -1isize as *mut std::ffi::c_void {
+                            SetHandleInformation(stderr_handle, HANDLE_FLAG_INHERIT, 0);
+                        }
+                    }
+                }
                 std::fs::create_dir_all(&data_dir)?;
                 let exe = std::env::current_exe()?;
                 let mut cmd = std::process::Command::new(exe);
