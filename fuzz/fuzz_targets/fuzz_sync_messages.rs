@@ -6,16 +6,20 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| {
     if let Ok(msg) = bincode::deserialize::<NetworkMessage>(data) {
         match &msg {
-            NetworkMessage::Handshake { peer_id, version, challenge } => {
+            NetworkMessage::Handshake { peer_id, version, challenge, listen_port, chain_id } => {
                 let _ = peer_id.to_bytes();
                 let _ = version;
                 let _ = challenge;
+                let _ = listen_port;
+                let _ = chain_id;
             }
-            NetworkMessage::HandshakeAck { peer_id, version, signature, challenge } => {
+            NetworkMessage::HandshakeAck { peer_id, version, signature, challenge, listen_port, chain_id } => {
                 let _ = peer_id.to_bytes();
                 let _ = version;
                 let _ = signature.len();
                 let _ = challenge;
+                let _ = listen_port;
+                let _ = chain_id;
             }
             NetworkMessage::HandshakeVerify { signature } => {
                 let _ = signature.len();
@@ -57,6 +61,18 @@ fuzz_target!(|data: &[u8]| {
                 let _ = hash;
             }
             NetworkMessage::BlockResponse { block } => {
+                if let Some(b) = block {
+                    let _ = b.calculate_hash();
+                }
+            }
+            NetworkMessage::GetSnapshot { height } => {
+                let _ = height;
+            }
+            NetworkMessage::SnapshotResponse { height, snapshot, block } => {
+                let _ = height;
+                if let Some(s) = snapshot {
+                    let _ = s.len();
+                }
                 if let Some(b) = block {
                     let _ = b.calculate_hash();
                 }

@@ -305,7 +305,8 @@ pub fn build_runtime(
     } else {
         let mut cs = CustomSync::new(public_key, listen_socket, config.consensus.chain_id)
             .with_signing_key(signing_key.clone())
-            .with_storage(storage.clone_storage());
+            .with_storage(storage.clone_storage())
+            .with_snapshots_dir(data_dir.join("snapshots"));
         if config.network.tls_enabled {
             let tls = TlsConfig::load(
                 &config.network.tls_cert_path,
@@ -340,6 +341,7 @@ pub fn build_runtime(
     runtime.chain_id = config.consensus.chain_id;
     runtime.finality_depth = config.consensus.finality_depth;
     runtime.max_reorg_depth = config.consensus.max_reorg_depth;
+    runtime.produce_empty_blocks = config.consensus.produce_empty_blocks;
     let treasury_address =
         match config.fees.treasury_address.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(addr_hex) => Some(

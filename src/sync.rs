@@ -112,6 +112,14 @@ pub enum NetworkMessage {
     BlockResponse {
         block: Option<crate::types::Block>,
     },
+    GetSnapshot {
+        height: u64,
+    },
+    SnapshotResponse {
+        height: u64,
+        snapshot: Option<Vec<u8>>,
+        block: Option<crate::types::Block>,
+    },
 }
 
 #[derive(Debug)]
@@ -309,6 +317,7 @@ pub struct CustomSync {
     chain_id: u64,
     announcement_tx: tokio::sync::broadcast::Sender<NetworkMessage>,
     bootstrap_peers: Arc<std::sync::Mutex<Vec<SocketAddr>>>,
+    snapshots_dir: Option<std::path::PathBuf>,
 }
 
 const MAX_CONCURRENT_CONNECTIONS: usize = 128;
@@ -586,7 +595,13 @@ impl CustomSync {
             chain_id,
             announcement_tx,
             bootstrap_peers: Arc::new(std::sync::Mutex::new(Vec::new())),
+            snapshots_dir: None,
         }
+    }
+
+    pub fn with_snapshots_dir(mut self, path: std::path::PathBuf) -> Self {
+        self.snapshots_dir = Some(path);
+        self
     }
 
     pub fn with_signing_key(self, key: SigningKey) -> Self {
@@ -823,13 +838,14 @@ impl CustomSync {
                     let ann_tx = self.announcement_tx.clone();
                     let permit = semaphore.clone().acquire_owned().await;
 
+                    let snapshots_dir = self.snapshots_dir.clone();
                     tokio::spawn(async move {
                         let _permit = permit;
                         if let Some(acceptor) = tls_acceptor {
                             match acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
                                     if let Err(e) = Self::handle_connection(
-                                        tls_stream, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters, listen_port, local_chain_id, ann_tx,
+                                        tls_stream, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters, listen_port, local_chain_id, ann_tx, snapshots_dir,
                                     ).await {
                                         log::error!("TLS connection error: {}", e);
                                     }
@@ -837,7 +853,7 @@ impl CustomSync {
                                 Err(e) => log::error!("TLS handshake error from {}: {}", addr, e),
                             }
                         } else if let Err(e) = Self::handle_connection(
-                            socket, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters, listen_port, local_chain_id, ann_tx,
+                            socket, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters, listen_port, local_chain_id, ann_tx, snapshots_dir,
                         ).await {
                             log::error!("Connection error: {}", e);
                         }
@@ -876,6 +892,7 @@ impl CustomSync {
         listen_port: u16,
         local_chain_id: u64,
         announcement_tx: tokio::sync::broadcast::Sender<NetworkMessage>,
+        snapshots_dir: Option<std::path::PathBuf>,
     ) -> Result<(), SyncError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1204,6 +1221,10 @@ impl CustomSync {
                             recv.push(block);
                         }
                     }
+                }
+                NetworkMessage::GetSnapshot { height } => {
+                    let response = Self::handle_get_snapshot(height, &storage, &snapshots_dir).await;
+                    Self::send_message(&mut socket, response).await?;
                 }
                 _ => {}
             }
@@ -1648,6 +1669,10 @@ impl CustomSync {
                 .map_err(|_| SyncError::ConnectionTimeout)??;
 
             match msg {
+                NetworkMessage::GetSnapshot { height } => {
+                    let response = Self::handle_get_snapshot(height, &self.storage, &self.snapshots_dir).await;
+                    Self::send_message(stream, response).await?;
+                }
                 NetworkMessage::RequestBlock { hash } => {
                     Self::handle_block_request_full(stream, hash, &self.block_cache, &self.storage)
                         .await?;
@@ -1729,6 +1754,78 @@ impl CustomSync {
                     local_chain_state.latest_block_index
                 );
 
+                if local_chain_state.latest_block_index == 0 && height > 0 {
+                    if let Some(ref dir) = self.snapshots_dir {
+                        log::info!(
+                            "[P2P] Attempting state snapshot sync from peer {} (local=0, peer={})",
+                            peer.address,
+                            height
+                        );
+                        if let Ok(_) = Self::send_message(stream, NetworkMessage::GetSnapshot { height }).await {
+                            match self.receive_sync_message(stream, Duration::from_secs(30)).await {
+                                Ok(NetworkMessage::SnapshotResponse {
+                                    height: resp_height,
+                                    snapshot: Some(snapshot_bytes),
+                                    block: Some(block),
+                                }) if resp_height == height => {
+                                    log::info!(
+                                        "[P2P] Received snapshot for height {} ({} bytes)",
+                                        height,
+                                        snapshot_bytes.len()
+                                    );
+                                    let snap_path = dir.join(format!("{}.snap", height));
+                                    let _ = std::fs::create_dir_all(dir);
+                                    if let Err(e) = std::fs::write(&snap_path, &snapshot_bytes) {
+                                        log::error!("[P2P] Failed to write snapshot file: {:?}", e);
+                                    }
+
+                                    let restore_ok = {
+                                        let storage_guard = self.storage.lock().await;
+                                        if let Some(ref s) = *storage_guard {
+                                            if let Err(e) = s.restore_from_snapshot(height, dir) {
+                                                log::error!("[P2P] Failed to restore snapshot: {:?}", e);
+                                                false
+                                            } else {
+                                                if let Err(e) = s.put_block(&block) {
+                                                    log::error!("[P2P] Failed to store snapshot block: {:?}", e);
+                                                    false
+                                                } else {
+                                                    true
+                                                }
+                                            }
+                                        } else {
+                                            false
+                                        }
+                                    };
+
+                                    if restore_ok {
+                                        self.cache_block(block.clone()).await;
+                                        log::info!("[P2P] Snapshot sync completed successfully at height {}", height);
+                                        Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone()).await;
+                                        return Ok(block);
+                                    } else {
+                                        log::warn!("[P2P] Snapshot restore failed, falling back to block sync");
+                                    }
+                                }
+                                Ok(other) => {
+                                    log::warn!(
+                                        "[P2P] Unexpected response to GetSnapshot: {:?}. Falling back to block sync",
+                                        other
+                                    );
+                                }
+                                Err(e) => {
+                                    log::warn!(
+                                        "[P2P] Error receiving snapshot response: {:?}. Falling back to block sync",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        log::info!("[P2P] Snapshot dir not configured, falling back to block sync");
+                    }
+                }
+
                 if self.detect_fork(
                     &latest_block_hash,
                     height,
@@ -1743,7 +1840,7 @@ impl CustomSync {
                     );
                     let fork_result =
                         self.resolve_fork_blocks(peer, stream, local_chain_state, height).await;
-                    Self::serve_sync_requests(stream, &self.block_cache, &self.storage).await;
+                    Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone()).await;
                     return fork_result;
                 }
 
@@ -1765,6 +1862,7 @@ impl CustomSync {
                         stream,
                         &self.block_cache,
                         &self.storage,
+                        self.snapshots_dir.clone(),
                         10,
                     )
                     .await;
@@ -1787,7 +1885,7 @@ impl CustomSync {
                     match blocks_response {
                         NetworkMessage::BlocksResponse { blocks } => {
                             if blocks.is_empty() {
-                                Self::serve_sync_requests(stream, &self.block_cache, &self.storage)
+                                Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone())
                                     .await;
                                 return Err(SyncError::SynchronizationError(
                                     "Empty blocks response".to_string(),
@@ -1801,7 +1899,7 @@ impl CustomSync {
                                 let fork_result = self
                                     .resolve_fork_blocks(peer, stream, local_chain_state, height)
                                     .await;
-                                Self::serve_sync_requests(stream, &self.block_cache, &self.storage)
+                                Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone())
                                     .await;
                                 return fork_result;
                             }
@@ -1824,12 +1922,12 @@ impl CustomSync {
                                     );
                                 }
                             }
-                            Self::serve_sync_requests(stream, &self.block_cache, &self.storage)
+                            Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone())
                                 .await;
                             return Ok(blocks.last().unwrap().clone());
                         }
                         _ => {
-                            Self::serve_sync_requests(stream, &self.block_cache, &self.storage)
+                            Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone())
                                 .await;
                             return Err(SyncError::SynchronizationError(
                                 "Unexpected response for GetBlocks".to_string(),
@@ -1868,11 +1966,11 @@ impl CustomSync {
                     NetworkMessage::BlockResponse { block: None } => Err(SyncError::BlockNotFound),
                     _ => Err(SyncError::InvalidMessage),
                 };
-                Self::serve_sync_requests(stream, &self.block_cache, &self.storage).await;
+                Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone()).await;
                 block_result
             }
             _ => {
-                Self::serve_sync_requests(stream, &self.block_cache, &self.storage).await;
+                Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone()).await;
                 Err(SyncError::InvalidMessage)
             }
         }
@@ -1948,6 +2046,7 @@ impl CustomSync {
                 &mut stream,
                 &self.block_cache,
                 &self.storage,
+                self.snapshots_dir.clone(),
                 2,
             )
             .await;
@@ -2127,20 +2226,87 @@ impl SyncLayer for CustomSync {
 }
 
 impl CustomSync {
+    /// Helper to process a `GetSnapshot` request and build the `SnapshotResponse`.
+    async fn handle_get_snapshot(
+        height: u64,
+        storage: &Arc<Mutex<Option<Box<dyn Storage>>>>,
+        snapshots_dir: &Option<std::path::PathBuf>,
+    ) -> NetworkMessage {
+        log::info!("[P2P] Processing GetSnapshot request for height {}", height);
+        let mut snapshot_bytes = None;
+        let mut block_data = None;
+
+        if let Some(ref dir) = snapshots_dir {
+            let block_opt = {
+                let storage_guard = storage.lock().await;
+                if let Some(ref s) = *storage_guard {
+                    s.get_block_by_height(height).ok().flatten()
+                } else {
+                    None
+                }
+            };
+
+            if let Some(block) = block_opt {
+                block_data = Some(block);
+                let snap_path = dir.join(format!("{}.snap", height));
+                let exists = snap_path.exists();
+                let snapshot_ok = if exists {
+                    true
+                } else {
+                    let storage_guard = storage.lock().await;
+                    if let Some(ref s) = *storage_guard {
+                        match s.take_snapshot(height, dir) {
+                            Ok(_) => true,
+                            Err(e) => {
+                                log::error!("[P2P] Failed to take snapshot at height {}: {:?}", height, e);
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    }
+                };
+
+                if snapshot_ok {
+                    match std::fs::read(&snap_path) {
+                        Ok(bytes) => {
+                            snapshot_bytes = Some(bytes);
+                        }
+                        Err(e) => {
+                            log::error!("[P2P] Failed to read snapshot file {:?}: {:?}", snap_path, e);
+                        }
+                    }
+                }
+            } else {
+                log::warn!("[P2P] GetSnapshot requested height {} but block not found", height);
+            }
+        } else {
+            log::warn!("[P2P] GetSnapshot requested but snapshots_dir is not configured");
+        }
+
+        NetworkMessage::SnapshotResponse {
+            height,
+            snapshot: snapshot_bytes,
+            block: block_data,
+        }
+    }
+
     /// Serve pending sync requests briefly on an outbound connection before closing.
     /// This allows the server's bidirectional sync to request backfill blocks.
     async fn serve_sync_requests<S: AsyncRead + AsyncWrite + Unpin + Send>(
         stream: &mut S,
         block_cache: &Arc<Mutex<HashMap<[u8; 32], Block>>>,
         storage: &Arc<Mutex<Option<Box<dyn Storage>>>>,
+        snapshots_dir: Option<std::path::PathBuf>,
     ) {
-        Self::serve_sync_requests_with_timeout(stream, block_cache, storage, 2).await;
+        Self::serve_sync_requests_with_timeout(stream, block_cache, storage, snapshots_dir, 2).await;
     }
 
     async fn serve_sync_requests_with_timeout<S: AsyncRead + AsyncWrite + Unpin + Send>(
         stream: &mut S,
         block_cache: &Arc<Mutex<HashMap<[u8; 32], Block>>>,
         storage: &Arc<Mutex<Option<Box<dyn Storage>>>>,
+        snapshots_dir: Option<std::path::PathBuf>,
         timeout_secs: u64,
     ) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
@@ -2178,6 +2344,10 @@ impl CustomSync {
                     log::trace!("[P2P] serve_sync: serving block request {}", hex::encode(hash));
                     let _ =
                         Self::handle_block_request_full(stream, hash, block_cache, storage).await;
+                }
+                Ok(Ok(NetworkMessage::GetSnapshot { height })) => {
+                    let response = Self::handle_get_snapshot(height, storage, &snapshots_dir).await;
+                    let _ = Self::send_message(stream, response).await;
                 }
                 Ok(Ok(other)) => {
                     log::trace!("[P2P] serve_sync: ignoring {:?}", std::mem::discriminant(&other));
@@ -2348,6 +2518,7 @@ impl Clone for SyncWrapper {
                 chain_id: cs.chain_id,
                 announcement_tx: cs.announcement_tx.clone(),
                 bootstrap_peers: Arc::clone(&cs.bootstrap_peers),
+                snapshots_dir: cs.snapshots_dir.clone(),
             })),
         }
     }

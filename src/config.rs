@@ -55,6 +55,8 @@ pub struct ConsensusConfig {
     pub quorum_threshold: usize,
     #[serde(default = "default_round_robin")]
     pub round_robin: bool,
+    #[serde(default = "default_produce_empty_blocks")]
+    pub produce_empty_blocks: bool,
     #[serde(default)]
     pub genesis_alloc: std::collections::HashMap<String, u64>,
 }
@@ -182,6 +184,9 @@ fn default_quorum_threshold() -> usize {
 fn default_round_robin() -> bool {
     false
 }
+fn default_produce_empty_blocks() -> bool {
+    false
+}
 fn default_cache_mb() -> u64 {
     256
 }
@@ -259,6 +264,7 @@ impl Default for Config {
                 max_reorg_depth: default_max_reorg_depth(),
                 quorum_threshold: default_quorum_threshold(),
                 round_robin: default_round_robin(),
+                produce_empty_blocks: default_produce_empty_blocks(),
                 genesis_alloc: std::collections::HashMap::new(),
             },
             storage: StorageConfig {
@@ -440,6 +446,11 @@ impl Config {
                 self.consensus.round_robin = value
                     .parse()
                     .map_err(|_| ConfigError::Invalid("Invalid round_robin (true/false)".into()))?
+            }
+            "consensus.produce_empty_blocks" => {
+                self.consensus.produce_empty_blocks = value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("Invalid produce_empty_blocks (true/false)".into()))?
             }
             "network.max_peers" => {
                 self.network.max_peers =
@@ -722,11 +733,13 @@ mod tests {
         cfg.set("consensus.min_gas_price", "7").expect("set min_gas_price");
         cfg.set("consensus.quorum_threshold", "2").expect("set quorum_threshold");
         cfg.set("consensus.round_robin", "true").expect("set round_robin");
+        cfg.set("consensus.produce_empty_blocks", "true").expect("set produce_empty_blocks");
 
         assert_eq!(cfg.consensus.chain_id, 42);
         assert_eq!(cfg.consensus.min_gas_price, 7);
         assert_eq!(cfg.consensus.quorum_threshold, 2);
         assert_eq!(cfg.consensus.round_robin, true);
+        assert_eq!(cfg.consensus.produce_empty_blocks, true);
     }
 
     #[test]

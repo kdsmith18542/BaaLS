@@ -3151,3 +3151,189 @@ fn test_genesis_alloc_and_round_robin() {
     // Stop the runtime
     runtime.stop().unwrap();
 }
+
+#[test]
+fn test_empty_block_production() {
+    init_logging();
+    let temp_dir = TempDir::new().unwrap();
+    let data_dir = temp_dir.path().to_path_buf();
+
+    let mut config = Config::default();
+    config.node.data_dir = data_dir.to_string_lossy().to_string();
+    config.consensus.produce_empty_blocks = true;
+    config.consensus.block_time_ms = 100; // fast block production for tests
+    config.consensus.quorum_threshold = 1;
+
+    let sk = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let key_path = data_dir.join("consensus.key");
+    std::fs::write(&key_path, sk.to_bytes()).unwrap();
+
+    let (runtime, _public_key, _signing_key) = baals::cli::node::build_runtime(
+        &data_dir,
+        &config,
+        &[],
+        "127.0.0.1:0",
+        false,
+    ).unwrap();
+
+    // Wait and check if blocks are produced.
+    let start_time = std::time::Instant::now();
+    let mut produced = false;
+    while start_time.elapsed() < std::time::Duration::from_secs(5) {
+        let state = runtime.get_chain_state().unwrap();
+        if state.latest_block_index > 0 {
+            // Retrieve block and verify it is empty (0 txs)
+            if let Some(block) = runtime.get_block(&state.latest_block_hash).unwrap() {
+                assert_eq!(block.transactions.len(), 0);
+                produced = true;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    assert!(produced, "Runtime failed to produce empty blocks within timeout");
+
+    runtime.stop().unwrap();
+}
+
+#[test]
+fn test_state_snapshot_sync() {
+    init_logging();
+    info!("[SNAPSHOT_TEST] Starting State Snapshot Sync Integration Test");
+
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+    let storage_a = SledStorage::new(dir_a.path()).unwrap();
+    let storage_b = SledStorage::new(dir_b.path()).unwrap();
+
+    let sk_a = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let sk_b = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let pk_a = PublicKey::from(sk_a.verifying_key());
+    let pk_b = PublicKey::from(sk_b.verifying_key());
+
+    let port_a = pick_free_local_port();
+    let port_b = pick_free_local_port();
+    let listen_a: std::net::SocketAddr = format!("127.0.0.1:{}", port_a).parse().unwrap();
+    let listen_b: std::net::SocketAddr = format!("127.0.0.1:{}", port_b).parse().unwrap();
+
+    let snap_dir_a = dir_a.path().join("snapshots");
+    let snap_dir_b = dir_b.path().join("snapshots");
+
+    let sync_a = CustomSync::new(pk_a, listen_a, 1)
+        .with_signing_key(sk_a.clone())
+        .with_storage(storage_a.clone_storage())
+        .with_snapshots_dir(snap_dir_a.clone());
+
+    let sync_b = CustomSync::new(pk_b, listen_b, 1)
+        .with_signing_key(sk_b.clone())
+        .with_storage(storage_b.clone_storage())
+        .with_snapshots_dir(snap_dir_b.clone());
+
+    let ce_a = BaaLSContractEngine::new(storage_a.clone()).unwrap();
+    let ce_b = BaaLSContractEngine::new(storage_b.clone()).unwrap();
+    let consensus_a = PoAConsensus::new(pk_a, 5000).with_signing_key(sk_a.clone());
+    let consensus_b = PoAConsensus::new(pk_b, 5000).with_signing_key(sk_b.clone());
+
+    consensus_a.add_authorized_signer(pk_b);
+    consensus_b.add_authorized_signer(pk_a);
+
+    let rt_a = Runtime::new(storage_a, consensus_a, ce_a, sync_a).unwrap();
+    let rt_b = Runtime::new(storage_b, consensus_b, ce_b, sync_b).unwrap();
+
+    // Create user accounts on Node A
+    let user_sk = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let user_pk = PublicKey::from(user_sk.verifying_key());
+    rt_a.create_account(&user_pk, Account::Wallet { balance: 1000000, nonce: 0 }).unwrap();
+
+    let recipient_sk = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let recipient_pk = PublicKey::from(recipient_sk.verifying_key());
+    rt_a.create_account(&recipient_pk, Account::Wallet { balance: 0, nonce: 0 }).unwrap();
+
+    // Submit transaction and produce block on Node A
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let mut tx = Transaction {
+        hash: [0u8; 32],
+        sender: user_pk,
+        recipient: Address::Wallet(recipient_pk),
+        payload: TransactionPayload::Transfer { amount: 50 },
+        nonce: 1,
+        timestamp: now,
+        signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+        gas_limit: 21_000,
+        gas_price: 1,
+        priority: 0,
+        metadata: None,
+        chain_id: 1,
+    };
+    tx.hash = tx.calculate_hash().unwrap();
+    tx.sign(&user_sk).unwrap();
+    rt_a.submit_transaction(tx).unwrap();
+
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    let block_a = tokio_rt.block_on(rt_a.produce_block()).unwrap();
+    assert_eq!(block_a.index, 1, "Node A produced block 1");
+    info!(
+        "[SNAPSHOT_TEST] Node A produced block #{} hash={}",
+        block_a.index,
+        hex::encode(block_a.hash)
+    );
+
+    // Start Node A and Node B runtimes
+    rt_a.start().unwrap();
+    rt_b.start().unwrap();
+    std::thread::sleep(Duration::from_millis(500)); // Let listeners bind
+
+    // Connect Node B to Node A
+    rt_b.sync_layer().add_peer_by_address(&format!("127.0.0.1:{}", port_a)).ok();
+    info!("[SNAPSHOT_TEST] Peer Node A added to Node B, starting snapshot sync");
+
+    // Wait for Node B to sync from Node A using state snapshot
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut synced = false;
+    while Instant::now() < deadline {
+        let chain_b = rt_b.get_chain_state().unwrap();
+        if chain_b.latest_block_index >= 1 {
+            synced = true;
+            info!(
+                "[SNAPSHOT_TEST] Node B synchronized to height {} hash={}",
+                chain_b.latest_block_index,
+                hex::encode(chain_b.latest_block_hash)
+            );
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(synced, "Node B should sync Node A's state snapshot and reach height 1 within 30s");
+
+    // Verify account state on Node B matches Node A
+    let acc_user_a = rt_a.get_account(&user_pk).unwrap().unwrap();
+    let acc_user_b = rt_b.get_account(&user_pk).unwrap().unwrap();
+    let acc_recipient_a = rt_a.get_account(&recipient_pk).unwrap().unwrap();
+    let acc_recipient_b = rt_b.get_account(&recipient_pk).unwrap().unwrap();
+
+    assert_eq!(acc_user_a, acc_user_b);
+    assert_eq!(acc_recipient_a, acc_recipient_b);
+
+    info!("[SNAPSHOT_TEST] Verification successful! Node B has correct accounts state.");
+
+    // Clean up
+    rt_a.stop().unwrap();
+    rt_b.stop().unwrap();
+}

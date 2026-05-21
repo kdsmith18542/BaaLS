@@ -217,6 +217,7 @@ pub struct Runtime<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> {
     pub chain_id: u64,
     pub finality_depth: u64,
     pub max_reorg_depth: u64,
+    pub produce_empty_blocks: bool,
     metrics: Arc<MetricsCollector>,
     started_at: Arc<Mutex<Option<SystemTime>>>,
     sync_in_flight: Arc<AtomicBool>,
@@ -245,6 +246,7 @@ impl<S: Storage + 'static, C: ConsensusEngine, Y: SyncLayer> Clone for Runtime<S
             chain_id: self.chain_id,
             finality_depth: self.finality_depth,
             max_reorg_depth: self.max_reorg_depth,
+            produce_empty_blocks: self.produce_empty_blocks,
             metrics: Arc::clone(&self.metrics),
             started_at: Arc::clone(&self.started_at),
             sync_in_flight: Arc::clone(&self.sync_in_flight),
@@ -299,6 +301,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             chain_id: 1,      // default chain id
             finality_depth: 12,
             max_reorg_depth: 50,
+            produce_empty_blocks: false,
             consensus: Arc::new(consensus),
             mempool: Arc::new(Mutex::new(Mempool::new(mempool_size_limit))),
             chain_state: Arc::new(Mutex::new(initial_chain_state)),
@@ -500,7 +503,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
                     let should_produce = {
                         let mempool = self_clone.mempool.lock().unwrap();
-                        !mempool.is_empty() && mempool.len() >= threshold
+                        self_clone.produce_empty_blocks || (!mempool.is_empty() && mempool.len() >= threshold)
                     };
 
                     // Apply any blocks received from peers
@@ -781,7 +784,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         let mut mempool = self.mempool.lock().unwrap();
         debug!("[PRODUCE_BLOCK] Mempool lock acquired, checking if empty");
 
-        if mempool.is_empty() {
+        if mempool.is_empty() && !self.produce_empty_blocks {
             debug!("[PRODUCE_BLOCK] Mempool is empty, returning error");
             return Err(ConsensusError::NoPendingTransactions.into());
         }
@@ -1651,6 +1654,17 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                             peer.address
                         );
                         self_clone.apply_received_blocks();
+                        if let Ok(Some(new_state)) = self_clone.storage.get_chain_state() {
+                            let mut cs = self_clone.chain_state.lock().unwrap();
+                            if cs.latest_block_index != new_state.latest_block_index {
+                                log::info!(
+                                    "[SYNC] Chain state height updated from {} to {} after sync",
+                                    cs.latest_block_index,
+                                    new_state.latest_block_index
+                                );
+                                *cs = new_state;
+                            }
+                        }
                     }
                     Err(e) => {
                         debug!("[SYNC] Sync with {} result: {}", peer.address, e);
