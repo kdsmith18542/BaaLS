@@ -1521,18 +1521,16 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                             block_hash: crate::types::format_hex(&block.hash),
                         });
                     }
-                    info!(
-                        "[SYNC] Applied received block #{} ({} txns)",
-                        block.index,
-                        block.transactions.len()
-                    );
-                    // Reload chain state from storage after block application
+                    eprintln!("[APPLY] Applied block #{} OK", block.index);
                     if let Ok(Some(new_state)) = self.storage.get_chain_state() {
+                        eprintln!("[APPLY] Chain state updated to height {}", new_state.latest_block_index);
                         *self.chain_state.lock().unwrap() = new_state;
+                    } else {
+                        eprintln!("[APPLY] WARNING: failed to reload chain state after applying block #{}", block.index);
                     }
                 }
                 Err(e) => {
-                    warn!("[SYNC] Failed to apply received block #{}: {}", block.index, e);
+                    eprintln!("[APPLY] apply_block FAILED for block #{}: {}", block.index, e);
                 }
             }
         }
