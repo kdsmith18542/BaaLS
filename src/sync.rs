@@ -405,7 +405,7 @@ impl TlsConfig {
         // Build client config with certificate pinning
         let cert_pins = Arc::new(RwLock::new(HashSet::new()));
 
-        // If a CA certificate path is provided, load and pin the CA certificate(s)
+        // If a CA certificate path is provided, load and pin trust certificate fingerprints.
         if let Some(ca_path) = ca_cert_path {
             let ca_file = std::fs::File::open(ca_path).map_err(|e| {
                 SyncError::NetworkError(format!("Failed to open CA cert file: {}", e))
@@ -420,7 +420,7 @@ impl TlsConfig {
                 for ca_cert in &ca_certs {
                     let fingerprint = Sha256::digest(ca_cert.as_ref()).to_vec();
                     log::info!(
-                        "Pinned CA certificate with SHA256 fingerprint: {}",
+                        "Pinned trust certificate with SHA256 fingerprint: {}",
                         hex::encode(&fingerprint)
                     );
                     pins.insert(fingerprint);
@@ -519,7 +519,7 @@ impl rustls::client::danger::ServerCertVerifier for CertificatePinner {
     fn verify_server_cert(
         &self,
         end_entity: &rustls::pki_types::CertificateDer,
-        _intermediates: &[rustls::pki_types::CertificateDer],
+        intermediates: &[rustls::pki_types::CertificateDer],
         _server_name: &rustls::pki_types::ServerName,
         _ocsp_response: &[u8],
         _now: rustls::pki_types::UnixTime,
@@ -532,11 +532,19 @@ impl rustls::client::danger::ServerCertVerifier for CertificatePinner {
             // configure certificate pins via tls_ca_cert_path or add_cert_pin().
             return Ok(rustls::client::danger::ServerCertVerified::assertion());
         }
-        let cert_hash = Sha256::digest(end_entity.as_ref()).to_vec();
-        if pins.contains(&cert_hash) {
+        let leaf_hash = Sha256::digest(end_entity.as_ref()).to_vec();
+        if pins.contains(&leaf_hash) {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+        else if intermediates
+            .iter()
+            .any(|cert| pins.contains(&Sha256::digest(cert.as_ref()).to_vec()))
+        {
             Ok(rustls::client::danger::ServerCertVerified::assertion())
         } else {
-            Err(rustls::Error::General("certificate fingerprint not in pin set".into()))
+            Err(rustls::Error::General(
+                "certificate fingerprint not in pin set (leaf or intermediates)".into(),
+            ))
         }
     }
 
