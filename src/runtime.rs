@@ -1,7 +1,7 @@
 use ed25519_dalek::SigningKey;
 use log::{debug, error, info, warn};
 use rand::RngCore;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -509,7 +509,8 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
                     let should_produce = {
                         let mempool = self_clone.mempool.lock().unwrap();
-                        self_clone.produce_empty_blocks || (!mempool.is_empty() && mempool.len() >= threshold)
+                        self_clone.produce_empty_blocks
+                            || (!mempool.is_empty() && mempool.len() >= threshold)
                     };
 
                     // Apply any blocks received from peers
@@ -561,6 +562,83 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         }
         let expected = all_signers[(block_index as usize) % all_signers.len()];
         expected == primary
+    }
+
+    async fn collect_quorum_signatures(
+        &self,
+        block: &Block,
+    ) -> Result<Vec<(String, Vec<u8>)>, RuntimeError> {
+        if self.consensus_quorum_threshold <= 1 {
+            return Ok(Vec::new());
+        }
+
+        let peers = self.sync_layer.discover_peers().await.map_err(|e| {
+            RuntimeError::ConsensusError(ConsensusError::ValidationFailed(e.to_string()))
+        })?;
+        if peers.is_empty() {
+            return Err(RuntimeError::ConsensusError(ConsensusError::ValidationFailed(
+                "Quorum not met: no peers discovered for quorum-signature requests".to_string(),
+            )));
+        }
+
+        let primary_signer_hex = block
+            .signer
+            .clone()
+            .or_else(|| block.metadata.as_ref().and_then(|m| m.get("signer").cloned()))
+            .ok_or_else(|| {
+                RuntimeError::ConsensusError(ConsensusError::ValidationFailed(
+                    "Produced block is missing signer metadata".to_string(),
+                ))
+            })?;
+
+        let allowed_signers: HashSet<String> = self.list_authorized_signers().into_iter().collect();
+        let raw = self.sync_layer.request_quorum_signatures(block, &peers).await.map_err(|e| {
+            RuntimeError::ConsensusError(ConsensusError::ValidationFailed(e.to_string()))
+        })?;
+
+        let mut dedup = BTreeMap::<String, Vec<u8>>::new();
+        for (signer_hex, sig_bytes) in raw {
+            if signer_hex == primary_signer_hex {
+                continue;
+            }
+            if sig_bytes.len() != 64 {
+                continue;
+            }
+            if !allowed_signers.contains(&signer_hex) {
+                continue;
+            }
+
+            let signer_bytes = match hex::decode(&signer_hex) {
+                Ok(b) if b.len() == 32 => b,
+                _ => continue,
+            };
+            let mut signer_arr = [0u8; 32];
+            signer_arr.copy_from_slice(&signer_bytes);
+            let signer_pk = match PublicKey::from_bytes(&signer_arr) {
+                Ok(pk) => pk,
+                Err(_) => continue,
+            };
+            let signature = match ed25519_dalek::Signature::from_slice(&sig_bytes) {
+                Ok(sig) => sig,
+                Err(_) => continue,
+            };
+            if signer_pk.verify(&block.hash, &signature).is_err() {
+                continue;
+            }
+
+            dedup.entry(signer_hex).or_insert(sig_bytes);
+        }
+
+        let quorum_signatures: Vec<(String, Vec<u8>)> = dedup.into_iter().collect();
+        let total_signers = 1usize.saturating_add(quorum_signatures.len());
+        if total_signers < self.consensus_quorum_threshold {
+            return Err(RuntimeError::ConsensusError(ConsensusError::ValidationFailed(format!(
+                "Quorum not met: {} valid signatures, {} required",
+                total_signers, self.consensus_quorum_threshold
+            ))));
+        }
+
+        Ok(quorum_signatures)
     }
 
     pub fn stop(&self) -> Result<(), RuntimeError> {
@@ -802,7 +880,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         Ok(())
     }
 
-    fn produce_block_sync(&self) -> Result<Block, RuntimeError> {
+    async fn produce_block_sync(&self) -> Result<Block, RuntimeError> {
         debug!("[PRODUCE_BLOCK] Starting block production");
 
         debug!("[PRODUCE_BLOCK] Acquiring mempool lock");
@@ -816,9 +894,9 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         debug!("[PRODUCE_BLOCK] Mempool has {} transactions", mempool.len());
 
-        debug!("[PRODUCE_BLOCK] Acquiring mutable chain state lock");
-        let mut current_chain_state = self.chain_state.lock().unwrap();
-        debug!("[PRODUCE_BLOCK] Mutable chain state lock acquired");
+        debug!("[PRODUCE_BLOCK] Acquiring chain state snapshot");
+        let current_chain_state = self.chain_state.lock().unwrap().clone();
+        debug!("[PRODUCE_BLOCK] Chain state snapshot acquired");
 
         debug!("[PRODUCE_BLOCK] Getting previous block from storage");
         let prev_block = self
@@ -901,7 +979,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         debug!("[PRODUCE_BLOCK] Collected {} transactions", transactions.len());
 
         debug!("[PRODUCE_BLOCK] Calling consensus.generate_block");
-        let new_block =
+        let mut new_block =
             self.consensus.generate_block(&transactions, &prev_block, &current_chain_state)?;
         debug!(
             "[PRODUCE_BLOCK] Block generated: index={}, hash={}",
@@ -913,10 +991,20 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         debug!("[PRODUCE_BLOCK] Releasing mempool lock");
         drop(mempool);
 
+        if self.consensus_quorum_threshold > 1 {
+            debug!("[PRODUCE_BLOCK] Collecting quorum signatures");
+            new_block.quorum_signatures = self.collect_quorum_signatures(&new_block).await?;
+            debug!(
+                "[PRODUCE_BLOCK] Collected {} quorum signatures",
+                new_block.quorum_signatures.len()
+            );
+        }
+
         debug!("[PRODUCE_BLOCK] Starting block processing with ledger");
         let processing_result: Result<(), RuntimeError> = time_operation_fn(
             &self.metrics,
             || {
+                self.consensus.validate_block(&new_block, &current_chain_state)?;
                 debug!("[PRODUCE_BLOCK] Validating block with ledger");
                 // Validate and apply block to ledger
                 self.ledger.validate_block(&new_block)?;
@@ -948,7 +1036,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         // Reload chain state from storage after block application
         if let Ok(Some(new_state)) = self.storage.get_chain_state() {
-            *current_chain_state = new_state;
+            *self.chain_state.lock().unwrap() = new_state;
         }
 
         info!(
@@ -1034,7 +1122,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
     }
 
     pub async fn produce_block(&self) -> Result<Block, RuntimeError> {
-        self.produce_block_sync()
+        self.produce_block_sync().await
     }
 
     pub fn get_chain_state(&self) -> Result<ChainState, RuntimeError> {

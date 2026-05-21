@@ -1699,6 +1699,122 @@ fn test_p2p_auto_announcement_and_import() {
 }
 
 #[test]
+fn test_p2p_quorum_signature_collection() {
+    init_logging();
+    info!("[QUORUM] Starting P2P quorum signature collection test");
+
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+    let storage_a = SledStorage::new(dir_a.path()).unwrap();
+    let storage_b = SledStorage::new(dir_b.path()).unwrap();
+
+    let sk_a = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let sk_b = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let pk_a = PublicKey::from(sk_a.verifying_key());
+    let pk_b = PublicKey::from(sk_b.verifying_key());
+
+    let listen_a: std::net::SocketAddr = "127.0.0.1:19101".parse().unwrap();
+    let listen_b: std::net::SocketAddr = "127.0.0.1:19102".parse().unwrap();
+
+    let sync_a = CustomSync::new(pk_a, listen_a, 1)
+        .with_signing_key(sk_a.clone())
+        .with_storage(storage_a.clone_storage());
+    let sync_b = CustomSync::new(pk_b, listen_b, 1)
+        .with_signing_key(sk_b.clone())
+        .with_storage(storage_b.clone_storage());
+
+    let ce_a = BaaLSContractEngine::new(storage_a.clone()).unwrap();
+    let ce_b = BaaLSContractEngine::new(storage_b.clone()).unwrap();
+    let consensus_a =
+        PoAConsensus::new(pk_a, 5000).with_signing_key(sk_a.clone()).with_quorum_threshold(2);
+    let consensus_b =
+        PoAConsensus::new(pk_b, 5000).with_signing_key(sk_b.clone()).with_quorum_threshold(2);
+
+    consensus_a.add_authorized_signer(pk_b);
+    consensus_b.add_authorized_signer(pk_a);
+
+    let mut rt_a = Runtime::new(storage_a, consensus_a, ce_a, sync_a).unwrap();
+    let mut rt_b = Runtime::new(storage_b, consensus_b, ce_b, sync_b).unwrap();
+    rt_a.consensus_quorum_threshold = 2;
+    rt_b.consensus_quorum_threshold = 2;
+
+    rt_a.start().unwrap();
+    rt_b.start().unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    rt_a.sync_layer().add_peer_by_address("127.0.0.1:19102").ok();
+    rt_b.sync_layer().add_peer_by_address("127.0.0.1:19101").ok();
+
+    let user_sk = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let user_pk = PublicKey::from(user_sk.verifying_key());
+    rt_a.create_account(&user_pk, Account::Wallet { balance: 1_000_000, nonce: 0 }).unwrap();
+    rt_b.create_account(&user_pk, Account::Wallet { balance: 1_000_000, nonce: 0 }).unwrap();
+
+    let recipient_sk = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let recipient_pk = PublicKey::from(recipient_sk.verifying_key());
+    rt_a.create_account(&recipient_pk, Account::Wallet { balance: 0, nonce: 0 }).unwrap();
+    rt_b.create_account(&recipient_pk, Account::Wallet { balance: 0, nonce: 0 }).unwrap();
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let mut tx = Transaction {
+        hash: [0u8; 32],
+        sender: user_pk,
+        recipient: Address::Wallet(recipient_pk),
+        payload: TransactionPayload::Transfer { amount: 25 },
+        nonce: 1,
+        timestamp: now,
+        signature: TransactionSignature::from_bytes(&[0u8; 64]).unwrap(),
+        gas_limit: 21_000,
+        gas_price: 1,
+        priority: 0,
+        metadata: None,
+        chain_id: 1,
+    };
+    tx.hash = tx.calculate_hash().unwrap();
+    tx.sign(&user_sk).unwrap();
+    rt_a.submit_transaction(tx).unwrap();
+
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    let block_a = tokio_rt.block_on(rt_a.produce_block()).unwrap();
+    assert_eq!(block_a.index, 1);
+    assert!(
+        !block_a.quorum_signatures.is_empty(),
+        "Block should include at least one extra quorum signature"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut synced = false;
+    while Instant::now() < deadline {
+        let chain_b = rt_b.get_chain_state().unwrap();
+        if chain_b.latest_block_index >= 1 && chain_b.latest_block_hash == block_a.hash {
+            synced = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(synced, "Node B should import the quorum-signed block");
+
+    rt_a.stop().unwrap();
+    rt_b.stop().unwrap();
+}
+
+#[test]
 fn test_keystore_round_trip() {
     init_logging();
     let temp_dir = TempDir::new().unwrap();

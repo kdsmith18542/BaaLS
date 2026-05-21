@@ -85,6 +85,15 @@ pub enum NetworkMessage {
         block_hash: [u8; 32],
         height: u64,
     },
+    QuorumSignatureRequest {
+        block: Block,
+    },
+    QuorumSignatureResponse {
+        accepted: bool,
+        signer: Option<String>,
+        signature: Option<Vec<u8>>,
+        reason: Option<String>,
+    },
 
     // Fork resolution
     ForkResolution {
@@ -176,6 +185,15 @@ pub trait SyncLayer: Send + Sync {
 
     /// Broadcasts a new block to known peers.
     async fn broadcast_block(&self, block: &Block, peers: &[Peer]) -> Result<(), SyncError>;
+
+    /// Request quorum signatures for a proposed block from known peers.
+    async fn request_quorum_signatures(
+        &self,
+        _block: &Block,
+        _peers: &[Peer],
+    ) -> Result<Vec<(String, Vec<u8>)>, SyncError> {
+        Ok(Vec::new())
+    }
 
     /// Best-effort peer count for status reporting.
     fn peer_count(&self) -> usize {
@@ -535,8 +553,7 @@ impl rustls::client::danger::ServerCertVerifier for CertificatePinner {
         let leaf_hash = Sha256::digest(end_entity.as_ref()).to_vec();
         if pins.contains(&leaf_hash) {
             Ok(rustls::client::danger::ServerCertVerified::assertion())
-        }
-        else if intermediates
+        } else if intermediates
             .iter()
             .any(|cert| pins.contains(&Sha256::digest(cert.as_ref()).to_vec()))
         {
@@ -933,8 +950,8 @@ impl CustomSync {
             connection_timeout,
             Self::receive_message_with_timeout(&mut socket, connection_timeout),
         )
-            .await
-            .map_err(|_| SyncError::ConnectionTimeout)??;
+        .await
+        .map_err(|_| SyncError::ConnectionTimeout)??;
 
         match inbound {
             NetworkMessage::Handshake {
@@ -1004,8 +1021,8 @@ impl CustomSync {
                     connection_timeout,
                     Self::receive_message_with_timeout(&mut socket, connection_timeout),
                 )
-                    .await
-                    .map_err(|_| SyncError::ConnectionTimeout)??;
+                .await
+                .map_err(|_| SyncError::ConnectionTimeout)??;
 
                 match verify {
                     NetworkMessage::HandshakeVerify { signature } => {
@@ -1265,7 +1282,19 @@ impl CustomSync {
                     }
                 }
                 NetworkMessage::GetSnapshot { height } => {
-                    let response = Self::handle_get_snapshot(height, &storage, &snapshots_dir).await;
+                    let response =
+                        Self::handle_get_snapshot(height, &storage, &snapshots_dir).await;
+                    Self::send_message(&mut socket, response).await?;
+                }
+                NetworkMessage::QuorumSignatureRequest { block } => {
+                    let response = Self::handle_quorum_signature_request(
+                        block,
+                        &storage,
+                        &signing_key,
+                        peer_id,
+                        local_chain_id,
+                    )
+                    .await;
                     Self::send_message(&mut socket, response).await?;
                 }
                 _ => {}
@@ -1718,7 +1747,8 @@ impl CustomSync {
 
             match msg {
                 NetworkMessage::GetSnapshot { height } => {
-                    let response = Self::handle_get_snapshot(height, &self.storage, &self.snapshots_dir).await;
+                    let response =
+                        Self::handle_get_snapshot(height, &self.storage, &self.snapshots_dir).await;
                     Self::send_message(stream, response).await?;
                 }
                 NetworkMessage::RequestBlock { hash } => {
@@ -1809,7 +1839,9 @@ impl CustomSync {
                             peer.address,
                             height
                         );
-                        if let Ok(_) = Self::send_message(stream, NetworkMessage::GetSnapshot { height }).await {
+                        if let Ok(_) =
+                            Self::send_message(stream, NetworkMessage::GetSnapshot { height }).await
+                        {
                             match self.receive_sync_message(stream, Duration::from_secs(30)).await {
                                 Ok(NetworkMessage::SnapshotResponse {
                                     height: resp_height,
@@ -1831,7 +1863,10 @@ impl CustomSync {
                                         let storage_guard = self.storage.lock().await;
                                         if let Some(ref s) = *storage_guard {
                                             if let Err(e) = s.restore_from_snapshot(height, dir) {
-                                                log::error!("[P2P] Failed to restore snapshot: {:?}", e);
+                                                log::error!(
+                                                    "[P2P] Failed to restore snapshot: {:?}",
+                                                    e
+                                                );
                                                 false
                                             } else {
                                                 if let Err(e) = s.put_block(&block) {
@@ -1849,7 +1884,13 @@ impl CustomSync {
                                     if restore_ok {
                                         self.cache_block(block.clone()).await;
                                         log::info!("[P2P] Snapshot sync completed successfully at height {}", height);
-                                        Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone()).await;
+                                        Self::serve_sync_requests(
+                                            stream,
+                                            &self.block_cache,
+                                            &self.storage,
+                                            self.snapshots_dir.clone(),
+                                        )
+                                        .await;
                                         return Ok(block);
                                     } else {
                                         log::warn!("[P2P] Snapshot restore failed, falling back to block sync");
@@ -1888,7 +1929,13 @@ impl CustomSync {
                     );
                     let fork_result =
                         self.resolve_fork_blocks(peer, stream, local_chain_state, height).await;
-                    Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone()).await;
+                    Self::serve_sync_requests(
+                        stream,
+                        &self.block_cache,
+                        &self.storage,
+                        self.snapshots_dir.clone(),
+                    )
+                    .await;
                     return fork_result;
                 }
 
@@ -1933,8 +1980,13 @@ impl CustomSync {
                     match blocks_response {
                         NetworkMessage::BlocksResponse { blocks } => {
                             if blocks.is_empty() {
-                                Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone())
-                                    .await;
+                                Self::serve_sync_requests(
+                                    stream,
+                                    &self.block_cache,
+                                    &self.storage,
+                                    self.snapshots_dir.clone(),
+                                )
+                                .await;
                                 return Err(SyncError::SynchronizationError(
                                     "Empty blocks response".to_string(),
                                 ));
@@ -1947,8 +1999,13 @@ impl CustomSync {
                                 let fork_result = self
                                     .resolve_fork_blocks(peer, stream, local_chain_state, height)
                                     .await;
-                                Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone())
-                                    .await;
+                                Self::serve_sync_requests(
+                                    stream,
+                                    &self.block_cache,
+                                    &self.storage,
+                                    self.snapshots_dir.clone(),
+                                )
+                                .await;
                                 return fork_result;
                             }
                             for block in &blocks {
@@ -1970,13 +2027,23 @@ impl CustomSync {
                                     );
                                 }
                             }
-                            Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone())
-                                .await;
+                            Self::serve_sync_requests(
+                                stream,
+                                &self.block_cache,
+                                &self.storage,
+                                self.snapshots_dir.clone(),
+                            )
+                            .await;
                             return Ok(blocks.last().unwrap().clone());
                         }
                         _ => {
-                            Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone())
-                                .await;
+                            Self::serve_sync_requests(
+                                stream,
+                                &self.block_cache,
+                                &self.storage,
+                                self.snapshots_dir.clone(),
+                            )
+                            .await;
                             return Err(SyncError::SynchronizationError(
                                 "Unexpected response for GetBlocks".to_string(),
                             ));
@@ -2014,11 +2081,23 @@ impl CustomSync {
                     NetworkMessage::BlockResponse { block: None } => Err(SyncError::BlockNotFound),
                     _ => Err(SyncError::InvalidMessage),
                 };
-                Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone()).await;
+                Self::serve_sync_requests(
+                    stream,
+                    &self.block_cache,
+                    &self.storage,
+                    self.snapshots_dir.clone(),
+                )
+                .await;
                 block_result
             }
             _ => {
-                Self::serve_sync_requests(stream, &self.block_cache, &self.storage, self.snapshots_dir.clone()).await;
+                Self::serve_sync_requests(
+                    stream,
+                    &self.block_cache,
+                    &self.storage,
+                    self.snapshots_dir.clone(),
+                )
+                .await;
                 Err(SyncError::InvalidMessage)
             }
         }
@@ -2106,6 +2185,43 @@ impl CustomSync {
 
         send_result
     }
+
+    async fn request_quorum_signature_from_peer(
+        &self,
+        peer: &Peer,
+        block: &Block,
+    ) -> Result<Option<(String, Vec<u8>)>, SyncError> {
+        let mut stream = self.connect_and_authenticate_peer(peer).await?;
+        Self::send_message(
+            &mut stream,
+            NetworkMessage::QuorumSignatureRequest { block: block.clone() },
+        )
+        .await?;
+
+        let response = timeout(Duration::from_secs(10), Self::receive_message(&mut stream))
+            .await
+            .map_err(|_| SyncError::ConnectionTimeout)??;
+
+        match response {
+            NetworkMessage::QuorumSignatureResponse {
+                accepted: true,
+                signer: Some(signer),
+                signature: Some(signature),
+                ..
+            } => Ok(Some((signer, signature))),
+            NetworkMessage::QuorumSignatureResponse { accepted: false, reason, .. } => {
+                if let Some(reason) = reason {
+                    log::debug!(
+                        "[P2P] Peer {} declined quorum signature: {}",
+                        peer.address,
+                        reason
+                    );
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 #[async_trait]
@@ -2153,11 +2269,8 @@ impl SyncLayer for CustomSync {
                 let peers = self.known_peers.read().await;
                 peers.values().cloned().collect()
             };
-            let missing: Vec<SocketAddr> = bootstrap_addrs
-                .iter()
-                .filter(|a| !active_addrs.contains(a))
-                .cloned()
-                .collect();
+            let missing: Vec<SocketAddr> =
+                bootstrap_addrs.iter().filter(|a| !active_addrs.contains(a)).cloned().collect();
             if !missing.is_empty() {
                 let mut peers = self.known_peers.write().await;
                 for addr in &missing {
@@ -2178,6 +2291,27 @@ impl SyncLayer for CustomSync {
 
         let peers = self.known_peers.read().await;
         Ok(peers.iter().map(|(id, addr)| Peer { id: *id, address: *addr }).collect())
+    }
+
+    async fn request_quorum_signatures(
+        &self,
+        block: &Block,
+        peers: &[Peer],
+    ) -> Result<Vec<(String, Vec<u8>)>, SyncError> {
+        let mut collected = Vec::new();
+        for peer in peers {
+            if peer.address == self.listen_addr {
+                continue;
+            }
+            match self.request_quorum_signature_from_peer(peer, block).await {
+                Ok(Some(sig)) => collected.push(sig),
+                Ok(None) => {}
+                Err(e) => {
+                    log::debug!("[P2P] Quorum signature request to {} failed: {}", peer.address, e);
+                }
+            }
+        }
+        Ok(collected)
     }
 
     async fn broadcast_block(&self, block: &Block, peers: &[Peer]) -> Result<(), SyncError> {
@@ -2306,7 +2440,11 @@ impl CustomSync {
                         match s.take_snapshot(height, dir) {
                             Ok(_) => true,
                             Err(e) => {
-                                log::error!("[P2P] Failed to take snapshot at height {}: {:?}", height, e);
+                                log::error!(
+                                    "[P2P] Failed to take snapshot at height {}: {:?}",
+                                    height,
+                                    e
+                                );
                                 false
                             }
                         }
@@ -2321,7 +2459,11 @@ impl CustomSync {
                             snapshot_bytes = Some(bytes);
                         }
                         Err(e) => {
-                            log::error!("[P2P] Failed to read snapshot file {:?}: {:?}", snap_path, e);
+                            log::error!(
+                                "[P2P] Failed to read snapshot file {:?}: {:?}",
+                                snap_path,
+                                e
+                            );
                         }
                     }
                 }
@@ -2332,10 +2474,119 @@ impl CustomSync {
             log::warn!("[P2P] GetSnapshot requested but snapshots_dir is not configured");
         }
 
-        NetworkMessage::SnapshotResponse {
-            height,
-            snapshot: snapshot_bytes,
-            block: block_data,
+        NetworkMessage::SnapshotResponse { height, snapshot: snapshot_bytes, block: block_data }
+    }
+
+    fn quorum_response_reject(reason: &str) -> NetworkMessage {
+        NetworkMessage::QuorumSignatureResponse {
+            accepted: false,
+            signer: None,
+            signature: None,
+            reason: Some(reason.to_string()),
+        }
+    }
+
+    fn block_signer_hex(block: &Block) -> Option<String> {
+        if let Some(hex) = block.signer.as_ref() {
+            return Some(hex.clone());
+        }
+        block.metadata.as_ref().and_then(|m| m.get("signer").cloned())
+    }
+
+    async fn handle_quorum_signature_request(
+        block: Block,
+        storage: &Arc<Mutex<Option<Box<dyn Storage>>>>,
+        signing_key: &Arc<Mutex<Option<SigningKey>>>,
+        local_peer_id: PublicKey,
+        chain_id: u64,
+    ) -> NetworkMessage {
+        let signer_hex = match Self::block_signer_hex(&block) {
+            Some(s) => s,
+            None => return Self::quorum_response_reject("missing block signer metadata"),
+        };
+
+        let signer_bytes = match hex::decode(&signer_hex) {
+            Ok(b) if b.len() == 32 => b,
+            _ => return Self::quorum_response_reject("invalid signer public key"),
+        };
+        let mut signer_arr = [0u8; 32];
+        signer_arr.copy_from_slice(&signer_bytes);
+        let signer_pk = match PublicKey::from_bytes(&signer_arr) {
+            Ok(pk) => pk,
+            Err(_) => return Self::quorum_response_reject("invalid signer bytes"),
+        };
+
+        if signer_pk == local_peer_id {
+            return Self::quorum_response_reject("cannot cosign own proposal");
+        }
+
+        let calculated_hash = match block.calculate_hash() {
+            Ok(h) => h,
+            Err(_) => return Self::quorum_response_reject("failed to calculate block hash"),
+        };
+        if calculated_hash != block.hash {
+            return Self::quorum_response_reject("block hash mismatch");
+        }
+
+        if block.transactions.iter().any(|tx| tx.chain_id != chain_id) {
+            return Self::quorum_response_reject("block chain_id does not match local chain");
+        }
+
+        let primary_sig_hex = match block.metadata.as_ref().and_then(|m| m.get("signature")) {
+            Some(sig) => sig,
+            None => return Self::quorum_response_reject("missing primary block signature"),
+        };
+        let primary_sig_bytes = match hex::decode(primary_sig_hex) {
+            Ok(b) if b.len() == 64 => b,
+            _ => return Self::quorum_response_reject("invalid primary signature encoding"),
+        };
+        let primary_sig = match Signature::from_slice(&primary_sig_bytes) {
+            Ok(sig) => sig,
+            Err(_) => return Self::quorum_response_reject("invalid primary signature format"),
+        };
+        if signer_pk.verify(&block.hash, &primary_sig).is_err() {
+            return Self::quorum_response_reject("primary signature verification failed");
+        }
+
+        let storage_guard = storage.lock().await;
+        let Some(storage_ref) = storage_guard.as_ref() else {
+            return Self::quorum_response_reject("local storage unavailable");
+        };
+
+        let chain_state = match storage_ref.get_chain_state() {
+            Ok(Some(cs)) => cs,
+            Ok(None) => return Self::quorum_response_reject("local chain state unavailable"),
+            Err(_) => return Self::quorum_response_reject("failed to load local chain state"),
+        };
+
+        if block.index != chain_state.latest_block_index.saturating_add(1) {
+            return Self::quorum_response_reject("block height not next to local head");
+        }
+        if block.prev_hash != chain_state.latest_block_hash {
+            return Self::quorum_response_reject("block prev_hash does not match local head");
+        }
+
+        let authorized_signers = match storage_ref.get_authorized_signers() {
+            Ok(s) => s,
+            Err(_) => return Self::quorum_response_reject("failed to load authorized signers"),
+        };
+        if !authorized_signers.is_empty() && !authorized_signers.contains(&signer_pk) {
+            return Self::quorum_response_reject("proposer is not in local authorized signer set");
+        }
+
+        drop(storage_guard);
+
+        let signer_key_guard = signing_key.lock().await;
+        let Some(local_signing_key) = signer_key_guard.as_ref() else {
+            return Self::quorum_response_reject("local signing key unavailable");
+        };
+        let sig = local_signing_key.sign(&block.hash).to_bytes().to_vec();
+        let local_signer_hex = hex::encode(local_peer_id.to_bytes());
+        NetworkMessage::QuorumSignatureResponse {
+            accepted: true,
+            signer: Some(local_signer_hex),
+            signature: Some(sig),
+            reason: None,
         }
     }
 
@@ -2347,7 +2598,8 @@ impl CustomSync {
         storage: &Arc<Mutex<Option<Box<dyn Storage>>>>,
         snapshots_dir: Option<std::path::PathBuf>,
     ) {
-        Self::serve_sync_requests_with_timeout(stream, block_cache, storage, snapshots_dir, 2).await;
+        Self::serve_sync_requests_with_timeout(stream, block_cache, storage, snapshots_dir, 2)
+            .await;
     }
 
     async fn serve_sync_requests_with_timeout<S: AsyncRead + AsyncWrite + Unpin + Send>(
@@ -2533,6 +2785,14 @@ impl SyncLayer for NoopSync {
     async fn broadcast_block(&self, _block: &Block, _peers: &[Peer]) -> Result<(), SyncError> {
         Ok(())
     }
+
+    async fn request_quorum_signatures(
+        &self,
+        _block: &Block,
+        _peers: &[Peer],
+    ) -> Result<Vec<(String, Vec<u8>)>, SyncError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Runtime-switchable sync layer wrapper.
@@ -2597,6 +2857,17 @@ impl SyncLayer for SyncWrapper {
         match self {
             SyncWrapper::Noop(n) => n.broadcast_block(block, peers).await,
             SyncWrapper::Custom(c) => c.broadcast_block(block, peers).await,
+        }
+    }
+
+    async fn request_quorum_signatures(
+        &self,
+        block: &Block,
+        peers: &[Peer],
+    ) -> Result<Vec<(String, Vec<u8>)>, SyncError> {
+        match self {
+            SyncWrapper::Noop(n) => n.request_quorum_signatures(block, peers).await,
+            SyncWrapper::Custom(c) => c.request_quorum_signatures(block, peers).await,
         }
     }
 

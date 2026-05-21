@@ -59,13 +59,14 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 - **P2P timeout tuning is implemented.** `network.connection_timeout_ms` is now wired into `CustomSync`, and expected idle disconnects are logged at debug level instead of error.
 - **TLS hardening is implemented.** Both nodes now run CA-signed certs with configured trust pinning (`tls_ca_cert_path = "/etc/baals/tls/ca.crt"`).
 - **Empty-block policy was tested and reverted.** Enabling `produce_empty_blocks=true` with current 2-node quorum/round-robin caused same-height competing empty blocks and persistent fork churn, so production configs were reset to event-driven mode.
-- **Heartbeat safety guard is implemented in code.** Empty block production is now proposer-gated in round-robin mode (deterministic signer ordering), and empty heartbeat blocks are intentionally suppressed when `quorum_threshold > 1` to avoid fork churn without quorum-signature support.
+- **Heartbeat safety guard is implemented in code.** Empty block production is now proposer-gated in round-robin mode (deterministic signer ordering), and empty heartbeat blocks are intentionally suppressed when `quorum_threshold > 1` to avoid timed same-height fork churn.
+- **Quorum signature collection is implemented.** Proposers now request and attach peer quorum signatures over P2P before applying/broadcasting blocks when `quorum_threshold > 1`, and imported quorum-signed blocks validate correctly.
 
 ## Known Issues
 
 ### Moderate
 
-- **Heartbeat with quorum > 1 is intentionally disabled.** Empty heartbeat blocks are now suppressed when `quorum_threshold > 1` because quorum-signature aggregation is not yet implemented.
+- **Heartbeat with quorum > 1 is intentionally disabled.** Empty heartbeat blocks remain suppressed when `quorum_threshold > 1` to avoid timed empty-block contention; quorum-signature collection is now available for produced transaction blocks.
 - **P2P connection churn still occurs.** Peers may still close/reconnect on timeout windows, but expected idle timeout events are now debug-level rather than error-level.
 - **Admin endpoints need JWT for writes.** POST/DELETE on `/api/v1/admin/signers` requires a token from `/auth/token`.
 
@@ -73,7 +74,7 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 
 ### Medium Priority
 
-1. **Quorum-signed block production** - implement quorum signature collection/aggregation so `quorum_threshold > 1` is truly enforced for produced and imported blocks (including heartbeat blocks).
+1. **Quorum heartbeat strategy** - enable safe empty-block heartbeat behavior under `quorum_threshold > 1` without reintroducing same-height fork churn.
 2. **Python SDK** - client library matching Rust's bincode transaction hashing (prototype exists in e2e test scripts).
 
 ### Lower Priority
@@ -110,7 +111,7 @@ Minimum gas limit: 21,000. Signature: Ed25519 over the 32-byte hash.
 - `src/config.rs` - TOML config parsing, fee/consensus/network settings
 - `tests/cq_regression.rs` - fee system tests (4 modes + validation)
 - `tests/multi_validator.rs` - multi-signer PoA tests
-- `tests/integration.rs` - includes `test_state_snapshot_sync` and `test_empty_block_production`
+- `tests/integration.rs` - includes `test_state_snapshot_sync`, `test_empty_block_production`, and `test_p2p_quorum_signature_collection`
 
 ## Monitor Alerting Notes
 
