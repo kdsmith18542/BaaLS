@@ -23,7 +23,7 @@ BaaLS (Blockchain as a Local Service) is a Rust embedded blockchain node with:
 - Ports: API 18080 (HTTPS), health 18082 (HTTP), WS 18081, P2P 9070
 - Consensus key (env): `afd1fb8ddccc63ca29b2f11f371d9b959e1b07f217788ed04e2d1d18b50e7efd`
 - Public key: `0a82b7b0d6be0cde841d31fda2a0c9ceff7636c81332bc2ed9cc981f5f537abc`
-- TLS: self-signed certs at `/etc/baals/tls/`
+- TLS: internal CA signed cert chain at `/etc/baals/tls/server-chain.crt` with trust anchor `/etc/baals/tls/ca.crt`
 
 **Node 2** - second validator
 - Service: `baalsd-node2.service`
@@ -57,32 +57,29 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 - **Optional empty block production is implemented.** `consensus.produce_empty_blocks` config flag exists (default `false`).
 - **Monitor alerting is implemented.** `/etc/baals/monitor.sh` now supports webhook/email notifications, cooldown-based alert suppression, and recovery notifications.
 - **P2P timeout tuning is implemented.** `network.connection_timeout_ms` is now wired into `CustomSync`, and expected idle disconnects are logged at debug level instead of error.
+- **TLS hardening is implemented.** Both nodes now run CA-signed certs with configured trust pinning (`tls_ca_cert_path = "/etc/baals/tls/ca.crt"`).
 
 ## Known Issues
 
 ### Moderate
 
 - **Chain can appear stalled between transactions.** Empty-block production exists but is currently optional and disabled by default (`produce_empty_blocks = false`).
-- **P2P connection timeout noise.** Inbound peer connections still log `Connection timeout` after about 10s even when sync health is good.
+- **P2P connection churn still occurs.** Peers may still close/reconnect on timeout windows, but expected idle timeout events are now debug-level rather than error-level.
 - **Admin endpoints need JWT for writes.** POST/DELETE on `/api/v1/admin/signers` requires a token from `/auth/token`.
 
 ## Remaining Work
 
-### High Priority
-
-1. **TLS hardening** - replace self-signed certs with Let's Encrypt or an internal CA.
-
 ### Medium Priority
 
-2. **Heartbeat / empty block policy** - decide whether to enable `consensus.produce_empty_blocks = true` in production configs.
-3. **Python SDK** - client library matching Rust's bincode transaction hashing (prototype exists in e2e test scripts).
+1. **Heartbeat / empty block policy** - decide whether to enable `consensus.produce_empty_blocks = true` in production configs.
+2. **Python SDK** - client library matching Rust's bincode transaction hashing (prototype exists in e2e test scripts).
 
 ### Lower Priority
 
-6. RocksDB storage backend
-7. Mobile SDKs (iOS/Android)
-8. PoS / PoW / CRDT consensus plugins
-9. Block explorer improvements
+3. RocksDB storage backend
+4. Mobile SDKs (iOS/Android)
+5. PoS / PoW / CRDT consensus plugins
+6. Block explorer improvements
 
 ## Transaction Format Reference
 
