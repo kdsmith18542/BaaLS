@@ -10,6 +10,7 @@ use baals::{
 };
 
 fn main() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
     let log_level = if cli.verbose { "debug" } else { "info" };
     let config = Config::load(None).unwrap_or_default();
