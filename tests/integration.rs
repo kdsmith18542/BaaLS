@@ -3314,7 +3314,7 @@ fn test_empty_block_production() {
 }
 
 #[test]
-fn test_empty_block_production_disabled_when_quorum_gt_one() {
+fn test_empty_block_production_with_quorum_requires_peer_signatures() {
     init_logging();
     let temp_dir = TempDir::new().unwrap();
     let data_dir = temp_dir.path().to_path_buf();
@@ -3341,10 +3341,101 @@ fn test_empty_block_production_disabled_when_quorum_gt_one() {
     let state = runtime.get_chain_state().unwrap();
     assert_eq!(
         state.latest_block_index, 0,
-        "Empty heartbeat blocks must be suppressed when quorum_threshold > 1"
+        "Empty heartbeat blocks should not be produced without reachable quorum peers"
     );
 
     runtime.stop().unwrap();
+}
+
+#[test]
+fn test_empty_block_production_with_quorum_round_robin_peers() {
+    init_logging();
+
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+    let storage_a = SledStorage::new(dir_a.path()).unwrap();
+    let storage_b = SledStorage::new(dir_b.path()).unwrap();
+
+    let sk_a = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let sk_b = ed25519_dalek::SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        rand::rng().fill_bytes(&mut b);
+        b
+    });
+    let pk_a = PublicKey::from(sk_a.verifying_key());
+    let pk_b = PublicKey::from(sk_b.verifying_key());
+
+    let listen_a: std::net::SocketAddr = "127.0.0.1:19111".parse().unwrap();
+    let listen_b: std::net::SocketAddr = "127.0.0.1:19112".parse().unwrap();
+
+    let sync_a = CustomSync::new(pk_a, listen_a, 1)
+        .with_signing_key(sk_a.clone())
+        .with_storage(storage_a.clone_storage());
+    let sync_b = CustomSync::new(pk_b, listen_b, 1)
+        .with_signing_key(sk_b.clone())
+        .with_storage(storage_b.clone_storage());
+
+    let ce_a = BaaLSContractEngine::new(storage_a.clone()).unwrap();
+    let ce_b = BaaLSContractEngine::new(storage_b.clone()).unwrap();
+    let consensus_a = PoAConsensus::new(pk_a, 200)
+        .with_signing_key(sk_a.clone())
+        .with_quorum_threshold(2)
+        .with_round_robin(true);
+    let consensus_b = PoAConsensus::new(pk_b, 200)
+        .with_signing_key(sk_b.clone())
+        .with_quorum_threshold(2)
+        .with_round_robin(true);
+
+    consensus_a.add_authorized_signer(pk_b);
+    consensus_b.add_authorized_signer(pk_a);
+
+    let mut rt_a = Runtime::new(storage_a, consensus_a, ce_a, sync_a).unwrap();
+    let mut rt_b = Runtime::new(storage_b, consensus_b, ce_b, sync_b).unwrap();
+
+    rt_a.auto_block_interval_ms = 200;
+    rt_b.auto_block_interval_ms = 200;
+    rt_a.auto_block_mempool_threshold = 1;
+    rt_b.auto_block_mempool_threshold = 1;
+    rt_a.produce_empty_blocks = true;
+    rt_b.produce_empty_blocks = true;
+    rt_a.round_robin_enabled = true;
+    rt_b.round_robin_enabled = true;
+    rt_a.consensus_quorum_threshold = 2;
+    rt_b.consensus_quorum_threshold = 2;
+
+    rt_a.start().unwrap();
+    rt_b.start().unwrap();
+    std::thread::sleep(Duration::from_millis(700));
+
+    rt_a.sync_layer().add_peer_by_address("127.0.0.1:19112").ok();
+    rt_b.sync_layer().add_peer_by_address("127.0.0.1:19111").ok();
+
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut converged = false;
+    while Instant::now() < deadline {
+        let a = rt_a.get_chain_state().unwrap();
+        let b = rt_b.get_chain_state().unwrap();
+        if a.latest_block_index >= 3
+            && a.latest_block_index == b.latest_block_index
+            && a.latest_block_hash == b.latest_block_hash
+        {
+            converged = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    rt_a.stop().unwrap();
+    rt_b.stop().unwrap();
+
+    assert!(
+        converged,
+        "Quorum heartbeat blocks should progress and converge under round-robin with 2 peers"
+    );
 }
 
 #[test]

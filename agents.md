@@ -61,12 +61,13 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 - **Empty-block policy was tested and reverted.** Enabling `produce_empty_blocks=true` with current 2-node quorum/round-robin caused same-height competing empty blocks and persistent fork churn, so production configs were reset to event-driven mode.
 - **Heartbeat safety guard is implemented in code.** Empty block production is now proposer-gated in round-robin mode (deterministic signer ordering), and empty heartbeat blocks are intentionally suppressed when `quorum_threshold > 1` to avoid timed same-height fork churn.
 - **Quorum signature collection is implemented.** Proposers now request and attach peer quorum signatures over P2P before applying/broadcasting blocks when `quorum_threshold > 1`, and imported quorum-signed blocks validate correctly.
+- **Quorum heartbeat path is now enabled and tested.** With reachable peers, `produce_empty_blocks=true` + `quorum_threshold > 1` + `round_robin=true` now produces converged empty blocks under quorum signatures; without quorum peers, heartbeat proposals are skipped.
 
 ## Known Issues
 
 ### Moderate
 
-- **Heartbeat with quorum > 1 is intentionally disabled.** Empty heartbeat blocks remain suppressed when `quorum_threshold > 1` to avoid timed empty-block contention; quorum-signature collection is now available for produced transaction blocks.
+- **Heartbeat with quorum requires healthy peer quorum.** If quorum peers are unreachable, empty heartbeat proposals are skipped until signatures are available.
 - **P2P connection churn still occurs.** Peers may still close/reconnect on timeout windows, but expected idle timeout events are now debug-level rather than error-level.
 - **Admin endpoints need JWT for writes.** POST/DELETE on `/api/v1/admin/signers` requires a token from `/auth/token`.
 
@@ -74,8 +75,7 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 
 ### Medium Priority
 
-1. **Quorum heartbeat strategy** - enable safe empty-block heartbeat behavior under `quorum_threshold > 1` without reintroducing same-height fork churn.
-2. **Python SDK** - client library matching Rust's bincode transaction hashing (prototype exists in e2e test scripts).
+1. **Python SDK** - client library matching Rust's bincode transaction hashing (prototype exists in e2e test scripts).
 
 ### Lower Priority
 
@@ -111,7 +111,7 @@ Minimum gas limit: 21,000. Signature: Ed25519 over the 32-byte hash.
 - `src/config.rs` - TOML config parsing, fee/consensus/network settings
 - `tests/cq_regression.rs` - fee system tests (4 modes + validation)
 - `tests/multi_validator.rs` - multi-signer PoA tests
-- `tests/integration.rs` - includes `test_state_snapshot_sync`, `test_empty_block_production`, and `test_p2p_quorum_signature_collection`
+- `tests/integration.rs` - includes `test_state_snapshot_sync`, `test_empty_block_production`, `test_p2p_quorum_signature_collection`, and quorum heartbeat convergence tests
 
 ## Monitor Alerting Notes
 

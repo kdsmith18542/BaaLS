@@ -911,13 +911,6 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         let next_index = prev_block.index.saturating_add(1);
         if mempool.is_empty() && self.produce_empty_blocks {
-            if self.consensus_quorum_threshold > 1 {
-                debug!(
-                    "[HEARTBEAT] Skipping empty block #{}: quorum_threshold={} requires quorum signatures; heartbeat empty blocks are disabled in this mode",
-                    next_index, self.consensus_quorum_threshold
-                );
-                return Err(ConsensusError::NoPendingTransactions.into());
-            }
             if !self.is_local_round_robin_proposer_for_index(next_index) {
                 debug!(
                     "[HEARTBEAT] Skipping empty block #{}: local validator is not the scheduled round-robin proposer",
@@ -993,7 +986,21 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         if self.consensus_quorum_threshold > 1 {
             debug!("[PRODUCE_BLOCK] Collecting quorum signatures");
-            new_block.quorum_signatures = self.collect_quorum_signatures(&new_block).await?;
+            let heartbeat_candidate = new_block.transactions.is_empty();
+            match self.collect_quorum_signatures(&new_block).await {
+                Ok(sigs) => {
+                    new_block.quorum_signatures = sigs;
+                }
+                Err(e) if heartbeat_candidate => {
+                    debug!(
+                        "[HEARTBEAT] Skipping empty block #{}: quorum signatures unavailable ({})",
+                        new_block.index,
+                        e
+                    );
+                    return Err(ConsensusError::NoPendingTransactions.into());
+                }
+                Err(e) => return Err(e),
+            }
             debug!(
                 "[PRODUCE_BLOCK] Collected {} quorum signatures",
                 new_block.quorum_signatures.len()
