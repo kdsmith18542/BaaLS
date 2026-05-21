@@ -1444,22 +1444,26 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
         if blocks.is_empty() {
             return;
         }
-        info!("[SYNC] Processing {} blocks received from peers", blocks.len());
+        eprintln!("[APPLY] Processing {} blocks received from peers", blocks.len());
 
-        // Check if the first block's prev_hash matches our latest block
         let latest_hash = self.chain_state.lock().unwrap().latest_block_hash;
+        let latest_index = self.chain_state.lock().unwrap().latest_block_index;
         if let Some(first_block) = blocks.first() {
+            eprintln!(
+                "[APPLY] First block #{} prev_hash={} local_hash={} local_height={}",
+                first_block.index,
+                crate::types::format_hex(&first_block.prev_hash),
+                crate::types::format_hex(&latest_hash),
+                latest_index
+            );
             if first_block.prev_hash != latest_hash {
-                log::info!(
-                    "[RUNTIME] Fork detected — reorganizing chain with {} fork blocks",
-                    blocks.len()
-                );
+                eprintln!("[APPLY] prev_hash mismatch — attempting reorg");
                 match self.reorganize_chain(&blocks) {
                     Ok(new_height) => {
-                        info!("[RUNTIME] Chain reorganized to height {}", new_height);
+                        eprintln!("[APPLY] Chain reorganized to height {}", new_height);
                     }
                     Err(e) => {
-                        warn!("[RUNTIME] Chain reorganization failed: {}", e);
+                        eprintln!("[APPLY] Chain reorganization failed: {}", e);
                     }
                 }
                 return;
@@ -1484,27 +1488,24 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                 continue;
             }
 
-            // Scope for consensus validation lock
-            let consensus_valid = {
+            let consensus_result = {
                 let chain_state = self.chain_state.lock().unwrap();
-                self.consensus.validate_block(&block, &chain_state).is_ok()
+                self.consensus.validate_block(&block, &chain_state)
             };
-            if !consensus_valid {
+            if let Err(e) = consensus_result {
                 let chain_state = self.chain_state.lock().unwrap();
-                warn!(
-                    "[SYNC] Consensus validation failed for block #{} against chain at height {}",
-                    block.index, chain_state.latest_block_index
+                eprintln!(
+                    "[APPLY] Consensus validation FAILED for block #{}: {} (chain height={})",
+                    block.index, e, chain_state.latest_block_index
                 );
                 continue;
             }
 
-            // Validate state transition
             if let Err(e) = self.ledger.validate_block(&block) {
-                warn!("[SYNC] Received block #{} failed validation: {}", block.index, e);
+                eprintln!("[APPLY] Ledger validation FAILED for block #{}: {}", block.index, e);
                 continue;
             }
 
-            // Apply block
             match self.ledger.apply_block(&block) {
                 Ok(()) => {
                     self.broadcast_event(crate::ws_server::ChainEvent::NewBlock {
