@@ -1,4 +1,4 @@
-# BaaLS — Agent Context
+# BaaLS - Agent Context
 
 ## Project Overview
 
@@ -15,7 +15,7 @@ BaaLS (Blockchain as a Local Service) is a Rust embedded blockchain node with:
 
 ### VPS (198.71.49.148, SSH alias: `grindsquad`)
 
-**Node 1** — primary validator
+**Node 1** - primary validator
 - Service: `baalsd.service`
 - Binary: `/opt/baals/target/release/baalsd`
 - Config: `/etc/baals/config.toml`
@@ -25,10 +25,10 @@ BaaLS (Blockchain as a Local Service) is a Rust embedded blockchain node with:
 - Public key: `0a82b7b0d6be0cde841d31fda2a0c9ceff7636c81332bc2ed9cc981f5f537abc`
 - TLS: self-signed certs at `/etc/baals/tls/`
 
-**Node 2** — second validator
+**Node 2** - second validator
 - Service: `baalsd-node2.service`
 - Config: `/etc/baals/config-node2.toml`
-- Data: `/var/lib/baals-node2` (cloned from node 1 at height 7)
+- Data: `/var/lib/baals-node2` (historically cloned from node 1 at height 7)
 - Ports: API 18090 (HTTPS), health 18092 (HTTP), WS 18091, P2P 9071
 - Consensus key (env): `4f1308bcfddd02537847297d92df8d4593e062a119bc8672e24b0e2a8d07743f`
 - Public key: `002ec12b009aa6ba1790599675d066d0125c40683741d843eb43a0979678aaf1`
@@ -36,7 +36,7 @@ BaaLS (Blockchain as a Local Service) is a Rust embedded blockchain node with:
 
 **Monitoring**
 - Script: `/etc/baals/monitor.sh`
-- Cron: `*/2 * * * *` — checks both nodes, logs to `/var/log/baals-monitor.log` + syslog
+- Cron: `*/2 * * * *` - checks both nodes, logs to `/var/log/baals-monitor.log` + syslog
 - Alerts on: node unreachable, unhealthy status, storage failure, height divergence > 5
 
 ### Build & Deploy
@@ -48,67 +48,67 @@ ssh grindsquad "systemctl restart baalsd && systemctl restart baalsd-node2"
 
 Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts with `rm -f target/release/deps/baals*` if feature flags change.
 
+## Recently Completed (2026-05-21)
+
+- **State snapshot bootstrap sync is implemented and deployed.** Empty new nodes now request `GetSnapshot`, restore state, and converge without manual sled cloning.
+- **Chain-state refresh after sync is implemented.** Runtime now updates in-memory chain state after successful peer sync imports.
+- **Quorum + round-robin are enabled on both VPS nodes.** `/etc/baals/config.toml` and `/etc/baals/config-node2.toml` set `quorum_threshold = 2` and `round_robin = true`.
+- **Signer sets are clean.** Node 1 and Node 2 signer lists include only each other; stale historical keys are removed.
+- **Optional empty block production is implemented.** `consensus.produce_empty_blocks` config flag exists (default `false`).
+
 ## Known Issues
-
-### Critical
-
-- **New nodes cannot sync from genesis.** Block replay fails because sender accounts don't exist in empty state. Node 2 was bootstrapped by cloning node 1's sled data. Any new validator must receive a state snapshot — there is no genesis state mechanism.
 
 ### Moderate
 
-- **Stale authorized signers on node 1.** Keys `0dcc7432...` and `2ded0b...` from old test sessions are still authorized. The primary key also appears as a duplicate in the additional signers list. Clean up via `DELETE /api/v1/admin/signers/{hex}` (requires JWT + loopback).
-- **Quorum threshold = 1.** Both nodes produce blocks independently. For real multi-validator consensus, bump `quorum_threshold` to 2 in both configs and enable round-robin.
-- **Chain stalls without transactions.** `auto_block_mempool_threshold = 1` means no empty/heartbeat blocks. The chain goes silent between transactions.
-- **P2P connection timeouts.** Inbound peer connections log `Connection timeout` after ~10s. Does not break sync (peers reconnect) but is noisy.
-- **Admin endpoints need JWT for writes.** After the security fix in `1fde89d`, POST/DELETE on `/api/v1/admin/signers` requires a JWT obtained via `/auth/token`. Setup scripts must account for this.
+- **Chain can appear stalled between transactions.** Empty-block production exists but is currently optional and disabled by default (`produce_empty_blocks = false`).
+- **P2P connection timeout noise.** Inbound peer connections still log `Connection timeout` after about 10s even when sync health is good.
+- **Admin endpoints need JWT for writes.** POST/DELETE on `/api/v1/admin/signers` requires a token from `/auth/token`.
 
 ## Remaining Work
 
 ### High Priority
 
-1. **State snapshot / genesis sync** — let new nodes join the network without full block replay. Either implement a genesis state block that seeds initial accounts, or add a state-snapshot-at-height protocol.
-2. **Clean up stale signers** — remove legacy test keys from node 1, deduplicate the primary key entry.
-3. **Enable quorum threshold 2 + round-robin** — exercise real multi-validator consensus where both nodes must participate.
+1. **P2P timeout tuning** - increase connection read timeout and/or add keep-alive to reduce timeout log noise.
+2. **Monitor alerting** - add webhook or email notifications to `/etc/baals/monitor.sh`.
+3. **TLS hardening** - replace self-signed certs with Let's Encrypt or an internal CA.
 
 ### Medium Priority
 
-4. **Heartbeat / empty block production** — option to produce blocks on a timer even without transactions, preventing chain stall perception.
-5. **Proper TLS certificates** — replace self-signed certs with Let's Encrypt or an internal CA.
-6. **P2P timeout tuning** — increase connection read timeout or add keep-alive to reduce log noise.
-7. **Monitor alerting** — add webhook or email notifications to `/etc/baals/monitor.sh`.
-8. **Python SDK** — client library matching Rust's bincode transaction hashing (prototype exists in e2e test scripts).
+4. **Heartbeat / empty block policy** - decide whether to enable `consensus.produce_empty_blocks = true` in production configs.
+5. **Python SDK** - client library matching Rust's bincode transaction hashing (prototype exists in e2e test scripts).
 
 ### Lower Priority
 
-9. RocksDB storage backend
-10. Mobile SDKs (iOS/Android)
-11. PoS / PoW / CRDT consensus plugins
-12. Block explorer improvements
+6. RocksDB storage backend
+7. Mobile SDKs (iOS/Android)
+8. PoS / PoW / CRDT consensus plugins
+9. Block explorer improvements
 
 ## Transaction Format Reference
 
 Transaction hash (SHA-256) is computed over these fields in order:
-1. `sender.as_bytes()` — raw 32 bytes
-2. `nonce` — u64 LE
-3. `timestamp` — u64 LE
-4. `gas_limit` — u64 LE
-5. `gas_price` — u64 LE
-6. `priority` — u8
-7. `chain_id` — u64 LE
-8. `bincode(recipient)` — Address enum: `u32(variant) + u64(len) + bytes`
-9. `bincode(payload)` — TransactionPayload enum
-10. `bincode(metadata)` — if Some
+1. `sender.as_bytes()` - raw 32 bytes
+2. `nonce` - u64 LE
+3. `timestamp` - u64 LE
+4. `gas_limit` - u64 LE
+5. `gas_price` - u64 LE
+6. `priority` - u8
+7. `chain_id` - u64 LE
+8. `bincode(recipient)` - Address enum: `u32(variant) + u64(len) + bytes`
+9. `bincode(payload)` - TransactionPayload enum
+10. `bincode(metadata)` - if Some
 
 Minimum gas limit: 21,000. Signature: Ed25519 over the 32-byte hash.
 
 ## Key Files
 
-- `src/consensus.rs` — PoA validation, signing, round-robin, quorum checks
-- `src/sync.rs` — P2P protocol, peer management, bootstrap peer resilience
-- `src/runtime.rs` — block production, sync import, authorized signer management
-- `src/ledger.rs` — account state, fee distribution, block application
-- `src/cli/node.rs` — HTTP/WS/health servers, JWT auth, admin API routing
-- `src/types.rs` — Block, Transaction, PublicKey, FeePolicy structs
-- `src/config.rs` — TOML config parsing, fee/consensus/network settings
-- `tests/cq_regression.rs` — fee system tests (4 modes + validation)
-- `tests/multi_validator.rs` — multi-signer PoA tests
+- `src/consensus.rs` - PoA validation, signing, round-robin, quorum checks
+- `src/sync.rs` - P2P protocol, peer management, snapshot/bootstrap sync
+- `src/runtime.rs` - block production, sync import, authorized signer management
+- `src/ledger.rs` - account state, fee distribution, block application
+- `src/cli/node.rs` - HTTP/WS/health servers, JWT auth, admin API routing
+- `src/types.rs` - Block, Transaction, PublicKey, FeePolicy structs
+- `src/config.rs` - TOML config parsing, fee/consensus/network settings
+- `tests/cq_regression.rs` - fee system tests (4 modes + validation)
+- `tests/multi_validator.rs` - multi-signer PoA tests
+- `tests/integration.rs` - includes `test_state_snapshot_sync` and `test_empty_block_production`

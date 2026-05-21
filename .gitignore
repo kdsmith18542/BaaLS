@@ -12,6 +12,12 @@ sdk/nodejs-native/target/
 
 # AI tool config
 .claude/
+.clinerules
+.cursorrules
+.windsurfrules
+CLAUDE.md
+kilo.jsonc
+.github/copilot-instructions.md
 
 # Build artifacts
 /build/
