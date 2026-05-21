@@ -49,8 +49,8 @@ pub struct Peer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NetworkMessage {
     // Handshake messages
-    Handshake { peer_id: PublicKey, version: u32, challenge: [u8; 32] },
-    HandshakeAck { peer_id: PublicKey, version: u32, signature: Vec<u8>, challenge: [u8; 32] },
+    Handshake { peer_id: PublicKey, version: u32, challenge: [u8; 32], listen_port: u16 },
+    HandshakeAck { peer_id: PublicKey, version: u32, signature: Vec<u8>, challenge: [u8; 32], listen_port: u16 },
     HandshakeVerify { signature: Vec<u8> },
 
     // Sync protocol messages
@@ -603,7 +603,7 @@ impl CustomSync {
         rand::rng().fill_bytes(&mut challenge);
         Self::send_message(
             &mut stream,
-            NetworkMessage::Handshake { peer_id: self.peer_id, version: 1, challenge },
+            NetworkMessage::Handshake { peer_id: self.peer_id, version: 1, challenge, listen_port: self.listen_addr.port() },
         )
         .await?;
 
@@ -753,6 +753,7 @@ impl CustomSync {
                     let received_blocks = Arc::clone(&self.received_blocks);
                     let signing_key = Arc::clone(&self.signing_key);
                     let rate_limiters = Arc::clone(&self.peer_rate_limiters);
+                    let listen_port = self.listen_addr.port();
                     let permit = semaphore.clone().acquire_owned().await;
 
                     tokio::spawn(async move {
@@ -761,7 +762,7 @@ impl CustomSync {
                             match acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
                                     if let Err(e) = Self::handle_connection(
-                                        tls_stream, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters,
+                                        tls_stream, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters, listen_port,
                                     ).await {
                                         log::error!("TLS connection error: {}", e);
                                     }
@@ -769,7 +770,7 @@ impl CustomSync {
                                 Err(e) => log::error!("TLS handshake error from {}: {}", addr, e),
                             }
                         } else if let Err(e) = Self::handle_connection(
-                            socket, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters,
+                            socket, addr, peer_id, peers, block_cache, storage, received_blocks, signing_key, rate_limiters, listen_port,
                         ).await {
                             log::error!("Connection error: {}", e);
                         }
@@ -805,6 +806,7 @@ impl CustomSync {
         received_blocks: Arc<Mutex<Vec<Block>>>,
         signing_key: Arc<Mutex<Option<SigningKey>>>,
         rate_limiters: Arc<Mutex<HashMap<SocketAddr, PerPeerRateLimiter>>>,
+        listen_port: u16,
     ) -> Result<(), SyncError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -815,7 +817,7 @@ impl CustomSync {
             .map_err(|_| SyncError::ConnectionTimeout)??;
 
         match inbound {
-            NetworkMessage::Handshake { peer_id: remote_peer_id, version, challenge } => {
+            NetworkMessage::Handshake { peer_id: remote_peer_id, version, challenge, listen_port: remote_listen_port } => {
                 if version != 1 {
                     return Err(SyncError::NetworkError("Version mismatch".to_string()));
                 }
@@ -836,6 +838,7 @@ impl CustomSync {
                         version: 1,
                         signature,
                         challenge: my_challenge,
+                        listen_port,
                     },
                 )
                 .await?;
@@ -859,30 +862,93 @@ impl CustomSync {
                     _ => return Err(SyncError::AuthenticationFailed),
                 }
 
+                // Construct correct peer address using the remote's reported listen port.
+                // Do NOT use the TCP source port (ephemeral) for outbound connections.
+                let peer_listen_addr = SocketAddr::new(addr.ip(), remote_listen_port);
+
                 log::info!(
-                    "Inbound peer connected and mutually authenticated: {} at {}",
+                    "Inbound peer connected and mutually authenticated: {} at {} (listen port {})",
                     hex::encode(remote_peer_id.to_bytes()),
-                    addr
+                    addr,
+                    remote_listen_port
                 );
 
-                // Register inbound peer, deduplicating any dummy entries for same address
+                // Register inbound peer with their listen address
                 {
                     let mut peers_guard = peers.write().await;
                     // Remove stale entries with same address but different (dummy) ID
                     let stale: Vec<PublicKey> = peers_guard
                         .iter()
-                        .filter(|(id, a)| **a == addr && **id != remote_peer_id)
+                        .filter(|(id, a)| **a == peer_listen_addr && **id != remote_peer_id)
                         .map(|(id, _)| *id)
                         .collect();
                     for id in stale {
                         peers_guard.remove(&id);
                     }
                     if peers_guard.len() < MAX_KNOWN_PEERS {
-                        peers_guard.insert(remote_peer_id, addr);
+                        peers_guard.insert(remote_peer_id, peer_listen_addr);
                     }
                 }
             }
             _ => return Err(SyncError::InvalidMessage),
+        }
+        // After handshake, proactively check if the connecting peer is ahead
+        // and backfill blocks. This enables sync even when only one side can
+        // initiate outbound connections (e.g. behind NAT).
+        // Handles race where both sides send GetChainHead simultaneously.
+        {
+            let mut retries = 2;
+            let mut got_response = false;
+            while retries > 0 && !got_response {
+                let _ = Self::send_message(&mut socket, NetworkMessage::GetChainHead).await;
+                match timeout(Duration::from_secs(5), Self::receive_message(&mut socket)).await {
+                    Ok(Ok(NetworkMessage::ChainHeadResponse { latest_block_hash: _, height })) => {
+                        let (local_head_hash, local_height) =
+                            Self::chain_head_from_storage(&block_cache, &storage).await;
+
+                        if height > local_height {
+                            log::info!(
+                                "Inbound peer is ahead (peer_height={}, local_height={}), requesting backfill",
+                                height, local_height
+                            );
+                            let from_height = local_height.saturating_add(1);
+                            let to_height = height;
+                            let _ = Self::send_message(
+                                &mut socket,
+                                NetworkMessage::GetBlocks { from_height, to_height },
+                            )
+                            .await;
+
+                            if let Ok(Ok(NetworkMessage::BlocksResponse { mut blocks })) =
+                                timeout(Duration::from_secs(10), Self::receive_message(&mut socket)).await
+                            {
+                                blocks.sort_by_key(|b| b.index);
+                                if blocks.first().is_some_and(|b| b.index == local_height && b.hash == local_head_hash) {
+                                    let _ = blocks.remove(0);
+                                }
+                                let mut recv = received_blocks.lock().await;
+                                for block in blocks {
+                                    if recv.len() < MAX_RECEIVED_BLOCKS_QUEUE {
+                                        recv.push(block);
+                                    }
+                                }
+                                log::info!("Queued {} backfill blocks from inbound peer", recv.len());
+                            }
+                        }
+                        got_response = true;
+                    }
+                    Ok(Ok(NetworkMessage::GetChainHead)) => {
+                        // Peer also sent GetChainHead simultaneously; respond and retry
+                        log::debug!("Received GetChainHead during bidirectional sync, responding and retrying");
+                        let (lh, lh2) = Self::chain_head_from_storage(&block_cache, &storage).await;
+                        let _ = Self::send_message(&mut socket, NetworkMessage::ChainHeadResponse {
+                            latest_block_hash: lh, height: lh2,
+                        }).await;
+                        retries -= 1;
+                    }
+                    _ => break,
+                }
+            }
         }
         // After handshake, enter message loop
         loop {
@@ -1433,7 +1499,7 @@ impl CustomSync {
 
         Self::send_message(
             &mut stream,
-            NetworkMessage::Handshake { peer_id: self.peer_id, version: 1, challenge },
+            NetworkMessage::Handshake { peer_id: self.peer_id, version: 1, challenge, listen_port: self.listen_addr.port() },
         )
         .await?;
 
@@ -1443,6 +1509,7 @@ impl CustomSync {
                 peer_id: remote_peer_id,
                 signature,
                 challenge: remote_challenge,
+                listen_port: remote_listen_port,
                 ..
             } => {
                 // 1. Verify their signature of our challenge
@@ -1465,20 +1532,38 @@ impl CustomSync {
                 )
                 .await?;
 
-                // Deduplicate: replace dummy peer ID with real one
-                self.dedup_peer(remote_peer_id, peer.address).await;
+                // Register peer with the server's reported listen port
+                let peer_addr = SocketAddr::new(peer.address.ip(), remote_listen_port);
+                self.dedup_peer(remote_peer_id, peer_addr).await;
 
                 log::info!(
-                    "Outbound peer mutually authenticated: {}",
-                    hex::encode(remote_peer_id.to_bytes())
+                    "Outbound peer mutually authenticated: {} at {}",
+                    hex::encode(remote_peer_id.to_bytes()),
+                    peer_addr
                 );
             }
             _ => return Err(SyncError::AuthenticationFailed),
         }
 
-        // Request chain head
-        Self::send_message(&mut stream, NetworkMessage::GetChainHead).await?;
-        let chain_head = Self::receive_message(&mut stream).await?;
+        // Request chain head (with retry for bidirectional sync race)
+        let mut retries = 2;
+        let chain_head = loop {
+            Self::send_message(&mut stream, NetworkMessage::GetChainHead).await?;
+            let msg = Self::receive_message(&mut stream).await?;
+            match msg {
+                NetworkMessage::ChainHeadResponse { .. } => break msg,
+                NetworkMessage::GetChainHead if retries > 0 => {
+                    // Server also sent GetChainHead simultaneously; respond and retry
+                    log::debug!("Received GetChainHead during sync, responding and retrying");
+                    let (lh, lh2) = Self::chain_head_from_storage(&self.block_cache, &self.storage).await;
+                    let _ = Self::send_message(&mut stream, NetworkMessage::ChainHeadResponse {
+                        latest_block_hash: lh, height: lh2,
+                    }).await;
+                    retries -= 1;
+                }
+                _ => return Err(SyncError::InvalidMessage),
+            }
+        };
 
         match chain_head {
             NetworkMessage::ChainHeadResponse { latest_block_hash, height } => {
@@ -1622,11 +1707,13 @@ impl SyncLayer for CustomSync {
     ) -> Result<Block, SyncError> {
         // Skip peers in exponential backoff
         if self.peer_in_backoff(peer.address).await {
+            log::info!("[SYNC] Peer {} is in backoff — skipping", peer.address);
             return Err(SyncError::SynchronizationError(
                 "Peer in backoff".to_string(),
             ));
         }
 
+        log::info!("[SYNC] sync_with_peer_inner starting for {}", peer.address);
         let result = self
             .sync_with_peer_inner(peer, local_chain_state)
             .await;
@@ -1663,7 +1750,7 @@ impl SyncLayer for CustomSync {
 
                 if Self::send_message(
                     &mut stream,
-                    NetworkMessage::Handshake { peer_id: self.peer_id, version: 1, challenge },
+                    NetworkMessage::Handshake { peer_id: self.peer_id, version: 1, challenge, listen_port: self.listen_addr.port() },
                 )
                 .await
                 .is_ok()

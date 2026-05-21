@@ -1,0 +1,38 @@
+[node]
+data_dir = "./local-data"
+port = 8080
+health_port = 8080
+mempool_limit = 10000
+ws_port = 8081
+
+[consensus]
+block_time_ms = 5000
+max_transactions_per_block = 1000
+authority_key = "b6dd606a5390798bcc4d1f81508064930bc76fdb0de139d6fd187f938d846092"
+chain_id = 1
+min_gas_price = 1
+finality_depth = 12
+max_reorg_depth = 50
+quorum_threshold = 1
+
+[storage]
+cache_size_mb = 256
+compression = true
+backend = "Sled"
+backup_interval_secs = 0
+
+[network]
+max_peers = 50
+connection_timeout_ms = 30000
+tls_enabled = false
+tls_cert_path = ""
+tls_key_path = ""
+tls_ca_cert_path = ""
+allowed_peers = []
+
+[logging]
+level = "debug"
+file = "local-baals.log"
+json_format = false
+log_max_size_mb = 100
+log_max_files = 5

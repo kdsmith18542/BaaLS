@@ -513,6 +513,8 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                     }
 
                     // Sync with peers to check if we're behind
+                    eprintln!("[TICK] Block production tick — calling sync_with_all_peers");
+                    info!("[TICK] Block production tick — calling sync_with_all_peers");
                     self_clone.sync_with_all_peers();
                 }
                 debug!("Block production loop terminated");
@@ -1537,12 +1539,14 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
     /// Check all known peers and sync with any that are ahead.
     fn sync_with_all_peers(&self) {
+        eprintln!("[SYNC] sync_with_all_peers called (sync_in_flight={})", self.sync_in_flight.load(Ordering::Acquire));
+        info!("[SYNC] sync_with_all_peers called (sync_in_flight={})", self.sync_in_flight.load(Ordering::Acquire));
         if self
             .sync_in_flight
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            debug!("[SYNC] Skipping sync tick because a sync worker is already in flight");
+            info!("[SYNC] Skipping sync tick because a sync worker is already in flight");
             return;
         }
 
@@ -1551,29 +1555,32 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
 
         // Spawn on the current tokio runtime instead of creating a new one per tick
         tokio::runtime::Handle::current().spawn(async move {
+            log::info!("[SYNC] sync_with_all_peers: starting discovery");
             let peers = match sync_layer.discover_peers().await {
                 Ok(p) => p,
-                Err(_) => {
+                Err(e) => {
+                    log::info!("[SYNC] discover_peers failed: {}", e);
                     self_clone.sync_in_flight.store(false, Ordering::Release);
                     return;
                 }
             };
+            log::info!("[SYNC] sync_with_all_peers: found {} peers", peers.len());
             if peers.is_empty() {
                 self_clone.sync_in_flight.store(false, Ordering::Release);
                 return;
             }
             for peer in &peers {
+                log::info!("[SYNC] Attempting sync with peer {} (id={:?})", peer.address, &peer.id.to_bytes()[..4]);
                 // Re-read chain state after each peer to avoid stale comparisons
                 let chain_state = self_clone.chain_state.lock().unwrap().clone();
+                log::info!("[SYNC] Local chain state: height={}, hash={}", chain_state.latest_block_index, crate::types::format_hex(&chain_state.latest_block_hash));
                 match sync_layer.sync_with_peer(peer, &chain_state).await {
                     Ok(_block) => {
-                        debug!("[SYNC] Synced with peer {}", peer.address);
+                        info!("[SYNC] Synced with peer {} — applying received blocks", peer.address);
                         self_clone.apply_received_blocks();
                     }
                     Err(e) => {
-                        if !matches!(e, crate::sync::SyncError::SynchronizationError(_)) {
-                            debug!("[SYNC] Sync with {} failed: {}", peer.address, e);
-                        }
+                        info!("[SYNC] Sync with {} result: {}", peer.address, e);
                     }
                 }
             }

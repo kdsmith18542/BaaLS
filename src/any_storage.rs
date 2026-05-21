@@ -235,6 +235,29 @@ impl Storage for AnyStorage {
     fn apply_batch(&self, batch: StorageBatch) -> Result<(), StorageError> {
         dispatch!(self, apply_batch, batch)
     }
+    fn apply_batch_with_rollback(
+        &self,
+        batch: StorageBatch,
+        block_hash: &[u8; 32],
+        block_index: u64,
+    ) -> Result<(), StorageError> {
+        dispatch!(self, apply_batch_with_rollback, batch, block_hash, block_index)
+    }
+    fn get_rollback_log(
+        &self,
+        block_hash: &[u8; 32],
+    ) -> Result<Option<crate::rollback::RollbackLog>, StorageError> {
+        dispatch!(self, get_rollback_log, block_hash)
+    }
+    fn apply_rollback_log(
+        &self,
+        log: &crate::rollback::RollbackLog,
+    ) -> Result<(), StorageError> {
+        dispatch!(self, apply_rollback_log, log)
+    }
+    fn delete_rollback_log(&self, block_hash: &[u8; 32]) -> Result<(), StorageError> {
+        dispatch!(self, delete_rollback_log, block_hash)
+    }
     fn compact(&self) -> Result<(), StorageError> {
         dispatch!(self, compact)
     }
