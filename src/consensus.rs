@@ -1,6 +1,6 @@
 use ed25519_dalek::{Signer, SigningKey};
 use hex;
-use log::{debug, info};
+use log::{debug, info, warn};
 use thiserror::Error;
 
 use crate::types::{Block, ChainState, CryptoError, PublicKey, Transaction};
@@ -181,7 +181,16 @@ impl PoAConsensus {
         } else {
             match signers_snapshot.iter().find(|pk| hex::encode(pk.to_bytes()) == *signer_hex) {
                 Some(pk) => *pk,
-                None => return Err(ConsensusError::UnauthorizedSigner),
+                None => {
+                    warn!(
+                        "[CONSENSUS] UnauthorizedSigner: block signer={} primary={} additional_count={} additional={:?}",
+                        signer_hex,
+                        primary_key_hex,
+                        signers_snapshot.len(),
+                        signers_snapshot.iter().map(|pk| hex::encode(pk.to_bytes())).collect::<Vec<_>>()
+                    );
+                    return Err(ConsensusError::UnauthorizedSigner);
+                }
             }
         };
 
