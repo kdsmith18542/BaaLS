@@ -76,6 +76,8 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 - **Solidity ABI compatibility aliases are implemented for core Resurgence contracts.** CamelCase entrypoints used by existing EVM scripts/frontends now map to WASM exports across reward distributor, token, dead-coin pool, resurge staking, and manager interfaces.
 - **Governance ABI compatibility aliases are implemented.** Governance now exposes camelCase query/mutation endpoints such as `castVote`, `latestProposalId`, `getProposal`, `hasVoted`, `quorum`, and `state` for integration compatibility.
 - **RewardDistributor oracle-management ABI coverage was added.** `setPriceOracle`, `setOracleEnabled`, `setFallbackPrice`, `getResurgePrice`, and `getEmissionMultiplier` entrypoints are available; current price resolution relies on stored fallback data under BaaLS runtime constraints.
+- **Runtime synchronous subcall-result support is implemented.** `baals_call_contract` now executes subcalls immediately, `baals_read_call_result` can read same-call return bytes, and subcall side effects are merged in-call for Solidity-style inter-contract query flows.
+- **StakingPoolManager dynamic-rate parity is restored to Solidity semantics.** `calculateDynamicRate(poolAddress)`, `applyDynamicRate(deadCoin)`, and `applyDynamicRateAll()` now derive TVL and emission multiplier from live pool/distributor calls instead of caller-supplied TVL/multiplier arguments.
 
 ## Known Issues
 

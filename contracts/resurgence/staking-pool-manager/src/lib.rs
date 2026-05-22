@@ -2,7 +2,8 @@ use resurgence_common::auth::{
     check_role, emergency_pauser_role, grant_role, timelock_role, DEFAULT_ADMIN_ROLE,
 };
 use resurgence_common::host::{
-    call_contract, deserialize_arg, emit_event, get_input_args, return_data, revert, sender,
+    call_contract, deserialize_arg, emit_event, get_input_args, read_call_result, return_data,
+    revert, sender,
 };
 use resurgence_common::math::{mul, sub};
 use resurgence_common::storage::{StorageMap, StorageValue};
@@ -21,6 +22,59 @@ const MAX_REWARD_RATE: StorageValue<u128> = StorageValue::new(b"max_reward_rate"
 const DEAD_COIN_TO_POOL: StorageMap<Address, Address> = StorageMap::new(b"dead_coin_to_pool");
 const SUPPORTED_DEAD_COINS: StorageValue<Vec<Address>> = StorageValue::new(b"supported_dead_coins");
 const PAUSED: StorageValue<bool> = StorageValue::new(b"paused");
+
+fn call_u128(callee: &Address, method: &str, args: Vec<Vec<u8>>) -> u128 {
+    let payload = bincode::serialize(&args).unwrap_or_else(|_| revert("Serialize call args failed"));
+    let call_idx = call_contract(callee, method, &payload, 0);
+    if call_idx < 0 {
+        revert("External call failed");
+    }
+
+    let mut buf = vec![0u8; 128];
+    let written = read_call_result(call_idx, &mut buf);
+    if written < 0 {
+        revert("Read call result failed");
+    }
+
+    bincode::deserialize::<u128>(&buf[..written as usize])
+        .unwrap_or_else(|_| revert("Deserialize call result failed"))
+}
+
+fn calculate_dynamic_rate_for_pool(pool: Address) -> u128 {
+    if !DYNAMIC_RATE_ENABLED.get_or_default() {
+        return call_u128(&pool, "reward_rate_per_second", Vec::new());
+    }
+
+    let tvl = call_u128(&pool, "total_staked_supply", Vec::new());
+    let tvl_millions = tvl / 1_000_000_000_000_000_000_000_000u128; // 1M * 1e18
+
+    let base = BASE_REWARD_RATE.get_or_default();
+    let decay = TVL_DECAY_FACTOR.get_or_default();
+    let reduction = if tvl_millions > 0 {
+        mul(base, mul(tvl_millions, decay)) / 10000
+    } else {
+        0
+    };
+
+    let mut dynamic_rate = if reduction < base {
+        sub(base, reduction)
+    } else {
+        MIN_REWARD_RATE.get_or_default()
+    };
+
+    let max_rate = MAX_REWARD_RATE.get_or_default();
+    let min_rate = MIN_REWARD_RATE.get_or_default();
+    if dynamic_rate > max_rate {
+        dynamic_rate = max_rate;
+    }
+    if dynamic_rate < min_rate {
+        dynamic_rate = min_rate;
+    }
+
+    let distributor = REWARD_DISTRIBUTOR.get().unwrap_or_else(|| revert("Distributor not set"));
+    let multiplier = call_u128(&distributor, "get_emission_multiplier", Vec::new());
+    mul(dynamic_rate, multiplier) / 10000
+}
 
 #[no_mangle]
 pub extern "C" fn initialize(_ptr: i32, len: i32) -> i32 {
@@ -248,38 +302,8 @@ pub extern "C" fn set_dynamic_rate_params(_ptr: i32, len: i32) -> i32 {
 #[no_mangle]
 pub extern "C" fn calculate_dynamic_rate(_ptr: i32, len: i32) -> i32 {
     let args = get_input_args(len);
-    let tvl: u128 = deserialize_arg(&args, 0);
-    let multiplier: u128 = deserialize_arg(&args, 1);
-
-    if !DYNAMIC_RATE_ENABLED.get_or_default() {
-        return return_data(&BASE_REWARD_RATE.get_or_default());
-    }
-
-    let tvl_millions = tvl / 1_000_000_000_000_000_000_000_000u128; // tvl / 10^24 (1M * 1e18)
-    let base = BASE_REWARD_RATE.get_or_default();
-    let decay = TVL_DECAY_FACTOR.get_or_default();
-    let reduction = if tvl_millions > 0 { mul(base, mul(tvl_millions, decay)) / 10000 } else { 0 };
-
-    let mut dynamic_rate = base;
-    if reduction < dynamic_rate {
-        dynamic_rate = sub(dynamic_rate, reduction);
-    } else {
-        dynamic_rate = MIN_REWARD_RATE.get_or_default();
-    }
-
-    let max_rate = MAX_REWARD_RATE.get_or_default();
-    let min_rate = MIN_REWARD_RATE.get_or_default();
-
-    if dynamic_rate > max_rate {
-        dynamic_rate = max_rate;
-    }
-    if dynamic_rate < min_rate {
-        dynamic_rate = min_rate;
-    }
-
-    // Apply multiplier
-    dynamic_rate = mul(dynamic_rate, multiplier) / 10000;
-
+    let pool: Address = deserialize_arg(&args, 0);
+    let dynamic_rate = calculate_dynamic_rate_for_pool(pool);
     return_data(&dynamic_rate)
 }
 
@@ -287,8 +311,6 @@ pub extern "C" fn calculate_dynamic_rate(_ptr: i32, len: i32) -> i32 {
 pub extern "C" fn apply_dynamic_rate(_ptr: i32, len: i32) -> i32 {
     let args = get_input_args(len);
     let dead_coin: Address = deserialize_arg(&args, 0);
-    let tvl: u128 = deserialize_arg(&args, 1);
-    let multiplier: u128 = deserialize_arg(&args, 2);
 
     check_role(timelock_role(), sender());
     if PAUSED.get_or_default() {
@@ -298,36 +320,7 @@ pub extern "C" fn apply_dynamic_rate(_ptr: i32, len: i32) -> i32 {
     let pool = DEAD_COIN_TO_POOL
         .get(&dead_coin)
         .unwrap_or_else(|| revert("StakingPoolManager: pool not found"));
-
-    // Call calculate_dynamic_rate logic directly.
-    let mut reduction = 0u128;
-    let base = BASE_REWARD_RATE.get_or_default();
-    if DYNAMIC_RATE_ENABLED.get_or_default() {
-        let tvl_millions = tvl / 1_000_000_000_000_000_000_000_000u128;
-        let decay = TVL_DECAY_FACTOR.get_or_default();
-        if tvl_millions > 0 {
-            reduction = mul(base, mul(tvl_millions, decay)) / 10000;
-        }
-    }
-
-    let mut dynamic_rate = base;
-    if reduction < dynamic_rate {
-        dynamic_rate = sub(dynamic_rate, reduction);
-    } else {
-        dynamic_rate = MIN_REWARD_RATE.get_or_default();
-    }
-
-    let max_rate = MAX_REWARD_RATE.get_or_default();
-    let min_rate = MIN_REWARD_RATE.get_or_default();
-
-    if dynamic_rate > max_rate {
-        dynamic_rate = max_rate;
-    }
-    if dynamic_rate < min_rate {
-        dynamic_rate = min_rate;
-    }
-
-    dynamic_rate = mul(dynamic_rate, multiplier) / 10000;
+    let dynamic_rate = calculate_dynamic_rate_for_pool(pool);
 
     let call_args = vec![bincode::serialize(&dynamic_rate).unwrap()];
     let serialized_call_args = bincode::serialize(&call_args).unwrap();
@@ -342,54 +335,21 @@ pub extern "C" fn apply_dynamic_rate(_ptr: i32, len: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn apply_dynamic_rate_all(_ptr: i32, len: i32) -> i32 {
-    let args = get_input_args(len);
-    let dead_coins: Vec<Address> = deserialize_arg(&args, 0);
-    let tvls: Vec<u128> = deserialize_arg(&args, 1);
-    let multiplier: u128 = deserialize_arg(&args, 2);
+    let _args = get_input_args(len);
 
     check_role(timelock_role(), sender());
     if PAUSED.get_or_default() {
         revert("Pausable: paused");
     }
-    if dead_coins.len() != tvls.len() {
-        revert("Mismatched arrays");
-    }
-    if dead_coins.len() > 50 {
-        revert("Batch size too large");
-    }
 
-    for i in 0..dead_coins.len() {
-        let dead_coin = dead_coins[i];
-        let tvl = tvls[i];
-        let pool = DEAD_COIN_TO_POOL
-            .get(&dead_coin)
-            .unwrap_or_else(|| revert("StakingPoolManager: pool not found"));
-
-        let tvl_millions = tvl / 1_000_000_000_000_000_000_000_000u128;
-        let base = BASE_REWARD_RATE.get_or_default();
-        let decay = TVL_DECAY_FACTOR.get_or_default();
-        let reduction = if DYNAMIC_RATE_ENABLED.get_or_default() && tvl_millions > 0 {
-            mul(base, mul(tvl_millions, decay)) / 10000
-        } else {
-            0
+    let coins = SUPPORTED_DEAD_COINS.get_or_default();
+    let limit = core::cmp::min(coins.len(), 50);
+    for dead_coin in coins.iter().take(limit) {
+        let Some(pool) = DEAD_COIN_TO_POOL.get(dead_coin) else {
+            continue;
         };
 
-        let mut dynamic_rate = if reduction < base {
-            sub(base, reduction)
-        } else {
-            MIN_REWARD_RATE.get_or_default()
-        };
-
-        let max_rate = MAX_REWARD_RATE.get_or_default();
-        let min_rate = MIN_REWARD_RATE.get_or_default();
-        if dynamic_rate > max_rate {
-            dynamic_rate = max_rate;
-        }
-        if dynamic_rate < min_rate {
-            dynamic_rate = min_rate;
-        }
-
-        dynamic_rate = mul(dynamic_rate, multiplier) / 10000;
+        let dynamic_rate = calculate_dynamic_rate_for_pool(pool);
         let call_args = vec![bincode::serialize(&dynamic_rate).unwrap()];
         let serialized_call_args = bincode::serialize(&call_args).unwrap();
         let res = call_contract(&pool, "set_reward_rate", &serialized_call_args, 0);
@@ -399,7 +359,7 @@ pub extern "C" fn apply_dynamic_rate_all(_ptr: i32, len: i32) -> i32 {
 
         emit_event(
             b"RewardRateUpdated",
-            &bincode::serialize(&(dead_coin, dynamic_rate)).unwrap(),
+            &bincode::serialize(&(*dead_coin, dynamic_rate)).unwrap(),
         );
     }
 
@@ -604,32 +564,18 @@ pub extern "C" fn setDynamicRateParams(ptr: i32, len: i32) -> i32 {
 #[allow(non_snake_case)]
 #[no_mangle]
 pub extern "C" fn applyDynamicRate(ptr: i32, len: i32) -> i32 {
-    let args = get_input_args(len);
-    if args.len() == 1 {
-        revert("StakingPoolManager: BaaLS applyDynamicRate expects (deadCoin, tvl, multiplier)");
-    }
     apply_dynamic_rate(ptr, len)
 }
 
 #[allow(non_snake_case)]
 #[no_mangle]
 pub extern "C" fn applyDynamicRateAll(ptr: i32, len: i32) -> i32 {
-    let args = get_input_args(len);
-    if args.is_empty() {
-        revert(
-            "StakingPoolManager: BaaLS applyDynamicRateAll expects (deadCoins, tvls, multiplier)",
-        );
-    }
     apply_dynamic_rate_all(ptr, len)
 }
 
 #[allow(non_snake_case)]
 #[no_mangle]
 pub extern "C" fn calculateDynamicRate(ptr: i32, len: i32) -> i32 {
-    let args = get_input_args(len);
-    if args.len() == 1 && args[0].len() == 32 {
-        revert("StakingPoolManager: BaaLS calculateDynamicRate expects (tvl, multiplier)");
-    }
     calculate_dynamic_rate(ptr, len)
 }
 

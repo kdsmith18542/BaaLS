@@ -1087,16 +1087,14 @@ fn test_staking_pool_manager_batch_stake_and_dynamic_rate() {
         vec![bincode::serialize(&true).unwrap()],
     );
 
-    let tvl = 2_000_000_000_000_000_000_000_000u128; // 2M * 1e18
-    let multiplier = 15_000u128; // 1.5x
     let dynamic_rate = query_contract::<u128>(
         &runtime,
         &admin_pk,
         &manager_id,
         "calculateDynamicRate",
-        vec![bincode::serialize(&tvl).unwrap(), bincode::serialize(&multiplier).unwrap()],
+        vec![bincode::serialize(&pool_id.to_bytes()).unwrap()],
     );
-    assert_eq!(dynamic_rate, 1_470_000_000_000_000_000u128);
+    assert_eq!(dynamic_rate, 1_500_000_000_000_000_000u128);
 
     submit_contract_call_tx(
         &runtime,
@@ -1104,11 +1102,7 @@ fn test_staking_pool_manager_batch_stake_and_dynamic_rate() {
         &admin_sk,
         &manager_id,
         "applyDynamicRate",
-        vec![
-            bincode::serialize(&deadcoin_id.to_bytes()).unwrap(),
-            bincode::serialize(&tvl).unwrap(),
-            bincode::serialize(&multiplier).unwrap(),
-        ],
+        vec![bincode::serialize(&deadcoin_id.to_bytes()).unwrap()],
     );
 
     let pool_rate =
@@ -1121,11 +1115,7 @@ fn test_staking_pool_manager_batch_stake_and_dynamic_rate() {
         &admin_sk,
         &manager_id,
         "applyDynamicRateAll",
-        vec![
-            bincode::serialize(&vec![deadcoin_id.to_bytes()]).unwrap(),
-            bincode::serialize(&vec![tvl]).unwrap(),
-            bincode::serialize(&multiplier).unwrap(),
-        ],
+        vec![],
     );
     let pool_rate_after_all =
         query_contract::<u128>(&runtime, &admin_pk, &pool_id, "reward_rate_per_second", vec![]);

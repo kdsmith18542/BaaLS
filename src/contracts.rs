@@ -1,5 +1,7 @@
 use crate::storage::Storage;
-use crate::types::{ContractExecutionSideEffects, ContractId, PublicKey, TransactionSignature};
+use crate::types::{
+    ContractExecutionSideEffects, ContractId, PublicKey, StorageUpdateSet, TransactionSignature,
+};
 use ed25519_dalek::Signature as Ed25519Signature;
 use log::{debug, info, warn};
 use lru::LruCache;
@@ -11,8 +13,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use wasmtime::{Caller, Config, Engine, Linker, Module, Store};
-
-type InterContractCall = (Vec<u8>, Vec<u8>, Vec<Vec<u8>>, u64);
 
 #[derive(Debug, Error)]
 pub enum ContractError {
@@ -287,10 +287,11 @@ struct HostState {
     reverted: bool,
     events: Vec<(Vec<u8>, Vec<u8>)>,
     last_memory_size: usize,
-    inter_contract_calls: Vec<InterContractCall>,
     inter_contract_results: Vec<Vec<u8>>,
     deleted_keys: Vec<Vec<u8>>,
     permissions: ContractPermissions,
+    sync_subcall_side_effects: ContractExecutionSideEffects,
+    engine_ptr: *const (),
 }
 
 // ─── Contract Engine ───
@@ -417,10 +418,11 @@ impl<S: Storage> BaaLSContractEngine<S> {
             reverted: false,
             events: Vec::new(),
             last_memory_size: 0,
-            inter_contract_calls: Vec::new(),
             inter_contract_results: pre_existing_results,
             deleted_keys: Vec::new(),
             permissions: ContractPermissions::all(),
+            sync_subcall_side_effects: ContractExecutionSideEffects::default(),
+            engine_ptr: self as *const _ as *const (),
         };
 
         let mut store = Store::new(engine, host_state);
@@ -495,83 +497,19 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     std::mem::take(&mut host_state.deleted_keys),
                     std::mem::take(&mut host_state.events),
                 );
-
-                let pending_calls = std::mem::take(&mut host_state.inter_contract_calls);
-                let storage_ref = storage.clone_storage();
-                let subcall_caller = contract_id.to_bytes();
-
-                // Process inter-contract calls
-                let mut call_results = Vec::new();
-                for (callee_id_bytes, method_bytes, call_args, _call_value) in &pending_calls {
-                    let callee_method = String::from_utf8_lossy(method_bytes).to_string();
-                    let callee_id = if callee_id_bytes.len() == 32 {
-                        let mut arr = [0u8; 32];
-                        arr.copy_from_slice(callee_id_bytes);
-                        ContractId::from_bytes(&arr)
-                    } else {
-                        call_results.push(vec![]);
-                        continue;
-                    };
-
-                    let callee_wasm = match storage_ref.get_contract_code(&callee_id) {
-                        Ok(Some(code)) => code,
-                        _ => {
-                            call_results.push(vec![]);
-                            continue;
-                        }
-                    };
-
-                    match self.execute_wasm_contract(
-                        &callee_wasm,
-                        &callee_method,
-                        call_args,
-                        &subcall_caller,
-                        &callee_id,
-                        &*storage_ref,
-                        read_only,
-                        gas_limit.saturating_sub(gas_used),
-                        block_index,
-                        block_timestamp,
-                    ) {
-                        Ok((result_data, _, sub_side_effects)) => {
-                            call_results.push(result_data);
-                            // MERGE side effects
-                            for (sub_contract_id, sub_storage_updates) in
-                                sub_side_effects.storage_updates
-                            {
-                                let entry = side_effects
-                                    .storage_updates
-                                    .entry(sub_contract_id)
-                                    .or_default();
-                                entry.writes.extend(sub_storage_updates.writes);
-                                entry.deletes.extend(sub_storage_updates.deletes);
-                            }
-                            for (sub_contract_id, sub_events) in sub_side_effects.events {
-                                let entry = side_effects.events.entry(sub_contract_id).or_default();
-                                entry.extend(sub_events);
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                "[CONTRACTS] Subcall from {} to {}::{} failed: {:?}",
-                                hex::encode(contract_id.to_bytes()),
-                                hex::encode(callee_id_bytes),
-                                callee_method,
-                                e
-                            );
-                            return Err(ContractError::InterContractCallError(format!(
-                                "Subcall {}::{} failed: {}",
-                                hex::encode(callee_id_bytes),
-                                callee_method,
-                                e
-                            )));
-                        }
-                    }
+                let sub_side_effects = std::mem::take(&mut host_state.sync_subcall_side_effects);
+                for (sub_contract_id, sub_storage_updates) in sub_side_effects.storage_updates {
+                    let entry =
+                        side_effects.storage_updates.entry(sub_contract_id).or_insert_with(|| {
+                            StorageUpdateSet { writes: HashMap::new(), deletes: Vec::new() }
+                        });
+                    entry.writes.extend(sub_storage_updates.writes);
+                    entry.deletes.extend(sub_storage_updates.deletes);
                 }
-
-                // Store results back into HostState so baals_read_call_result can access them
-                let host_state = store.data_mut();
-                host_state.inter_contract_results = call_results;
+                for (sub_contract_id, sub_events) in sub_side_effects.events {
+                    let entry = side_effects.events.entry(sub_contract_id).or_default();
+                    entry.extend(sub_events);
+                }
 
                 Ok((result_data, gas_used, side_effects))
             }
@@ -1050,18 +988,102 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     if !consume_host_fuel(&mut caller, 1000) {
                         return -1;
                     }
-                    let state = caller.data_mut();
+                    let state = caller.data();
                     if state.read_only {
                         return -1;
                     }
                     if !state.permissions.call_contracts {
                         return -1;
                     }
-                    let native_value = if value < 0 { 0 } else { value as u64 };
+                    let engine_ptr = state.engine_ptr;
+                    let storage_ref = state.storage.clone_storage();
+                    let block_index = state.block_index;
+                    let block_timestamp = state.block_timestamp;
+                    let subcall_caller = state.contract_id.to_bytes();
+                    let read_only = state.read_only;
+                    let _native_value = if value < 0 { 0 } else { value as u64 };
+                    let _ = state;
+
+                    if callee.len() != 32 {
+                        return -1;
+                    }
+
+                    let mut callee_id_bytes = [0u8; 32];
+                    callee_id_bytes.copy_from_slice(&callee);
+                    let callee_id = ContractId::from_bytes(&callee_id_bytes);
+                    let callee_method = String::from_utf8_lossy(&method).to_string();
+
                     let parsed_args: Vec<Vec<u8>> =
                         bincode::deserialize(&args).unwrap_or_else(|_| vec![args.to_vec()]);
-                    state.inter_contract_calls.push((callee, method, parsed_args, native_value));
-                    state.inter_contract_calls.len() as i32 - 1
+
+                    let callee_wasm = match storage_ref.get_contract_code(&callee_id) {
+                        Ok(Some(code)) => code,
+                        _ => return -1,
+                    };
+
+                    let available_gas = match caller.get_fuel() {
+                        Ok(v) => v,
+                        Err(_) => 0,
+                    };
+
+                    let engine_ref = unsafe { &*(engine_ptr as *const BaaLSContractEngine<S>) };
+                    let subcall = engine_ref.execute_wasm_contract(
+                        &callee_wasm,
+                        &callee_method,
+                        &parsed_args,
+                        &subcall_caller,
+                        &callee_id,
+                        &*storage_ref,
+                        read_only,
+                        available_gas,
+                        block_index,
+                        block_timestamp,
+                    );
+
+                    match subcall {
+                        Ok((result_data, sub_gas_used, sub_side_effects)) => {
+                            if !consume_host_fuel(&mut caller, sub_gas_used) {
+                                return -1;
+                            }
+                            let state = caller.data_mut();
+                            let call_idx = state.inter_contract_results.len() as i32;
+                            state.inter_contract_results.push(result_data);
+
+                            for (sub_contract_id, sub_storage_updates) in
+                                sub_side_effects.storage_updates
+                            {
+                                let entry = state
+                                    .sync_subcall_side_effects
+                                    .storage_updates
+                                    .entry(sub_contract_id)
+                                    .or_insert_with(|| StorageUpdateSet {
+                                        writes: HashMap::new(),
+                                        deletes: Vec::new(),
+                                    });
+                                entry.writes.extend(sub_storage_updates.writes);
+                                entry.deletes.extend(sub_storage_updates.deletes);
+                            }
+                            for (sub_contract_id, sub_events) in sub_side_effects.events {
+                                let entry = state
+                                    .sync_subcall_side_effects
+                                    .events
+                                    .entry(sub_contract_id)
+                                    .or_default();
+                                entry.extend(sub_events);
+                            }
+
+                            call_idx
+                        }
+                        Err(e) => {
+                            warn!(
+                                "[CONTRACTS] synchronous subcall {}::{} failed: {}",
+                                hex::encode(callee_id.to_bytes()),
+                                callee_method,
+                                e
+                            );
+                            -1
+                        }
+                    }
                 },
             )
             .map_err(|e| ContractError::HostFunctionError(e.to_string()))?;
