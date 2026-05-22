@@ -79,9 +79,25 @@ pub extern "C" fn mint_and_distribute(_ptr: i32, len: i32) -> i32 {
         revert("Pausable: paused");
     }
     let args = get_input_args(len);
-    let caller_pool: Address = deserialize_arg(&args, 0);
-    let to: Address = deserialize_arg(&args, 1);
-    let amount: u128 = deserialize_arg(&args, 2);
+    let caller_pool = sender();
+    let (to, amount) = match args.len() {
+        2 => {
+            let to: Address = deserialize_arg(&args, 0);
+            let amount: u128 = deserialize_arg(&args, 1);
+            (to, amount)
+        }
+        3 => {
+            // Backward-compatible ABI path: enforce claimed pool identity matches caller.
+            let claimed_pool: Address = deserialize_arg(&args, 0);
+            if claimed_pool != caller_pool {
+                revert("RewardDistributor: caller pool mismatch");
+            }
+            let to: Address = deserialize_arg(&args, 1);
+            let amount: u128 = deserialize_arg(&args, 2);
+            (to, amount)
+        }
+        _ => revert("RewardDistributor: invalid argument count"),
+    };
 
     if !AUTHORIZED_POOLS.get_or_default(&caller_pool) {
         revert("RewardDistributor: unauthorized pool");

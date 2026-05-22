@@ -71,6 +71,7 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 - **RewardDistributor role-management ABI was expanded.** `grant_role`, `revoke_role`, and `has_role` entrypoints are available for admin/governance flows.
 - **Staking manager/pool custody flow was aligned.** Batch stake now transfers DEADCOIN user->pool and manager calls credit stake accounting without double-pull.
 - **Resurgence end-to-end tests are green.** `tests/resurgence_contracts.rs` covers staking, claim/penalty, governance execution, and manager batch stake dynamic-rate behavior.
+- **Reward mint authorization is sender-bound.** `mint_and_distribute` now authorizes by actual caller identity (contract sender), preventing caller-supplied pool spoofing; regression coverage includes rejected direct user mint attempts.
 
 ## Known Issues
 

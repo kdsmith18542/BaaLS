@@ -215,7 +215,6 @@ fn claim_rewards_internal(user: Address) {
         USER_REWARDS.set(&user, &0);
         let distributor = REWARD_DISTRIBUTOR.get().unwrap_or_else(|| revert("Distributor not set"));
         let call_args = vec![
-            bincode::serialize(&contract_id()).unwrap(),
             bincode::serialize(&user).unwrap(),
             bincode::serialize(&rewards).unwrap(),
         ];
@@ -273,7 +272,6 @@ pub extern "C" fn claim_and_restake_to(_ptr: i32, len: i32) -> i32 {
     let distributor = REWARD_DISTRIBUTOR.get().unwrap_or_else(|| revert("Distributor not set"));
     let this_address = contract_id();
     let call_args1 = vec![
-        bincode::serialize(&this_address).unwrap(),
         bincode::serialize(&this_address).unwrap(),
         bincode::serialize(&rewards).unwrap(),
     ];

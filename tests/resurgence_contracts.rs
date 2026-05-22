@@ -166,6 +166,23 @@ fn submit_tx_and_produce_block(
     assert!(receipt.success, "Transaction failed: {:?}", receipt.error_message);
 }
 
+fn submit_tx_and_expect_failure(
+    runtime: &Runtime<SledStorage, PoAConsensus, NoopSync>,
+    tx: Transaction,
+) {
+    let tx_hash = tx.hash;
+    runtime.submit_transaction(tx).unwrap();
+
+    let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+    tokio_rt.block_on(runtime.produce_block()).unwrap();
+
+    let receipt = runtime.storage().get_receipt(&tx_hash).unwrap().expect("Receipt not found");
+    assert!(
+        !receipt.success,
+        "Transaction unexpectedly succeeded when failure was expected"
+    );
+}
+
 fn submit_contract_call_tx(
     runtime: &Runtime<SledStorage, PoAConsensus, NoopSync>,
     sender_pk: PublicKey,
@@ -189,6 +206,31 @@ fn submit_contract_call_tx(
         1,         // chain ID
     );
     submit_tx_and_produce_block(runtime, tx);
+}
+
+fn submit_contract_call_tx_expect_failure(
+    runtime: &Runtime<SledStorage, PoAConsensus, NoopSync>,
+    sender_pk: PublicKey,
+    sender_sk: &ed25519_dalek::SigningKey,
+    contract_id: &ContractId,
+    method: &str,
+    args: Vec<Vec<u8>>,
+) {
+    let account = runtime.get_account(&sender_pk).unwrap().unwrap();
+    let next_nonce = account.nonce() + 1;
+    let tx = make_contract_call_tx(
+        sender_pk,
+        sender_sk,
+        contract_id,
+        method,
+        args,
+        None,
+        next_nonce,
+        2_000_000,
+        1,
+        1,
+    );
+    submit_tx_and_expect_failure(runtime, tx);
 }
 
 fn query_contract<T: serde::de::DeserializeOwned>(
@@ -885,6 +927,19 @@ fn test_staking_pool_manager_batch_stake_and_dynamic_rate() {
             bincode::serialize(&deadcoin_id.to_bytes()).unwrap(),
             bincode::serialize(&pool_id.to_bytes()).unwrap(),
             bincode::serialize(&1_000_000_000_000_000_000u128).unwrap(),
+        ],
+    );
+
+    // Direct user calls must not be able to mint through RewardDistributor.
+    submit_contract_call_tx_expect_failure(
+        &runtime,
+        user_pk,
+        &user_sk,
+        &distributor_id,
+        "mint_and_distribute",
+        vec![
+            bincode::serialize(&user_pk.to_bytes()).unwrap(),
+            bincode::serialize(&1u128).unwrap(),
         ],
     );
 
