@@ -536,3 +536,123 @@ pub extern "C" fn dynamic_rate_enabled(_ptr: i32, len: i32) -> i32 {
     let _args = get_input_args(len);
     return_data(&DYNAMIC_RATE_ENABLED.get_or_default())
 }
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn addStakingPool(ptr: i32, len: i32) -> i32 {
+    let args = get_input_args(len);
+    if args.len() != 3 {
+        revert("StakingPoolManager: invalid arg count");
+    }
+    // BaaLS port expects (dead_coin, pool_contract, initial_rate).
+    if args[1].len() == 16 && args[2].len() == 32 {
+        revert(
+            "StakingPoolManager: BaaLS addStakingPool expects (deadCoin, poolContract, initialRate)",
+        );
+    }
+    add_staking_pool(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn setRewardRate(ptr: i32, len: i32) -> i32 {
+    set_reward_rate(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn pauseStakingPool(ptr: i32, len: i32) -> i32 {
+    pause_staking_pool(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn unpauseStakingPool(ptr: i32, len: i32) -> i32 {
+    unpause_staking_pool(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn removeStakingPool(ptr: i32, len: i32) -> i32 {
+    remove_staking_pool(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn batchStake(ptr: i32, len: i32) -> i32 {
+    batch_stake(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn batchClaimRewards(ptr: i32, len: i32) -> i32 {
+    batch_claim_rewards(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn setDynamicRateEnabled(ptr: i32, len: i32) -> i32 {
+    set_dynamic_rate_enabled(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn setDynamicRateParams(ptr: i32, len: i32) -> i32 {
+    set_dynamic_rate_params(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn applyDynamicRate(ptr: i32, len: i32) -> i32 {
+    let args = get_input_args(len);
+    if args.len() == 1 {
+        revert("StakingPoolManager: BaaLS applyDynamicRate expects (deadCoin, tvl, multiplier)");
+    }
+    apply_dynamic_rate(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn applyDynamicRateAll(ptr: i32, len: i32) -> i32 {
+    let args = get_input_args(len);
+    if args.is_empty() {
+        revert(
+            "StakingPoolManager: BaaLS applyDynamicRateAll expects (deadCoins, tvls, multiplier)",
+        );
+    }
+    apply_dynamic_rate_all(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn calculateDynamicRate(ptr: i32, len: i32) -> i32 {
+    let args = get_input_args(len);
+    if args.len() == 1 && args[0].len() == 32 {
+        revert("StakingPoolManager: BaaLS calculateDynamicRate expects (tvl, multiplier)");
+    }
+    calculate_dynamic_rate(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn getStakingPool(ptr: i32, len: i32) -> i32 {
+    get_staking_pool(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn supportedDeadCoins(ptr: i32, len: i32) -> i32 {
+    supported_dead_coins(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn dynamicRateEnabled(ptr: i32, len: i32) -> i32 {
+    dynamic_rate_enabled(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn deadCoinToPoolAddress(ptr: i32, len: i32) -> i32 {
+    get_staking_pool(ptr, len)
+}

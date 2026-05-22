@@ -418,7 +418,7 @@ fn test_resurgence_staking_and_governance() {
         &runtime,
         &user_pk,
         &deadcoin_id,
-        "balance_of",
+        "balanceOf",
         vec![bincode::serialize(&user_pk.to_bytes()).unwrap()],
     );
     assert_eq!(user_deadcoin_bal, 1_000_000_000_000_000_000_000u128);
@@ -493,14 +493,14 @@ fn test_resurgence_staking_and_governance() {
 
     // 7. Claim rewards
     println!("[TEST] Claiming rewards...");
-    submit_contract_call_tx(&runtime, user_pk, &user_sk, &pool_id, "claim_rewards", vec![]);
+    submit_contract_call_tx(&runtime, user_pk, &user_sk, &pool_id, "claimRewards", vec![]);
 
     // Verify user balance of RESURGE is greater than 0
     let user_resurge_bal = query_contract::<u128>(
         &runtime,
         &user_pk,
         &resurge_token_id,
-        "balance_of",
+        "balanceOf",
         vec![bincode::serialize(&user_pk.to_bytes()).unwrap()],
     );
     println!("[TEST] User RESURGE balance after claim: {}", user_resurge_bal);
@@ -686,7 +686,7 @@ fn test_resurge_staking_claim_and_early_unstake_penalty() {
         admin_pk,
         &admin_sk,
         &distributor_id,
-        "authorize_pool",
+        "authorizeStakingPool",
         vec![bincode::serialize(&staking_id.to_bytes()).unwrap()],
     );
 
@@ -696,7 +696,7 @@ fn test_resurge_staking_claim_and_early_unstake_penalty() {
         user_pk,
         &user_sk,
         &staking_id,
-        "stake_for",
+        "stakeFor",
         vec![
             bincode::serialize(&admin_pk.to_bytes()).unwrap(),
             bincode::serialize(&user_pk.to_bytes()).unwrap(),
@@ -745,7 +745,7 @@ fn test_resurge_staking_claim_and_early_unstake_penalty() {
         &runtime,
         &user_pk,
         &token_id,
-        "balance_of",
+        "balanceOf",
         vec![bincode::serialize(&user_pk.to_bytes()).unwrap()],
     );
     assert_eq!(user_balance_after_stake, minted_amount - stake_amount);
@@ -777,7 +777,7 @@ fn test_resurge_staking_claim_and_early_unstake_penalty() {
         &runtime,
         &user_pk,
         &token_id,
-        "balance_of",
+        "balanceOf",
         vec![bincode::serialize(&user_pk.to_bytes()).unwrap()],
     );
     submit_contract_call_tx(&runtime, user_pk, &user_sk, &staking_id, "claim_rewards", vec![]);
@@ -785,7 +785,7 @@ fn test_resurge_staking_claim_and_early_unstake_penalty() {
         &runtime,
         &user_pk,
         &token_id,
-        "balance_of",
+        "balanceOf",
         vec![bincode::serialize(&user_pk.to_bytes()).unwrap()],
     );
     assert!(user_balance_after_claim > user_balance_before_claim);
@@ -798,11 +798,11 @@ fn test_resurge_staking_claim_and_early_unstake_penalty() {
         &runtime,
         &user_pk,
         &token_id,
-        "balance_of",
+        "balanceOf",
         vec![bincode::serialize(&user_pk.to_bytes()).unwrap()],
     );
     let total_supply_before_unstake =
-        query_contract::<u128>(&runtime, &user_pk, &token_id, "total_supply", vec![]);
+        query_contract::<u128>(&runtime, &user_pk, &token_id, "totalSupply", vec![]);
 
     submit_contract_call_tx(
         &runtime,
@@ -817,13 +817,13 @@ fn test_resurge_staking_claim_and_early_unstake_penalty() {
         &runtime,
         &user_pk,
         &token_id,
-        "balance_of",
+        "balanceOf",
         vec![bincode::serialize(&user_pk.to_bytes()).unwrap()],
     );
     assert_eq!(user_balance_after_unstake - user_balance_before_unstake, expected_return);
 
     let total_supply_after_unstake =
-        query_contract::<u128>(&runtime, &user_pk, &token_id, "total_supply", vec![]);
+        query_contract::<u128>(&runtime, &user_pk, &token_id, "totalSupply", vec![]);
     assert_eq!(total_supply_before_unstake - total_supply_after_unstake, expected_penalty);
 
     let remaining_staked = query_contract::<u128>(
@@ -931,12 +931,27 @@ fn test_staking_pool_manager_batch_stake_and_dynamic_rate() {
         ],
     );
 
+    // Solidity-order addStakingPool(deadCoin, initialRate, timelock) is explicitly rejected in
+    // the BaaLS port because pool contracts are predeployed and must be passed directly.
+    submit_contract_call_tx_expect_failure(
+        &runtime,
+        admin_pk,
+        &admin_sk,
+        &manager_id,
+        "addStakingPool",
+        vec![
+            bincode::serialize(&deadcoin_id.to_bytes()).unwrap(),
+            bincode::serialize(&1_000_000_000_000_000_000u128).unwrap(),
+            bincode::serialize(&admin_pk.to_bytes()).unwrap(),
+        ],
+    );
+
     submit_contract_call_tx(
         &runtime,
         admin_pk,
         &admin_sk,
         &manager_id,
-        "add_staking_pool",
+        "addStakingPool",
         vec![
             bincode::serialize(&deadcoin_id.to_bytes()).unwrap(),
             bincode::serialize(&pool_id.to_bytes()).unwrap(),
@@ -950,12 +965,57 @@ fn test_staking_pool_manager_batch_stake_and_dynamic_rate() {
         user_pk,
         &user_sk,
         &distributor_id,
-        "mint_and_distribute",
+        "mintAndDistribute",
         vec![
             bincode::serialize(&user_pk.to_bytes()).unwrap(),
             bincode::serialize(&1u128).unwrap(),
         ],
     );
+
+    submit_contract_call_tx(
+        &runtime,
+        admin_pk,
+        &admin_sk,
+        &distributor_id,
+        "setPriceOracle",
+        vec![
+            bincode::serialize(&deadcoin_id.to_bytes()).unwrap(),
+            bincode::serialize(&3600u128).unwrap(),
+        ],
+    );
+    submit_contract_call_tx(
+        &runtime,
+        admin_pk,
+        &admin_sk,
+        &distributor_id,
+        "setOracleEnabled",
+        vec![bincode::serialize(&true).unwrap()],
+    );
+    submit_contract_call_tx(
+        &runtime,
+        admin_pk,
+        &admin_sk,
+        &distributor_id,
+        "setFallbackPrice",
+        vec![bincode::serialize(&10_000_000u128).unwrap()],
+    );
+    let (price, valid) = query_contract::<(u128, bool)>(
+        &runtime,
+        &admin_pk,
+        &distributor_id,
+        "getResurgePrice",
+        vec![],
+    );
+    assert_eq!(price, 10_000_000u128);
+    assert!(valid);
+    let emission_multiplier = query_contract::<u128>(
+        &runtime,
+        &admin_pk,
+        &distributor_id,
+        "getEmissionMultiplier",
+        vec![],
+    );
+    assert_eq!(emission_multiplier, 15_000u128);
 
     let mint_amount = 1_000_000_000_000_000_000_000u128;
     submit_contract_call_tx(
@@ -987,7 +1047,7 @@ fn test_staking_pool_manager_batch_stake_and_dynamic_rate() {
         user_pk,
         &user_sk,
         &manager_id,
-        "batch_stake",
+        "batchStake",
         vec![
             bincode::serialize(&vec![deadcoin_id.to_bytes()]).unwrap(),
             bincode::serialize(&vec![stake_amount]).unwrap(),
@@ -1007,7 +1067,7 @@ fn test_staking_pool_manager_batch_stake_and_dynamic_rate() {
         &runtime,
         &user_pk,
         &deadcoin_id,
-        "balance_of",
+        "balanceOf",
         vec![bincode::serialize(&user_pk.to_bytes()).unwrap()],
     );
     assert_eq!(user_deadcoin_bal, mint_amount - stake_amount);
@@ -1017,7 +1077,7 @@ fn test_staking_pool_manager_batch_stake_and_dynamic_rate() {
         admin_pk,
         &admin_sk,
         &manager_id,
-        "set_dynamic_rate_enabled",
+        "setDynamicRateEnabled",
         vec![bincode::serialize(&true).unwrap()],
     );
 
@@ -1027,7 +1087,7 @@ fn test_staking_pool_manager_batch_stake_and_dynamic_rate() {
         &runtime,
         &admin_pk,
         &manager_id,
-        "calculate_dynamic_rate",
+        "calculateDynamicRate",
         vec![bincode::serialize(&tvl).unwrap(), bincode::serialize(&multiplier).unwrap()],
     );
     assert_eq!(dynamic_rate, 1_470_000_000_000_000_000u128);
@@ -1037,7 +1097,7 @@ fn test_staking_pool_manager_batch_stake_and_dynamic_rate() {
         admin_pk,
         &admin_sk,
         &manager_id,
-        "apply_dynamic_rate",
+        "applyDynamicRate",
         vec![
             bincode::serialize(&deadcoin_id.to_bytes()).unwrap(),
             bincode::serialize(&tvl).unwrap(),
@@ -1054,7 +1114,7 @@ fn test_staking_pool_manager_batch_stake_and_dynamic_rate() {
         admin_pk,
         &admin_sk,
         &manager_id,
-        "apply_dynamic_rate_all",
+        "applyDynamicRateAll",
         vec![
             bincode::serialize(&vec![deadcoin_id.to_bytes()]).unwrap(),
             bincode::serialize(&vec![tvl]).unwrap(),

@@ -228,3 +228,39 @@ pub extern "C" fn has_role_entry(_ptr: i32, len: i32) -> i32 {
     let res = resurgence_common::auth::has_role(role, account);
     return_data(&res)
 }
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn transferFrom(ptr: i32, len: i32) -> i32 {
+    transfer_from(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn balanceOf(ptr: i32, len: i32) -> i32 {
+    balance_of(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn totalSupply(ptr: i32, len: i32) -> i32 {
+    total_supply(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn grantRole(ptr: i32, len: i32) -> i32 {
+    grant_role_entry(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn revokeRole(ptr: i32, len: i32) -> i32 {
+    revoke_role_entry(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn hasRole(ptr: i32, len: i32) -> i32 {
+    has_role_entry(ptr, len)
+}

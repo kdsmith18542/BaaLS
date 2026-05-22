@@ -443,3 +443,63 @@ pub extern "C" fn user_delegation(_ptr: i32, len: i32) -> i32 {
     let account: Address = deserialize_arg(&args, 0);
     return_data(&USER_DELEGATION.get_or_default(&account))
 }
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn stakeFor(ptr: i32, len: i32) -> i32 {
+    stake_for(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn claimRewards(ptr: i32, len: i32) -> i32 {
+    claim_rewards(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn claimAndRestake(ptr: i32, len: i32) -> i32 {
+    claim_and_restake(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn setDelegate(ptr: i32, len: i32) -> i32 {
+    set_delegate(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn setRewardRate(ptr: i32, len: i32) -> i32 {
+    set_reward_rate(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn getVotingPower(ptr: i32, len: i32) -> i32 {
+    get_voting_power(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn userStakedAmount(ptr: i32, len: i32) -> i32 {
+    user_staked_amount(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn totalStakedSupply(ptr: i32, len: i32) -> i32 {
+    total_staked_supply(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn rewardRatePerSecond(ptr: i32, len: i32) -> i32 {
+    reward_rate_per_second(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn userDelegation(ptr: i32, len: i32) -> i32 {
+    user_delegation(ptr, len)
+}

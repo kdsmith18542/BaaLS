@@ -425,3 +425,87 @@ pub extern "C" fn user_rewards(_ptr: i32, len: i32) -> i32 {
     let user: Address = deserialize_arg(&args, 0);
     return_data(&USER_REWARDS.get_or_default(&user))
 }
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn stakeFor(ptr: i32, len: i32) -> i32 {
+    stake_for(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn claimRewards(ptr: i32, len: i32) -> i32 {
+    claim_rewards(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn claimRewardsFor(ptr: i32, len: i32) -> i32 {
+    claim_rewards_for(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn claimAndRestakeTo(ptr: i32, len: i32) -> i32 {
+    claim_and_restake_to(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn setRewardRate(ptr: i32, len: i32) -> i32 {
+    set_reward_rate(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn userStakedAmount(ptr: i32, len: i32) -> i32 {
+    user_staked_amount(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn totalStakedSupply(ptr: i32, len: i32) -> i32 {
+    total_staked_supply(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn rewardRatePerSecond(ptr: i32, len: i32) -> i32 {
+    reward_rate_per_second(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn rewardDistributor(ptr: i32, len: i32) -> i32 {
+    reward_distributor(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn stakingPoolManager(ptr: i32, len: i32) -> i32 {
+    staking_pool_manager(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn lastUpdateTime(ptr: i32, len: i32) -> i32 {
+    last_update_time(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn rewardPerTokenStored(ptr: i32, len: i32) -> i32 {
+    reward_per_token_stored(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn userRewardPerTokenPaid(ptr: i32, len: i32) -> i32 {
+    user_reward_per_token_paid(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn userRewards(ptr: i32, len: i32) -> i32 {
+    user_rewards(ptr, len)
+}

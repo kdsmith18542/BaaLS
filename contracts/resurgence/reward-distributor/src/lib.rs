@@ -14,9 +14,30 @@ const RESURGENCE_TOKEN: StorageValue<Address> = StorageValue::new(b"token");
 const TOTAL_MINTED: StorageValue<u128> = StorageValue::new(b"total_minted");
 const MAX_MINT_SUPPLY: StorageValue<u128> = StorageValue::new(b"max_mint_supply");
 const AUTHORIZED_POOLS: StorageMap<Address, bool> = StorageMap::new(b"pools");
+const ORACLE_ADDRESS: StorageValue<Address> = StorageValue::new(b"oracle_address");
+const ORACLE_STALE_THRESHOLD: StorageValue<u64> = StorageValue::new(b"oracle_stale_threshold");
+const ORACLE_ENABLED: StorageValue<bool> = StorageValue::new(b"oracle_enabled");
 const ORACLE_LAST_PRICE: StorageValue<u128> = StorageValue::new(b"oracle_price");
 const ORACLE_LAST_UPDATE: StorageValue<u64> = StorageValue::new(b"oracle_update");
 const PAUSED: StorageValue<bool> = StorageValue::new(b"paused");
+
+fn current_price_and_valid() -> (u128, bool) {
+    let stale_threshold = {
+        let configured = ORACLE_STALE_THRESHOLD.get_or_default();
+        if configured == 0 { 3600 } else { configured }
+    };
+    let now = resurgence_common::host::block_timestamp();
+
+    // Current runtime does not support synchronous oracle reads from another contract.
+    // Keep oracle configuration for ABI compatibility and rely on fallback price storage.
+    let _oracle_enabled = ORACLE_ENABLED.get_or_default();
+    let _oracle_address = ORACLE_ADDRESS.get().unwrap_or([0u8; 32]);
+
+    let price = ORACLE_LAST_PRICE.get_or_default();
+    let last_update = ORACLE_LAST_UPDATE.get_or_default();
+    let valid = price > 0 && now < last_update.saturating_add(stale_threshold);
+    (price, valid)
+}
 
 #[no_mangle]
 pub extern "C" fn initialize(_ptr: i32, len: i32) -> i32 {
@@ -35,12 +56,15 @@ pub extern "C" fn initialize(_ptr: i32, len: i32) -> i32 {
     grant_role(DEFAULT_ADMIN_ROLE, timelock);
     grant_role(timelock_role(), timelock);
     grant_role(emergency_pauser_role(), timelock);
+    grant_role(oracle_manager_role(), timelock);
 
     // Grant temporary roles to deployer for setup
     let caller = sender();
     grant_role(DEFAULT_ADMIN_ROLE, caller);
     grant_role(timelock_role(), caller);
     grant_role(oracle_manager_role(), caller);
+    ORACLE_STALE_THRESHOLD.set(&3600);
+    ORACLE_ENABLED.set(&false);
 
     return_data(&true)
 }
@@ -172,16 +196,54 @@ pub extern "C" fn set_fallback_price(_ptr: i32, len: i32) -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn set_price_oracle(_ptr: i32, len: i32) -> i32 {
+    let args = get_input_args(len);
+    let oracle: Address = deserialize_arg(&args, 0);
+    let stale_threshold: u128 = deserialize_arg(&args, 1);
+
+    check_role(timelock_role(), sender());
+    if oracle == [0u8; 32] {
+        revert("Invalid address");
+    }
+    let stale = if stale_threshold == 0 {
+        3600u64
+    } else {
+        u64::try_from(stale_threshold).unwrap_or_else(|_| revert("Stale threshold too large"))
+    };
+
+    ORACLE_ADDRESS.set(&oracle);
+    ORACLE_STALE_THRESHOLD.set(&stale);
+    ORACLE_ENABLED.set(&true);
+    emit_event(
+        b"PriceOracleSet",
+        &bincode::serialize(&(oracle, ORACLE_STALE_THRESHOLD.get_or_default())).unwrap(),
+    );
+    return_data(&true)
+}
+
+#[no_mangle]
+pub extern "C" fn set_oracle_enabled(_ptr: i32, len: i32) -> i32 {
+    let args = get_input_args(len);
+    let enabled: bool = deserialize_arg(&args, 0);
+    check_role(timelock_role(), sender());
+    ORACLE_ENABLED.set(&enabled);
+    emit_event(b"OracleEnabled", &bincode::serialize(&enabled).unwrap());
+    return_data(&true)
+}
+
+#[no_mangle]
+pub extern "C" fn get_resurge_price(_ptr: i32, len: i32) -> i32 {
+    let _args = get_input_args(len);
+    let (price, valid) = current_price_and_valid();
+    return_data(&(price, valid))
+}
+
+#[no_mangle]
 pub extern "C" fn get_emission_multiplier(_ptr: i32, len: i32) -> i32 {
     let _args = get_input_args(len);
-
-    let price = ORACLE_LAST_PRICE.get_or_default();
-    let last_update = ORACLE_LAST_UPDATE.get_or_default();
-    let now = resurgence_common::host::block_timestamp();
+    let (price, valid) = current_price_and_valid();
 
     let base_price: u128 = 5_000_000;
-
-    let valid = price > 0 && now < last_update + 3600;
 
     if !valid {
         return return_data(&10000u128);
@@ -268,4 +330,95 @@ pub extern "C" fn is_authorized_pool(_ptr: i32, len: i32) -> i32 {
     let args = get_input_args(len);
     let pool: Address = deserialize_arg(&args, 0);
     return_data(&AUTHORIZED_POOLS.get_or_default(&pool))
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn authorizeStakingPool(ptr: i32, len: i32) -> i32 {
+    authorize_pool(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn unauthorizeStakingPool(ptr: i32, len: i32) -> i32 {
+    unauthorize_pool(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn mintAndDistribute(ptr: i32, len: i32) -> i32 {
+    mint_and_distribute(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn addAuthorizedStakingPool(ptr: i32, len: i32) -> i32 {
+    authorize_pool(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn removeAuthorizedStakingPool(ptr: i32, len: i32) -> i32 {
+    unauthorize_pool(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn setMaxMintSupply(ptr: i32, len: i32) -> i32 {
+    set_max_mint_supply(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn setFallbackPrice(ptr: i32, len: i32) -> i32 {
+    set_fallback_price(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn setPriceOracle(ptr: i32, len: i32) -> i32 {
+    set_price_oracle(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn setOracleEnabled(ptr: i32, len: i32) -> i32 {
+    set_oracle_enabled(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn getResurgePrice(ptr: i32, len: i32) -> i32 {
+    get_resurge_price(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn getEmissionMultiplier(ptr: i32, len: i32) -> i32 {
+    get_emission_multiplier(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn totalResurgeMinted(ptr: i32, len: i32) -> i32 {
+    total_resurge_minted(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn maxMintSupply(ptr: i32, len: i32) -> i32 {
+    max_mint_supply(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn authorizedStakingPools(ptr: i32, len: i32) -> i32 {
+    is_authorized_pool(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn resurgenceToken(_ptr: i32, len: i32) -> i32 {
+    let _args = get_input_args(len);
+    return_data(&RESURGENCE_TOKEN.get().unwrap_or([0u8; 32]))
 }
