@@ -7,6 +7,7 @@ use resurgence_common::storage::{StorageDoubleMap, StorageMap, StorageValue};
 use resurgence_common::types::Address;
 
 const INITIALIZED: StorageValue<bool> = StorageValue::new(b"initialized");
+const TIMELOCK_ADDRESS: StorageValue<Address> = StorageValue::new(b"timelock_address");
 const TIMELOCK_DELAY: StorageValue<u64> = StorageValue::new(b"timelock_delay");
 const PROPOSALS_COUNT: StorageValue<u64> = StorageValue::new(b"proposals_count");
 const QUORUM_VOTES: StorageValue<u128> = StorageValue::new(b"quorum_votes");
@@ -48,6 +49,7 @@ pub extern "C" fn initialize(_ptr: i32, len: i32) -> i32 {
     }
 
     INITIALIZED.set(&true);
+    TIMELOCK_ADDRESS.set(&timelock);
     TIMELOCK_DELAY.set(&delay);
     QUORUM_VOTES.set(&initial_quorum);
 
@@ -298,4 +300,115 @@ pub extern "C" fn has_voted(_ptr: i32, len: i32) -> i32 {
     let proposal_id: u64 = deserialize_arg(&args, 0);
     let voter: Address = deserialize_arg(&args, 1);
     return_data(&VOTED.get_or_default(&proposal_id, &voter))
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn castVote(ptr: i32, len: i32) -> i32 {
+    cast_vote(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn getProposal(ptr: i32, len: i32) -> i32 {
+    get_proposal(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn latestProposalId(ptr: i32, len: i32) -> i32 {
+    proposals_count(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn hasVoted(ptr: i32, len: i32) -> i32 {
+    has_voted(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn setQuorum(ptr: i32, len: i32) -> i32 {
+    set_quorum(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn setTimelockDelay(ptr: i32, len: i32) -> i32 {
+    set_timelock_delay(ptr, len)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn quorum(_ptr: i32, len: i32) -> i32 {
+    let _args = get_input_args(len);
+    return_data(&QUORUM_VOTES.get_or_default())
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn timelock(_ptr: i32, len: i32) -> i32 {
+    let _args = get_input_args(len);
+    return_data(&TIMELOCK_ADDRESS.get().unwrap_or([0u8; 32]))
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn getVotes(_ptr: i32, len: i32) -> i32 {
+    let args = get_input_args(len);
+    let _account: Address = deserialize_arg(&args, 0);
+    let _block_number: u64 = deserialize_arg(&args, 1);
+    // Voting power snapshots are supplied at cast time in this runtime.
+    return_data(&0u128)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn proposalThreshold(_ptr: i32, len: i32) -> i32 {
+    let _args = get_input_args(len);
+    return_data(&0u128)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn votingDelay(_ptr: i32, len: i32) -> i32 {
+    let _args = get_input_args(len);
+    return_data(&0u64)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn votingPeriod(_ptr: i32, len: i32) -> i32 {
+    let _args = get_input_args(len);
+    return_data(&0u64)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn state(_ptr: i32, len: i32) -> i32 {
+    let args = get_input_args(len);
+    let proposal_id: u64 = deserialize_arg(&args, 0);
+    let prop = PROPOSALS.get(&proposal_id).unwrap_or_else(|| revert("Proposal not found"));
+    let now = resurgence_common::host::block_timestamp();
+
+    let state = if prop.canceled {
+        2u8
+    } else if prop.executed {
+        7u8
+    } else if now < prop.start_time {
+        0u8
+    } else if now <= prop.end_time {
+        1u8
+    } else if prop.eta == 0 {
+        let total_votes = add(add(prop.for_votes, prop.against_votes), prop.abstain_votes);
+        if total_votes < QUORUM_VOTES.get_or_default() || prop.for_votes <= prop.against_votes {
+            3u8
+        } else {
+            4u8
+        }
+    } else {
+        5u8
+    };
+
+    return_data(&state)
 }

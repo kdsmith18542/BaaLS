@@ -534,8 +534,11 @@ fn test_resurgence_staking_and_governance() {
     ];
     submit_contract_call_tx(&runtime, admin_pk, &admin_sk, &gov_id, "propose", proposal_args);
 
-    let count = query_contract::<u64>(&runtime, &admin_pk, &gov_id, "proposals_count", vec![]);
+    let count = query_contract::<u64>(&runtime, &admin_pk, &gov_id, "latestProposalId", vec![]);
     assert_eq!(count, 1);
+    let state_after_propose =
+        query_contract::<u8>(&runtime, &admin_pk, &gov_id, "state", vec![bincode::serialize(&1u64).unwrap()]);
+    assert_eq!(state_after_propose, 1u8);
 
     // Vote on proposal
     println!("[TEST] Voting on proposal...");
@@ -544,13 +547,13 @@ fn test_resurgence_staking_and_governance() {
         bincode::serialize(&1u8).unwrap(),  // support = 1 (for)
         bincode::serialize(&200_000_000_000_000_000_000u128).unwrap(), // voting_power = 200 * 10^18
     ];
-    submit_contract_call_tx(&runtime, admin_pk, &admin_sk, &gov_id, "cast_vote", vote_args);
+    submit_contract_call_tx(&runtime, admin_pk, &admin_sk, &gov_id, "castVote", vote_args);
 
     let prop = query_contract::<Proposal>(
         &runtime,
         &admin_pk,
         &gov_id,
-        "get_proposal",
+        "getProposal",
         vec![bincode::serialize(&1u64).unwrap()],
     );
     assert_eq!(prop.for_votes, 200_000_000_000_000_000_000u128);
@@ -575,7 +578,7 @@ fn test_resurgence_staking_and_governance() {
         &runtime,
         &admin_pk,
         &gov_id,
-        "get_proposal",
+        "getProposal",
         vec![bincode::serialize(&1u64).unwrap()],
     );
     assert!(prop.eta > 0);
@@ -600,10 +603,13 @@ fn test_resurgence_staking_and_governance() {
         &runtime,
         &admin_pk,
         &gov_id,
-        "get_proposal",
+        "getProposal",
         vec![bincode::serialize(&1u64).unwrap()],
     );
     assert!(prop.executed);
+    let final_state =
+        query_contract::<u8>(&runtime, &admin_pk, &gov_id, "state", vec![bincode::serialize(&1u64).unwrap()]);
+    assert_eq!(final_state, 7u8);
 
     // Verify rate change was applied to the staking pool contract
     let new_rate =

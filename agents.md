@@ -74,6 +74,7 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 - **Reward mint authorization is sender-bound.** `mint_and_distribute` now authorizes by actual caller identity (contract sender), preventing caller-supplied pool spoofing; regression coverage includes rejected direct user mint attempts.
 - **Resurge staking `stake_for` source binding is enforced.** Caller identity must match the source address argument, preventing arbitrary caller-supplied source-account pulls in delegated staking flows.
 - **Solidity ABI compatibility aliases are implemented for core Resurgence contracts.** CamelCase entrypoints used by existing EVM scripts/frontends now map to WASM exports across reward distributor, token, dead-coin pool, resurge staking, and manager interfaces.
+- **Governance ABI compatibility aliases are implemented.** Governance now exposes camelCase query/mutation endpoints such as `castVote`, `latestProposalId`, `getProposal`, `hasVoted`, `quorum`, and `state` for integration compatibility.
 - **RewardDistributor oracle-management ABI coverage was added.** `setPriceOracle`, `setOracleEnabled`, `setFallbackPrice`, `getResurgePrice`, and `getEmissionMultiplier` entrypoints are available; current price resolution relies on stored fallback data under BaaLS runtime constraints.
 
 ## Known Issues
