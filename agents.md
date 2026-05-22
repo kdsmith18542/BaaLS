@@ -63,6 +63,8 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 - **Quorum signature collection is implemented.** Proposers now request and attach peer quorum signatures over P2P before applying/broadcasting blocks when `quorum_threshold > 1`, and imported quorum-signed blocks validate correctly.
 - **Quorum heartbeat path is now enabled and tested.** With reachable peers, `produce_empty_blocks=true` + `quorum_threshold > 1` + `round_robin=true` now produces converged empty blocks under quorum signatures; without quorum peers, heartbeat proposals are skipped.
 - **Python SDK is implemented.** `sdk/python/baals/` provides a pure-Python HTTP client with bincode-compatible transaction hashing, Ed25519 signing, JWT auth, and full API coverage. Cross-validated against Rust's `test_deterministic_hash_vector` — the shared test vector `616107ff...` confirms hash parity.
+- **Block explorer upgraded.** Network panel (supply, peers, signers), clickable hash/address navigation, structured search result cards instead of raw JSON. Deployed to baals.network.
+- **Caddy API proxy fixed.** `reverse_proxy` blocks for baals.network now use `https://` upstream with `tls_insecure_skip_verify` to match the node's TLS listener.
 
 ## Known Issues
 
@@ -84,7 +86,7 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 3. RocksDB storage backend
 4. Mobile SDKs (iOS/Android)
 5. PoS / PoW / CRDT consensus plugins
-6. Block explorer improvements
+6. ~~Block explorer improvements~~ — done, deployed to baals.network
 
 ## Transaction Format Reference
 

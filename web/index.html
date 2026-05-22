@@ -80,6 +80,36 @@
       </section>
 
       <section class="panel">
+        <h2>Network</h2>
+        <div class="metric-grid">
+          <article class="metric-card">
+            <h3>Total Supply</h3>
+            <p id="supplyValue">-</p>
+          </article>
+          <article class="metric-card">
+            <h3>Accounts</h3>
+            <p id="accountsValue">-</p>
+          </article>
+          <article class="metric-card">
+            <h3>Peers</h3>
+            <p id="peersValue">-</p>
+          </article>
+          <article class="metric-card">
+            <h3>Signers</h3>
+            <p id="signersValue">-</p>
+          </article>
+        </div>
+        <details class="net-details" id="peerDetails">
+          <summary>Peer List</summary>
+          <pre class="code-block compact" id="peerList">-</pre>
+        </details>
+        <details class="net-details" id="signerDetails">
+          <summary>Signer List</summary>
+          <pre class="code-block compact" id="signerList">-</pre>
+        </details>
+      </section>
+
+      <section class="panel">
         <h2>Explorer Search</h2>
         <form id="searchForm" class="search-row">
           <select id="queryType" aria-label="Query type">
@@ -97,7 +127,9 @@
           />
           <button type="submit" class="btn">Run Query</button>
         </form>
-        <pre id="queryOutput" class="code-block">Run a query to inspect chain objects.</pre>
+        <div id="queryOutput" class="result-area">
+          <p class="muted-hint">Run a query to inspect chain objects.</p>
+        </div>
       </section>
 
       <section class="panel">
