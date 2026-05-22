@@ -65,6 +65,12 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 - **Python SDK is implemented.** `sdk/python/baals/` provides a pure-Python HTTP client with bincode-compatible transaction hashing, Ed25519 signing, JWT auth, and full API coverage. Cross-validated against Rust's `test_deterministic_hash_vector` — the shared test vector `616107ff...` confirms hash parity.
 - **Block explorer upgraded.** Network panel (supply, peers, signers), clickable hash/address navigation, structured search result cards instead of raw JSON. Deployed to baals.network.
 - **Caddy API proxy fixed.** `reverse_proxy` blocks for baals.network now use `https://` upstream with `tls_insecure_skip_verify` to match the node's TLS listener.
+- **Resurgence WASM contract workspace is in-tree.** `contracts/resurgence/` now contains `common` plus protocol contracts for token, staking, pool manager, reward distribution, and governance.
+- **Runtime subcall failure handling is hardened.** Inter-contract call failures now propagate explicitly instead of being swallowed.
+- **Caller-context propagation is implemented.** Runtime and CLI simulation now preserve caller bytes across nested calls for authorization checks.
+- **RewardDistributor role-management ABI was expanded.** `grant_role`, `revoke_role`, and `has_role` entrypoints are available for admin/governance flows.
+- **Staking manager/pool custody flow was aligned.** Batch stake now transfers DEADCOIN user->pool and manager calls credit stake accounting without double-pull.
+- **Resurgence end-to-end tests are green.** `tests/resurgence_contracts.rs` covers staking, claim/penalty, governance execution, and manager batch stake dynamic-rate behavior.
 
 ## Known Issues
 
@@ -89,7 +95,7 @@ BaaLS is the core runtime in a multi-project platform. See `ROADMAP.md` for full
 
 ### Active Priority: Resurgence Port
 
-Port Resurgence Protocol's Proof-of-Dormancy staking model from Solidity/EVM to WASM contracts on BaaLS. This generates real recurring transactions (stake, unstake, claim, vote, govern). Canvas builds the contracts, BaaLS executes them, ChronoNode archives the history.
+Port Resurgence Protocol's Proof-of-Dormancy staking model from Solidity/EVM to WASM contracts on BaaLS. Baseline contract set and integration tests are now implemented in-tree; current focus is Solidity-parity validation and edge-case hardening against the source repo at `G:\BACKUP\resurgence-protocol`.
 
 ### Next: ChronoNode Live Integration
 
@@ -144,7 +150,9 @@ Minimum gas limit: 21,000. Signature: Ed25519 over the 32-byte hash.
 - `tests/cq_regression.rs` - fee system tests (4 modes + validation)
 - `tests/multi_validator.rs` - multi-signer PoA tests
 - `tests/integration.rs` - includes `test_state_snapshot_sync`, `test_empty_block_production`, `test_p2p_quorum_signature_collection`, and quorum heartbeat convergence tests
+- `tests/resurgence_contracts.rs` - end-to-end Resurgence staking, reward, governance, and manager-flow contract tests
 - `sdk/python/baals/` - Python SDK: client.py (HTTP API), transaction.py (hash/sign), types.py (bincode), auth.py (JWT)
+- `contracts/resurgence/*/src/lib.rs` - Resurgence protocol WASM contracts and shared support crate
 
 ## Monitor Alerting Notes
 

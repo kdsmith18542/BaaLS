@@ -979,4 +979,20 @@ fn test_staking_pool_manager_batch_stake_and_dynamic_rate() {
     let pool_rate =
         query_contract::<u128>(&runtime, &admin_pk, &pool_id, "reward_rate_per_second", vec![]);
     assert_eq!(pool_rate, dynamic_rate);
+
+    submit_contract_call_tx(
+        &runtime,
+        admin_pk,
+        &admin_sk,
+        &manager_id,
+        "apply_dynamic_rate_all",
+        vec![
+            bincode::serialize(&vec![deadcoin_id.to_bytes()]).unwrap(),
+            bincode::serialize(&vec![tvl]).unwrap(),
+            bincode::serialize(&multiplier).unwrap(),
+        ],
+    );
+    let pool_rate_after_all =
+        query_contract::<u128>(&runtime, &admin_pk, &pool_id, "reward_rate_per_second", vec![]);
+    assert_eq!(pool_rate_after_all, dynamic_rate);
 }
