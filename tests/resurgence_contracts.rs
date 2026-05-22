@@ -690,6 +690,20 @@ fn test_resurge_staking_claim_and_early_unstake_penalty() {
         vec![bincode::serialize(&staking_id.to_bytes()).unwrap()],
     );
 
+    // stake_for must reject caller-supplied source addresses that do not match sender.
+    submit_contract_call_tx_expect_failure(
+        &runtime,
+        user_pk,
+        &user_sk,
+        &staking_id,
+        "stake_for",
+        vec![
+            bincode::serialize(&admin_pk.to_bytes()).unwrap(),
+            bincode::serialize(&user_pk.to_bytes()).unwrap(),
+            bincode::serialize(&1u128).unwrap(),
+        ],
+    );
+
     let minted_amount = 1_000_000_000_000_000_000_000u128;
     submit_contract_call_tx(
         &runtime,

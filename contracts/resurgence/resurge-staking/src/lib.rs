@@ -178,6 +178,10 @@ pub extern "C" fn stake_for(_ptr: i32, len: i32) -> i32 {
     let user: Address = deserialize_arg(&args, 1);
     let amount: u128 = deserialize_arg(&args, 2);
 
+    if sender() != pool_address {
+        revert("ResurgeStakingPool: caller/source mismatch");
+    }
+
     update_reward(Some(user));
     stake_internal(user, amount, [0u8; 32], pool_address);
     return_data(&true)

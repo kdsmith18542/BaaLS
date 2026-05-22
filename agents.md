@@ -72,6 +72,7 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 - **Staking manager/pool custody flow was aligned.** Batch stake now transfers DEADCOIN user->pool and manager calls credit stake accounting without double-pull.
 - **Resurgence end-to-end tests are green.** `tests/resurgence_contracts.rs` covers staking, claim/penalty, governance execution, and manager batch stake dynamic-rate behavior.
 - **Reward mint authorization is sender-bound.** `mint_and_distribute` now authorizes by actual caller identity (contract sender), preventing caller-supplied pool spoofing; regression coverage includes rejected direct user mint attempts.
+- **Resurge staking `stake_for` source binding is enforced.** Caller identity must match the source address argument, preventing arbitrary caller-supplied source-account pulls in delegated staking flows.
 
 ## Known Issues
 
