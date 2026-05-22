@@ -137,8 +137,8 @@ async function refresh() {
       });
     }
 
-    // Peers
-    const peerArr = peers?.peers || [];
+    // Peers (filter out localhost/loopback — internal topology)
+    const peerArr = (peers?.peers || []).filter(p => !/^(127\.|localhost|::1)/.test(p));
     el.netPeerCount.textContent = String(peerArr.length);
     el.netPeerList.innerHTML = "";
     peerArr.forEach(p => {
