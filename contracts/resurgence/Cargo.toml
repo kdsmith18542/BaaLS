@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "common",
+    "resurge-token",
+    "staking-pool",
+    "resurge-staking",
+    "reward-distributor",
+    "governance",
+    "staking-pool-manager",
+]
+
+[workspace.dependencies]
+resurgence-common = { path = "common" }
+serde = { version = "1", default-features = false, features = ["derive"] }
+bincode = { version = "1", default-features = false }

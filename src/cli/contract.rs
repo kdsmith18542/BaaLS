@@ -152,12 +152,13 @@ pub fn handle_contract(
             let storage = crate::SledStorage::new(temp_dir.path())?;
             let engine = crate::BaaLSContractEngine::new(storage.clone())?;
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+            let caller_bytes = caller.to_bytes();
 
             match engine.execute_wasm_contract(
                 &wasm_data,
                 &method,
                 &arg_bytes,
-                &caller,
+                &caller_bytes,
                 &contract_id,
                 &storage,
                 true,
@@ -168,7 +169,8 @@ pub fn handle_contract(
                 Ok((output, gas_used, side_effects)) => {
                     let logs = side_effects
                         .events
-                        .iter()
+                        .values()
+                        .flatten()
                         .map(|(topic, data)| {
                             serde_json::json!({
                                 "topic_hex": hex::encode(topic),
@@ -196,8 +198,8 @@ pub fn handle_contract(
                             "gas_used": gas_used,
                             "output_hex": hex::encode(output),
                             "logs": logs,
-                            "storage_writes": side_effects.storage_updates.writes.len(),
-                            "storage_deletes": side_effects.storage_updates.deletes.len(),
+                            "storage_writes": side_effects.storage_updates.values().map(|updates| updates.writes.len()).sum::<usize>(),
+                            "storage_deletes": side_effects.storage_updates.values().map(|updates| updates.deletes.len()).sum::<usize>(),
                             "state_mutated": false
                         }),
                     ))

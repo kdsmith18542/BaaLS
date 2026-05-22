@@ -218,15 +218,19 @@ impl BaaLSSdk {
             .storage()
             .put_contract_deployer(&deploy_result.contract_id, &deploy_result.deployer)?;
         // Apply init side effects
-        for (key, val) in deploy_result.side_effects.storage_updates.writes {
-            self.runtime.storage().contract_storage_write(
-                &deploy_result.contract_id,
-                &key,
-                &val,
-            )?;
-        }
-        for key in deploy_result.side_effects.storage_updates.deletes {
-            self.runtime.storage().contract_storage_remove(&deploy_result.contract_id, &key)?;
+        if let Some(updates) =
+            deploy_result.side_effects.storage_updates.get(&deploy_result.contract_id)
+        {
+            for (key, val) in &updates.writes {
+                self.runtime.storage().contract_storage_write(
+                    &deploy_result.contract_id,
+                    key,
+                    val,
+                )?;
+            }
+            for key in &updates.deletes {
+                self.runtime.storage().contract_storage_remove(&deploy_result.contract_id, key)?;
+            }
         }
         Ok(deploy_result.contract_id)
     }

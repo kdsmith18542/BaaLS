@@ -75,7 +75,35 @@ Cargo requires `source ~/.cargo/env` on the VPS. Clear stale build artifacts wit
 - **P2P connection churn still occurs.** Peers may still close/reconnect on timeout windows, but expected idle timeout events are now debug-level rather than error-level.
 - **Admin endpoints need JWT for writes.** POST/DELETE on `/api/v1/admin/signers` requires a token from `/auth/token`.
 
-## Remaining Work
+## Ecosystem
+
+BaaLS is the core runtime in a multi-project platform. See `ROADMAP.md` for full details.
+
+| Project | Role | Path |
+|---------|------|------|
+| **BaaLS** | Blockchain runtime | `G:\BACKUP\baals` |
+| **Canvas Contracts** | Visual WASM contract builder | `G:\BACKUP\canvascontract` |
+| **ChronoNode** | Archival/indexing with Merkle proofs | `G:\BACKUP\chrononode\chrononode` |
+| **Resurgence** | First transacting app (staking/governance) — porting from Solidity to BaaLS WASM | `G:\BACKUP\resurgence-protocol` |
+| **Trellis** | Future: developer onboarding / chain scaffolding | `C:\...\GrindSquad.Online\sub-projects\trellis` |
+
+### Active Priority: Resurgence Port
+
+Port Resurgence Protocol's Proof-of-Dormancy staking model from Solidity/EVM to WASM contracts on BaaLS. This generates real recurring transactions (stake, unstake, claim, vote, govern). Canvas builds the contracts, BaaLS executes them, ChronoNode archives the history.
+
+### Next: ChronoNode Live Integration
+
+ChronoNode's BaaLS adapter is functional. Point it at the live VPS nodes and start ingesting real blocks.
+
+### Then: Canvas Contracts Completion
+
+Finish WASM codegen (currently stubbed), wire deployment to live BaaLS endpoints, complete frontend node palette.
+
+### Future: Trellis Integration
+
+Port Trellis's "bring your own chain" CLI scaffolding concept to BaaLS for developer onboarding.
+
+## Remaining Work (BaaLS Core)
 
 ### Medium Priority
 

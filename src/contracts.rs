@@ -1,9 +1,7 @@
 use crate::storage::Storage;
-use crate::types::{
-    ContractExecutionSideEffects, ContractId, PublicKey, StorageUpdateSet, TransactionSignature,
-};
+use crate::types::{ContractExecutionSideEffects, ContractId, PublicKey, TransactionSignature};
 use ed25519_dalek::Signature as Ed25519Signature;
-use log::{info, warn};
+use log::{debug, info, warn};
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -278,7 +276,7 @@ pub struct ContractMethod {
 // ─── HostState: passed through wasmtime Caller ───
 
 struct HostState {
-    caller: PublicKey,
+    caller: [u8; 32],
     contract_id: ContractId,
     contract_storage: HashMap<Vec<u8>, Vec<u8>>,
     storage: Box<dyn Storage>,
@@ -385,7 +383,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
         wasm_bytes: &[u8],
         method_name: &str,
         args: &[Vec<u8>],
-        caller: &PublicKey,
+        caller: &[u8; 32],
         contract_id: &ContractId,
         storage: &dyn Storage,
         read_only: bool,
@@ -491,16 +489,16 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     ));
                 }
 
-                let mut side_effects = ContractExecutionSideEffects {
-                    storage_updates: StorageUpdateSet {
-                        writes: std::mem::take(&mut host_state.contract_storage),
-                        deletes: std::mem::take(&mut host_state.deleted_keys),
-                    },
-                    events: std::mem::take(&mut host_state.events),
-                };
+                let mut side_effects = ContractExecutionSideEffects::new(
+                    contract_id.clone(),
+                    std::mem::take(&mut host_state.contract_storage),
+                    std::mem::take(&mut host_state.deleted_keys),
+                    std::mem::take(&mut host_state.events),
+                );
 
                 let pending_calls = std::mem::take(&mut host_state.inter_contract_calls);
                 let storage_ref = storage.clone_storage();
+                let subcall_caller = contract_id.to_bytes();
 
                 // Process inter-contract calls
                 let mut call_results = Vec::new();
@@ -527,7 +525,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         &callee_wasm,
                         &callee_method,
                         call_args,
-                        caller,
+                        &subcall_caller,
                         &callee_id,
                         &*storage_ref,
                         read_only,
@@ -538,18 +536,35 @@ impl<S: Storage> BaaLSContractEngine<S> {
                         Ok((result_data, _, sub_side_effects)) => {
                             call_results.push(result_data);
                             // MERGE side effects
-                            side_effects
-                                .storage_updates
-                                .writes
-                                .extend(sub_side_effects.storage_updates.writes);
-                            side_effects
-                                .storage_updates
-                                .deletes
-                                .extend(sub_side_effects.storage_updates.deletes);
-                            side_effects.events.extend(sub_side_effects.events);
+                            for (sub_contract_id, sub_storage_updates) in
+                                sub_side_effects.storage_updates
+                            {
+                                let entry = side_effects
+                                    .storage_updates
+                                    .entry(sub_contract_id)
+                                    .or_default();
+                                entry.writes.extend(sub_storage_updates.writes);
+                                entry.deletes.extend(sub_storage_updates.deletes);
+                            }
+                            for (sub_contract_id, sub_events) in sub_side_effects.events {
+                                let entry = side_effects.events.entry(sub_contract_id).or_default();
+                                entry.extend(sub_events);
+                            }
                         }
-                        Err(_) => {
-                            call_results.push(vec![0x00]);
+                        Err(e) => {
+                            warn!(
+                                "[CONTRACTS] Subcall from {} to {}::{} failed: {:?}",
+                                hex::encode(contract_id.to_bytes()),
+                                hex::encode(callee_id_bytes),
+                                callee_method,
+                                e
+                            );
+                            return Err(ContractError::InterContractCallError(format!(
+                                "Subcall {}::{} failed: {}",
+                                hex::encode(callee_id_bytes),
+                                callee_method,
+                                e
+                            )));
                         }
                     }
                 }
@@ -741,7 +756,7 @@ impl<S: Storage> BaaLSContractEngine<S> {
                     Some(m) => m,
                     None => return,
                 };
-                let sender_bytes = caller.data().caller.to_bytes();
+                let sender_bytes = caller.data().caller;
                 let _ = mem.write(&mut caller, ptr as usize, &sender_bytes);
             })
             .map_err(|e| ContractError::HostFunctionError(e.to_string()))?;
@@ -1136,58 +1151,24 @@ impl<S: Storage> BaaLSContractEngine<S> {
     }
 
     pub fn scan_for_float_opcodes(wasm_bytes: &[u8]) -> Result<(), String> {
-        let mut i = 8; // skip WASM magic + version
-        loop {
-            if i >= wasm_bytes.len() {
-                break;
-            }
-            let section_id = wasm_bytes[i];
-            i += 1;
-            if i >= wasm_bytes.len() {
-                break;
-            }
-            // Read section length (LEB128 u32)
-            let mut section_len = 0usize;
-            let mut shift = 0;
-            loop {
-                if i >= wasm_bytes.len() {
-                    return Err("Unexpected end of WASM data".to_string());
-                }
-                let byte = wasm_bytes[i] as usize;
-                section_len |= (byte & 0x7F) << shift;
-                i += 1;
-                shift += 7;
-                if byte & 0x80 == 0 {
-                    break;
-                }
-                if shift > 35 {
-                    return Err("Section length overflow".to_string());
-                }
-            }
-            if section_id == 0x0A {
-                // Code section: scan function bodies for float opcodes
-                let section_end = (i + section_len).min(wasm_bytes.len());
-                while i < section_end {
-                    let op = wasm_bytes[i];
-                    match op {
-                        // Float memory, constant, comparison, arithmetic, and conversion opcodes
-                        0x2A..=0x2D
-                        | 0x43..=0x44
-                        | 0x5B..=0x66
-                        | 0x8B..=0x9E
-                        | 0xA7..=0xB1
-                        | 0x9F..=0xA2 => {
+        let parser = wasmparser::Parser::new(0);
+        for payload in parser.parse_all(wasm_bytes) {
+            let payload = payload.map_err(|e| e.to_string())?;
+            match payload {
+                wasmparser::Payload::CodeSectionEntry(body) => {
+                    let reader = body.get_operators_reader().map_err(|e| e.to_string())?;
+                    for op in reader {
+                        let op = op.map_err(|e| e.to_string())?;
+                        let name = format!("{:?}", op);
+                        if name.contains("F32") || name.contains("F64") {
                             return Err(format!(
-                                "Non-deterministic float opcode 0x{:02X} at byte {}",
-                                op, i
-                            ))
+                                "Non-deterministic float opcode {:?} detected",
+                                op
+                            ));
                         }
-                        _ => {}
                     }
-                    i += 1;
                 }
-            } else {
-                i += section_len;
+                _ => {}
             }
         }
         Ok(())
@@ -1232,12 +1213,13 @@ impl<S: Storage> WasmRuntime for BaaLSContractEngine<S> {
         block_index: u64,
         block_timestamp: u64,
     ) -> Result<WasmResult, ContractError> {
+        let caller_bytes = caller.to_bytes();
         BaaLSContractEngine::execute_wasm_contract(
             self,
             wasm_bytes,
             method_name,
             args,
-            caller,
+            &caller_bytes,
             contract_id,
             storage,
             read_only,
@@ -1353,7 +1335,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
                     wasm_bytes,
                     "init",
                     &init_args,
-                    deployer,
+                    &deployer.to_bytes(),
                     &contract_id,
                     storage,
                     false,
@@ -1445,10 +1427,10 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
                 ))
             })?;
 
-        // Check deployer — log warning if caller is not the deployer
+        // Check deployer for traceability; non-deployer calls are expected in normal usage.
         if let Ok(Some(deployer)) = storage.get_contract_deployer(contract_id) {
             if deployer != *caller {
-                warn!(
+                debug!(
                     "[CONTRACTS] Caller {} is not the deployer of contract {}",
                     hex::encode(caller.to_bytes()),
                     hex::encode(contract_id.to_bytes())
@@ -1500,11 +1482,12 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
 
         let _ = value; // value transfer handled by ledger
 
+        let caller_bytes = caller.to_bytes();
         let (result, gas_used, side_effects) = self.execute_wasm_contract(
             &wasm_bytes,
             method_name,
             args,
-            caller,
+            &caller_bytes,
             contract_id,
             storage,
             false,
@@ -1546,18 +1529,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
                 ))
             })?;
 
-        let dummy_caller = PublicKey::from_bytes(&[0; 32])
-            .map_err(|_| ContractError::ExecutionError("Invalid dummy key".to_string()))?;
-
-        if let Ok(Some(deployer)) = storage.get_contract_deployer(contract_id) {
-            if deployer != dummy_caller {
-                warn!(
-                    "[CONTRACTS] Query caller {} is not the deployer of contract {}",
-                    hex::encode(dummy_caller.to_bytes()),
-                    hex::encode(contract_id.to_bytes())
-                );
-            }
-        }
+        let dummy_caller = [0u8; 32];
 
         let args = [payload.to_vec()];
         let (result, _, _) = self.execute_wasm_contract(
@@ -1613,8 +1585,7 @@ impl<S: Storage + 'static> ContractEngine for BaaLSContractEngine<S> {
             }
         };
 
-        let dummy_caller = PublicKey::from_bytes(&[0; 32])
-            .map_err(|_| ContractError::ExecutionError("Invalid dummy key".to_string()))?;
+        let dummy_caller = [0u8; 32];
 
         // Dry-run execution to measure actual gas used
         let start = Instant::now();

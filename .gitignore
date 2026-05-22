@@ -2,6 +2,7 @@
 /target/
 **/*.rs.bk
 sdk/nodejs-native/target/
+contracts/**/target/
 
 # IDEs and editors
 .idea/

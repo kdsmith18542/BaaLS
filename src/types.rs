@@ -207,8 +207,27 @@ pub struct StorageUpdateSet {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ContractExecutionSideEffects {
-    pub storage_updates: StorageUpdateSet,
-    pub events: Vec<(Vec<u8>, Vec<u8>)>,
+    pub storage_updates: std::collections::HashMap<ContractId, StorageUpdateSet>,
+    pub events: std::collections::HashMap<ContractId, Vec<(Vec<u8>, Vec<u8>)>>,
+}
+
+impl ContractExecutionSideEffects {
+    pub fn new(
+        contract_id: ContractId,
+        writes: std::collections::HashMap<Vec<u8>, Vec<u8>>,
+        deletes: Vec<Vec<u8>>,
+        events: Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Self {
+        let mut storage_updates = std::collections::HashMap::new();
+        if !writes.is_empty() || !deletes.is_empty() {
+            storage_updates.insert(contract_id.clone(), StorageUpdateSet { writes, deletes });
+        }
+        let mut events_map = std::collections::HashMap::new();
+        if !events.is_empty() {
+            events_map.insert(contract_id, events);
+        }
+        Self { storage_updates, events: events_map }
+    }
 }
 
 /// Key-indexed sparse Merkle tree (256-bit keys).

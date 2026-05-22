@@ -994,8 +994,7 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
                 Err(e) if heartbeat_candidate => {
                     debug!(
                         "[HEARTBEAT] Skipping empty block #{}: quorum signatures unavailable ({})",
-                        new_block.index,
-                        e
+                        new_block.index, e
                     );
                     return Err(ConsensusError::NoPendingTransactions.into());
                 }
@@ -1890,22 +1889,29 @@ impl<S: Storage + 'static, C: ConsensusEngine + 'static, Y: SyncLayer + 'static>
             })?;
 
         // Apply init side effects to storage
-        for (key, val) in deploy_result.side_effects.storage_updates.writes {
-            self.storage.contract_storage_write(&deploy_result.contract_id, &key, &val).map_err(
-                |e| {
-                    RuntimeError::InvalidTransaction(format!("Failed to write init storage: {}", e))
-                },
-            )?;
-        }
-        for key in deploy_result.side_effects.storage_updates.deletes {
-            self.storage.contract_storage_remove(&deploy_result.contract_id, &key).map_err(
-                |e| {
-                    RuntimeError::InvalidTransaction(format!(
-                        "Failed to delete init storage: {}",
-                        e
-                    ))
-                },
-            )?;
+        if let Some(updates) =
+            deploy_result.side_effects.storage_updates.get(&deploy_result.contract_id)
+        {
+            for (key, val) in &updates.writes {
+                self.storage.contract_storage_write(&deploy_result.contract_id, key, val).map_err(
+                    |e| {
+                        RuntimeError::InvalidTransaction(format!(
+                            "Failed to write init storage: {}",
+                            e
+                        ))
+                    },
+                )?;
+            }
+            for key in &updates.deletes {
+                self.storage.contract_storage_remove(&deploy_result.contract_id, key).map_err(
+                    |e| {
+                        RuntimeError::InvalidTransaction(format!(
+                            "Failed to delete init storage: {}",
+                            e
+                        ))
+                    },
+                )?;
+            }
         }
 
         info!(

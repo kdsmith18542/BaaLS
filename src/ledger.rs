@@ -379,48 +379,63 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                                     bincode::serialize(&deploy_result.deployer)?,
                                 ));
                                 // Merge init side effects
-                                for (key, val) in &deploy_result.side_effects.storage_updates.writes
+                                if let Some(updates) = deploy_result
+                                    .side_effects
+                                    .storage_updates
+                                    .get(&deploy_result.contract_id)
                                 {
-                                    let full_key = format!(
-                                        "state:{}:{}",
-                                        hex::encode(deploy_result.contract_id.to_bytes()),
-                                        hex::encode(key)
-                                    );
-                                    batch.ops.push(StorageOperation::PutContractStorage(
-                                        full_key.as_bytes().to_vec(),
-                                        val.clone(),
-                                    ));
+                                    for (key, val) in &updates.writes {
+                                        let full_key = format!(
+                                            "state:{}:{}",
+                                            hex::encode(deploy_result.contract_id.to_bytes()),
+                                            hex::encode(key)
+                                        );
+                                        batch.ops.push(StorageOperation::PutContractStorage(
+                                            full_key.as_bytes().to_vec(),
+                                            val.clone(),
+                                        ));
+                                    }
+                                    for key in &updates.deletes {
+                                        let full_key = format!(
+                                            "state:{}:{}",
+                                            hex::encode(deploy_result.contract_id.to_bytes()),
+                                            hex::encode(key)
+                                        );
+                                        batch.ops.push(StorageOperation::DeleteContractStorage(
+                                            full_key.as_bytes().to_vec(),
+                                        ));
+                                    }
                                 }
-                                for key in &deploy_result.side_effects.storage_updates.deletes {
-                                    let full_key = format!(
-                                        "state:{}:{}",
-                                        hex::encode(deploy_result.contract_id.to_bytes()),
-                                        hex::encode(key)
-                                    );
-                                    batch.ops.push(StorageOperation::DeleteContractStorage(
-                                        full_key.as_bytes().to_vec(),
-                                    ));
-                                }
-                                for (topic, data) in &deploy_result.side_effects.events {
-                                    let event_key = format!(
-                                        "event:{}:{}:{}",
-                                        hex::encode(deploy_result.contract_id.to_bytes()),
-                                        hex::encode(topic),
-                                        hex::encode(tx.hash)
-                                    );
-                                    batch.ops.push(StorageOperation::PutContractEvent(
-                                        event_key.as_bytes().to_vec(),
-                                        data.clone(),
-                                    ));
+                                if let Some(events) = deploy_result
+                                    .side_effects
+                                    .events
+                                    .get(&deploy_result.contract_id)
+                                {
+                                    for (topic, data) in events {
+                                        let event_key = format!(
+                                            "event:{}:{}:{}",
+                                            hex::encode(deploy_result.contract_id.to_bytes()),
+                                            hex::encode(topic),
+                                            hex::encode(tx.hash)
+                                        );
+                                        batch.ops.push(StorageOperation::PutContractEvent(
+                                            event_key.as_bytes().to_vec(),
+                                            data.clone(),
+                                        ));
+                                    }
                                 }
                                 let code_hash: [u8; 32] =
                                     Sha256::digest(&deploy_result.wasm_bytes).into();
                                 let mut deploy_storage_smt = SparseMerkleTree::new();
-                                for (key, value) in
-                                    &deploy_result.side_effects.storage_updates.writes
+                                if let Some(updates) = deploy_result
+                                    .side_effects
+                                    .storage_updates
+                                    .get(&deploy_result.contract_id)
                                 {
-                                    let smt_key: [u8; 32] = Sha256::digest(key).into();
-                                    deploy_storage_smt.insert(smt_key, value.clone());
+                                    for (key, value) in &updates.writes {
+                                        let smt_key: [u8; 32] = Sha256::digest(key).into();
+                                        deploy_storage_smt.insert(smt_key, value.clone());
+                                    }
                                 }
                                 let storage_root_hash = deploy_storage_smt.root();
                                 let contract_account = Account::Contract {
@@ -525,78 +540,90 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                                 }
 
                                 // Merge contract side effects into block batch
-                                for (key, val) in &result.side_effects.storage_updates.writes {
-                                    let full_key = format!(
-                                        "state:{}:{}",
-                                        hex::encode(contract_id.to_bytes()),
-                                        hex::encode(key)
-                                    );
-                                    batch.ops.push(StorageOperation::PutContractStorage(
-                                        full_key.as_bytes().to_vec(),
-                                        val.clone(),
-                                    ));
-                                }
-                                for key in &result.side_effects.storage_updates.deletes {
-                                    let full_key = format!(
-                                        "state:{}:{}",
-                                        hex::encode(contract_id.to_bytes()),
-                                        hex::encode(key)
-                                    );
-                                    batch.ops.push(StorageOperation::DeleteContractStorage(
-                                        full_key.as_bytes().to_vec(),
-                                    ));
-                                }
-                                for (topic, data) in result.side_effects.events {
-                                    let event_key = format!(
-                                        "event:{}:{}:{}",
-                                        hex::encode(contract_id.to_bytes()),
-                                        hex::encode(topic),
-                                        hex::encode(tx.hash)
-                                    );
-                                    batch.ops.push(StorageOperation::PutContractEvent(
-                                        event_key.as_bytes().to_vec(),
-                                        data,
-                                    ));
-                                }
-                                touched_contracts
-                                    .insert(contract_account_public_key(contract_id).to_bytes());
-
-                                // Recompute the contract's storage root to reflect all changes
-                                let contract_account_pk = contract_account_public_key(contract_id);
-                                if let Some(mut contract_account) =
-                                    self.storage.get_account(&contract_account_pk)?
+                                for (target_contract_id, updates) in
+                                    &result.side_effects.storage_updates
                                 {
-                                    let mut all_kvs: HashMap<Vec<u8>, Vec<u8>> = self
-                                        .storage
-                                        .contract_storage_read_all(contract_id)?
-                                        .into_iter()
-                                        .collect();
-
-                                    for (key, val) in &result.side_effects.storage_updates.writes {
-                                        all_kvs.insert(key.clone(), val.clone());
+                                    for (key, val) in &updates.writes {
+                                        let full_key = format!(
+                                            "state:{}:{}",
+                                            hex::encode(target_contract_id.to_bytes()),
+                                            hex::encode(key)
+                                        );
+                                        batch.ops.push(StorageOperation::PutContractStorage(
+                                            full_key.as_bytes().to_vec(),
+                                            val.clone(),
+                                        ));
                                     }
-                                    for key in &result.side_effects.storage_updates.deletes {
-                                        all_kvs.remove(key);
+                                    for key in &updates.deletes {
+                                        let full_key = format!(
+                                            "state:{}:{}",
+                                            hex::encode(target_contract_id.to_bytes()),
+                                            hex::encode(key)
+                                        );
+                                        batch.ops.push(StorageOperation::DeleteContractStorage(
+                                            full_key.as_bytes().to_vec(),
+                                        ));
                                     }
-
-                                    let mut smt = SparseMerkleTree::new();
-                                    for (key, val) in &all_kvs {
-                                        let smt_key: [u8; 32] = Sha256::digest(key).into();
-                                        smt.insert(smt_key, val.clone());
+                                    touched_contracts.insert(
+                                        contract_account_public_key(target_contract_id).to_bytes(),
+                                    );
+                                }
+                                for (target_contract_id, events) in &result.side_effects.events {
+                                    for (topic, data) in events {
+                                        let event_key = format!(
+                                            "event:{}:{}:{}",
+                                            hex::encode(target_contract_id.to_bytes()),
+                                            hex::encode(topic),
+                                            hex::encode(tx.hash)
+                                        );
+                                        batch.ops.push(StorageOperation::PutContractEvent(
+                                            event_key.as_bytes().to_vec(),
+                                            data.clone(),
+                                        ));
                                     }
-                                    let new_storage_root = smt.root();
+                                }
 
-                                    if let Account::Contract { storage_root_hash, .. } =
-                                        &mut contract_account
+                                // Recompute the contract's storage root to reflect all changes for each touched contract
+                                for (target_contract_id, updates) in
+                                    &result.side_effects.storage_updates
+                                {
+                                    let contract_account_pk =
+                                        contract_account_public_key(target_contract_id);
+                                    if let Some(mut contract_account) =
+                                        self.storage.get_account(&contract_account_pk)?
                                     {
-                                        *storage_root_hash = new_storage_root;
-                                    }
+                                        let mut all_kvs: HashMap<Vec<u8>, Vec<u8>> = self
+                                            .storage
+                                            .contract_storage_read_all(target_contract_id)?
+                                            .into_iter()
+                                            .collect();
 
-                                    batch.ops.push(StorageOperation::PutAccount(
-                                        contract_account_pk.to_bytes().to_vec(),
-                                        bincode::serialize(&contract_account)?,
-                                    ));
-                                    sender_cache.insert(contract_account_pk, contract_account);
+                                        for (key, val) in &updates.writes {
+                                            all_kvs.insert(key.clone(), val.clone());
+                                        }
+                                        for key in &updates.deletes {
+                                            all_kvs.remove(key);
+                                        }
+
+                                        let mut smt = SparseMerkleTree::new();
+                                        for (key, val) in &all_kvs {
+                                            let smt_key: [u8; 32] = Sha256::digest(key).into();
+                                            smt.insert(smt_key, val.clone());
+                                        }
+                                        let new_storage_root = smt.root();
+
+                                        if let Account::Contract { storage_root_hash, .. } =
+                                            &mut contract_account
+                                        {
+                                            *storage_root_hash = new_storage_root;
+                                        }
+
+                                        batch.ops.push(StorageOperation::PutAccount(
+                                            contract_account_pk.to_bytes().to_vec(),
+                                            bincode::serialize(&contract_account)?,
+                                        ));
+                                        sender_cache.insert(contract_account_pk, contract_account);
+                                    }
                                 }
                             }
                             Err(e) => {

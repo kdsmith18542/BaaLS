@@ -152,6 +152,7 @@ pub fn handle_dev(
             contract_hash.copy_from_slice(&sha2::Sha256::digest(&wasm_bytes));
             let contract_id = crate::ContractId::from_bytes(&contract_hash);
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+            let deployer_bytes = deployer.to_bytes();
 
             storage.put_contract_code(&contract_id, &wasm_bytes)?;
 
@@ -159,7 +160,7 @@ pub fn handle_dev(
                 &wasm_bytes,
                 &method,
                 &args_vec,
-                &deployer,
+                &deployer_bytes,
                 &contract_id,
                 &storage,
                 true,
@@ -170,7 +171,8 @@ pub fn handle_dev(
                 Ok((output, gas_used, side_effects)) => {
                     let logs = side_effects
                         .events
-                        .iter()
+                        .values()
+                        .flatten()
                         .map(|(topic, data)| {
                             serde_json::json!({
                                 "topic_hex": hex::encode(topic),
@@ -194,8 +196,8 @@ pub fn handle_dev(
                             "gas_used": gas_used,
                             "output_hex": hex::encode(output),
                             "logs": logs,
-                            "storage_writes": side_effects.storage_updates.writes.len(),
-                            "storage_deletes": side_effects.storage_updates.deletes.len(),
+                            "storage_writes": side_effects.storage_updates.values().map(|updates| updates.writes.len()).sum::<usize>(),
+                            "storage_deletes": side_effects.storage_updates.values().map(|updates| updates.deletes.len()).sum::<usize>(),
                             "state_mutated": false
                         }),
                     ))
