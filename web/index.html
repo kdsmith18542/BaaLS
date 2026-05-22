@@ -3,171 +3,215 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>BaaLS Online | Local-First Chain + Explorer</title>
-    <meta
-      name="description"
-      content="BaaLS online presence with a built-in block explorer for local and hosted nodes."
-    />
+    <title>BaaLS — Blockchain as a Local Service</title>
+    <meta name="description" content="Embedded blockchain runtime with Ed25519 PoA consensus, WASM smart contracts, and P2P sync." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
-      rel="stylesheet"
-    />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <div class="bg-orb bg-orb-1" aria-hidden="true"></div>
-    <div class="bg-orb bg-orb-2" aria-hidden="true"></div>
 
-    <header class="topbar">
-      <div class="brand">BaaLS</div>
-      <div class="tag">baals.network</div>
-    </header>
-
-    <main class="shell">
-      <section class="hero">
-        <p class="kicker">Blockchain As A Local Service</p>
-        <h1>Project Web + Block Explorer</h1>
-        <p class="subtext">
-          This site is the public web surface for BaaLS and includes a chain explorer
-          wired to the node HTTP and WebSocket APIs.
-        </p>
-      </section>
-
-      <section class="panel">
-        <div class="panel-title-row">
-          <h2>Endpoint Config</h2>
-          <span id="statusBadge" class="status-badge status-idle">Not Checked</span>
+    <!-- ─── Nav ─── -->
+    <nav class="nav">
+      <div class="nav-inner">
+        <a href="#" class="nav-brand">
+          <span class="nav-logo">B</span>
+          <span>BaaLS</span>
+        </a>
+        <div class="nav-links">
+          <a href="#explorer">Explorer</a>
+          <a href="#network">Network</a>
+          <a href="https://github.com" class="nav-gh" target="_blank" rel="noopener">GitHub</a>
         </div>
-        <div class="controls-grid">
-          <label>
-            API Base URL
-            <input id="apiBase" type="url" placeholder="http://127.0.0.1:8080" />
-          </label>
-          <label>
-            WS URL
-            <input id="wsBase" type="url" placeholder="ws://127.0.0.1:8081" />
-          </label>
+        <div class="nav-status">
+          <span class="pulse" id="statusDot"></span>
+          <span id="statusText" class="nav-status-text">Connecting</span>
         </div>
-        <div class="button-row">
-          <button id="saveConfigBtn" class="btn">Save Config</button>
-          <button id="refreshBtn" class="btn btn-ghost">Refresh Snapshot</button>
-          <button id="clearLogBtn" class="btn btn-ghost">Clear Event Log</button>
-        </div>
-      </section>
+      </div>
+    </nav>
 
-      <section class="panel">
-        <h2>Chain Snapshot</h2>
-        <div class="metric-grid">
-          <article class="metric-card">
-            <h3>Health</h3>
-            <p id="healthValue">-</p>
-          </article>
-          <article class="metric-card">
-            <h3>Height</h3>
-            <p id="heightValue">-</p>
-          </article>
-          <article class="metric-card">
-            <h3>Latest Hash</h3>
-            <p id="hashValue" class="mono">-</p>
-          </article>
-          <article class="metric-card">
-            <h3>Latest Tx Count</h3>
-            <p id="txCountValue">-</p>
-          </article>
-        </div>
-      </section>
-
-      <section class="panel">
-        <h2>Network</h2>
-        <div class="metric-grid">
-          <article class="metric-card">
-            <h3>Total Supply</h3>
-            <p id="supplyValue">-</p>
-          </article>
-          <article class="metric-card">
-            <h3>Accounts</h3>
-            <p id="accountsValue">-</p>
-          </article>
-          <article class="metric-card">
-            <h3>Peers</h3>
-            <p id="peersValue">-</p>
-          </article>
-          <article class="metric-card">
-            <h3>Signers</h3>
-            <p id="signersValue">-</p>
-          </article>
-        </div>
-        <details class="net-details" id="peerDetails">
-          <summary>Peer List</summary>
-          <pre class="code-block compact" id="peerList">-</pre>
-        </details>
-        <details class="net-details" id="signerDetails">
-          <summary>Signer List</summary>
-          <pre class="code-block compact" id="signerList">-</pre>
-        </details>
-      </section>
-
-      <section class="panel">
-        <h2>Explorer Search</h2>
-        <form id="searchForm" class="search-row">
-          <select id="queryType" aria-label="Query type">
-            <option value="block-height">Block by Height</option>
-            <option value="block-hash">Block by Hash</option>
-            <option value="tx-hash">Transaction by Hash</option>
-            <option value="tx-address">Transactions by Address</option>
-            <option value="account">Account by Public Key</option>
-          </select>
-          <input
-            id="queryValue"
-            type="text"
-            required
-            placeholder="Enter height, hash, or address/public key"
-          />
-          <button type="submit" class="btn">Run Query</button>
-        </form>
-        <div id="queryOutput" class="result-area">
-          <p class="muted-hint">Run a query to inspect chain objects.</p>
-        </div>
-      </section>
-
-      <section class="panel">
-        <h2>Latest Blocks</h2>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Height</th>
-                <th>Hash</th>
-                <th>Timestamp</th>
-                <th>Tx Count</th>
-              </tr>
-            </thead>
-            <tbody id="blocksTableBody"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-title-row">
-          <h2>Live Event Stream</h2>
-          <div class="button-row compact">
-            <button id="wsConnectBtn" class="btn">Connect WS</button>
-            <button id="wsDisconnectBtn" class="btn btn-ghost">Disconnect</button>
+    <!-- ─── Hero ─── -->
+    <header class="hero">
+      <div class="hero-inner">
+        <div class="hero-content">
+          <p class="hero-badge">Embedded Blockchain Runtime</p>
+          <h1>Blockchain as a<br />Local Service</h1>
+          <p class="hero-sub">
+            Ed25519 PoA consensus with round-robin block production, WASM smart contracts,
+            P2P sync over TLS, and a configurable fee system — packaged as a single binary.
+          </p>
+          <div class="hero-actions">
+            <a href="#explorer" class="btn btn-primary">Open Explorer</a>
+            <a href="#network" class="btn btn-outline">View Network</a>
           </div>
         </div>
-        <p class="subtext small">
-          Subscribes to <code>blocks</code>, <code>transactions</code>, and <code>mempool</code>.
-        </p>
-        <div id="eventLog" class="log"></div>
+        <div class="hero-stats">
+          <div class="stat-card">
+            <span class="stat-value" id="heroHeight">—</span>
+            <span class="stat-label">Block Height</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-value" id="heroSupply">—</span>
+            <span class="stat-label">Total Supply</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-value" id="heroPeers">—</span>
+            <span class="stat-label">Connected Peers</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-value" id="heroValidators">—</span>
+            <span class="stat-label">Validators</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- ─── Live Ticker ─── -->
+    <div class="ticker">
+      <div class="ticker-inner">
+        <div class="ticker-item">
+          <span class="ticker-label">Latest Block</span>
+          <span class="ticker-value mono" id="tickerHash">—</span>
+        </div>
+        <div class="ticker-item">
+          <span class="ticker-label">Uptime</span>
+          <span class="ticker-value" id="tickerUptime">—</span>
+        </div>
+        <div class="ticker-item">
+          <span class="ticker-label">Mempool</span>
+          <span class="ticker-value" id="tickerMempool">—</span>
+        </div>
+        <div class="ticker-item">
+          <span class="ticker-label">Version</span>
+          <span class="ticker-value" id="tickerVersion">—</span>
+        </div>
+      </div>
+    </div>
+
+    <main>
+
+      <!-- ─── Explorer ─── -->
+      <section class="section" id="explorer">
+        <div class="section-inner">
+          <div class="section-header">
+            <h2>Explorer</h2>
+            <p class="section-sub">Search blocks, transactions, and accounts on the BaaLS chain.</p>
+          </div>
+
+          <form id="searchForm" class="search-bar" autocomplete="off">
+            <div class="search-type-wrap">
+              <select id="searchType" aria-label="Search type">
+                <option value="auto">Auto-detect</option>
+                <option value="block-height">Block Height</option>
+                <option value="block-hash">Block Hash</option>
+                <option value="tx-hash">Tx Hash</option>
+                <option value="account">Account</option>
+                <option value="tx-address">Tx by Address</option>
+              </select>
+            </div>
+            <input id="searchInput" type="text" placeholder="Search by block height, hash, or address…" required />
+            <button type="submit" class="btn btn-primary btn-search">Search</button>
+          </form>
+
+          <div id="searchResults" class="search-results"></div>
+
+          <div class="blocks-section">
+            <h3>Latest Blocks</h3>
+            <div class="blocks-table-wrap">
+              <table class="blocks-table">
+                <thead>
+                  <tr>
+                    <th>Height</th>
+                    <th>Hash</th>
+                    <th>Time</th>
+                    <th>Txns</th>
+                  </tr>
+                </thead>
+                <tbody id="blocksBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       </section>
+
+      <!-- ─── Network ─── -->
+      <section class="section section-alt" id="network">
+        <div class="section-inner">
+          <div class="section-header">
+            <h2>Network</h2>
+            <p class="section-sub">Validators, peers, and chain health at a glance.</p>
+          </div>
+
+          <div class="net-grid">
+            <div class="net-card">
+              <h4>Validators</h4>
+              <div class="net-card-value" id="netValidatorCount">—</div>
+              <div class="net-list" id="netValidatorList"></div>
+            </div>
+            <div class="net-card">
+              <h4>Peers</h4>
+              <div class="net-card-value" id="netPeerCount">—</div>
+              <div class="net-list" id="netPeerList"></div>
+            </div>
+            <div class="net-card net-card-wide">
+              <h4>Chain Info</h4>
+              <div class="chain-info-grid">
+                <div><span class="ci-label">Storage</span><span class="ci-value" id="ciStorage">—</span></div>
+                <div><span class="ci-label">Memory</span><span class="ci-value" id="ciMemory">—</span></div>
+                <div><span class="ci-label">Consensus</span><span class="ci-value">PoA (Ed25519)</span></div>
+                <div><span class="ci-label">P2P</span><span class="ci-value">TLS / Mutual Auth</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Config (collapsed by default) -->
+          <details class="config-details">
+            <summary>Endpoint Configuration</summary>
+            <div class="config-grid">
+              <label>
+                <span>API Base URL</span>
+                <input id="cfgApi" type="url" placeholder="https://baals.network" />
+              </label>
+              <label>
+                <span>WebSocket URL</span>
+                <input id="cfgWs" type="url" placeholder="wss://baals.network/ws" />
+              </label>
+              <button id="cfgSave" class="btn btn-outline btn-sm">Save & Reconnect</button>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <!-- ─── WebSocket Log ─── -->
+      <section class="section" id="events">
+        <div class="section-inner">
+          <div class="section-header">
+            <div class="section-header-row">
+              <div>
+                <h2>Live Events</h2>
+                <p class="section-sub">Real-time block and transaction stream via WebSocket.</p>
+              </div>
+              <div class="ws-controls">
+                <button id="wsConnect" class="btn btn-outline btn-sm">Connect</button>
+                <button id="wsDisconnect" class="btn btn-ghost btn-sm">Disconnect</button>
+                <button id="wsClear" class="btn btn-ghost btn-sm">Clear</button>
+              </div>
+            </div>
+          </div>
+          <div id="eventLog" class="event-log"></div>
+        </div>
+      </section>
+
     </main>
 
     <footer class="footer">
-      <p>Built from the BaaLS project web folder for baals.network.</p>
+      <div class="footer-inner">
+        <span class="footer-brand">BaaLS</span>
+        <span class="footer-copy">Blockchain as a Local Service</span>
+      </div>
     </footer>
 
-    <script src="./app.js" type="module"></script>
+    <script src="./app.js"></script>
   </body>
 </html>

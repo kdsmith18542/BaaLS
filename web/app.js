@@ -1,531 +1,420 @@
-const isLocalHost =
-  window.location.hostname === "localhost" ||
-  window.location.hostname === "127.0.0.1";
+/* ── Config ── */
+const isLocal = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+const defaults = {
+  api: isLocal ? "http://127.0.0.1:8080" : window.location.origin,
+  ws: isLocal ? "ws://127.0.0.1:8081" : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
+};
+const STORAGE_KEY = "baals-cfg-v2";
 
-const defaultApiBase = isLocalHost
-  ? "http://127.0.0.1:8080"
-  : window.location.origin;
+function loadCfg() {
+  try { const c = JSON.parse(localStorage.getItem(STORAGE_KEY)); return { api: c.api || defaults.api, ws: c.ws || defaults.ws }; }
+  catch { return { ...defaults }; }
+}
+function saveCfg(c) { localStorage.setItem(STORAGE_KEY, JSON.stringify(c)); }
 
-const defaultWsBase = isLocalHost
-  ? "ws://127.0.0.1:8081"
-  : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws`;
-const configKey = "baals-web-config-v1";
+let cfg = loadCfg();
 
+/* ── DOM refs ── */
+const $ = (id) => document.getElementById(id);
 const el = {
-  apiBase: document.getElementById("apiBase"),
-  wsBase: document.getElementById("wsBase"),
-  saveConfigBtn: document.getElementById("saveConfigBtn"),
-  refreshBtn: document.getElementById("refreshBtn"),
-  clearLogBtn: document.getElementById("clearLogBtn"),
-  statusBadge: document.getElementById("statusBadge"),
-  healthValue: document.getElementById("healthValue"),
-  heightValue: document.getElementById("heightValue"),
-  hashValue: document.getElementById("hashValue"),
-  txCountValue: document.getElementById("txCountValue"),
-  supplyValue: document.getElementById("supplyValue"),
-  accountsValue: document.getElementById("accountsValue"),
-  peersValue: document.getElementById("peersValue"),
-  signersValue: document.getElementById("signersValue"),
-  peerList: document.getElementById("peerList"),
-  signerList: document.getElementById("signerList"),
-  searchForm: document.getElementById("searchForm"),
-  queryType: document.getElementById("queryType"),
-  queryValue: document.getElementById("queryValue"),
-  queryOutput: document.getElementById("queryOutput"),
-  blocksTableBody: document.getElementById("blocksTableBody"),
-  wsConnectBtn: document.getElementById("wsConnectBtn"),
-  wsDisconnectBtn: document.getElementById("wsDisconnectBtn"),
-  eventLog: document.getElementById("eventLog"),
+  statusDot: $("statusDot"), statusText: $("statusText"),
+  heroHeight: $("heroHeight"), heroSupply: $("heroSupply"), heroPeers: $("heroPeers"), heroValidators: $("heroValidators"),
+  tickerHash: $("tickerHash"), tickerUptime: $("tickerUptime"), tickerMempool: $("tickerMempool"), tickerVersion: $("tickerVersion"),
+  searchForm: $("searchForm"), searchType: $("searchType"), searchInput: $("searchInput"), searchResults: $("searchResults"),
+  blocksBody: $("blocksBody"),
+  netValidatorCount: $("netValidatorCount"), netValidatorList: $("netValidatorList"),
+  netPeerCount: $("netPeerCount"), netPeerList: $("netPeerList"),
+  ciStorage: $("ciStorage"), ciMemory: $("ciMemory"),
+  cfgApi: $("cfgApi"), cfgWs: $("cfgWs"), cfgSave: $("cfgSave"),
+  wsConnect: $("wsConnect"), wsDisconnect: $("wsDisconnect"), wsClear: $("wsClear"), eventLog: $("eventLog"),
 };
 
-let ws = null;
-
-function normalizeApiBase(raw) {
-  const trimmed = (raw || "").trim().replace(/\/+$/, "");
-  return trimmed || defaultApiBase;
+/* ── Helpers ── */
+async function api(path) {
+  const r = await fetch(`${cfg.api}${path}`, { headers: { Accept: "application/json" } });
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return r.json();
 }
 
-function normalizeWsBase(raw) {
-  const trimmed = (raw || "").trim().replace(/\/+$/, "");
-  return trimmed || defaultWsBase;
+function short(h, w = 8) {
+  if (!h || typeof h !== "string") return "—";
+  return h.length <= w * 2 + 3 ? h : `${h.slice(0, w)}…${h.slice(-w)}`;
 }
 
-function getConfig() {
-  const fromStorage = localStorage.getItem(configKey);
-  if (!fromStorage) {
-    return { apiBase: defaultApiBase, wsBase: defaultWsBase };
-  }
-  try {
-    const parsed = JSON.parse(fromStorage);
-    return {
-      apiBase: normalizeApiBase(parsed.apiBase),
-      wsBase: normalizeWsBase(parsed.wsBase),
-    };
-  } catch {
-    return { apiBase: defaultApiBase, wsBase: defaultWsBase };
-  }
+function fmtNum(n) { return n == null ? "—" : Number(n).toLocaleString(); }
+
+function fmtTime(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  const now = Date.now();
+  const diff = Math.floor((now - d.getTime()) / 1000);
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return d.toISOString().slice(0, 16).replace("T", " ");
 }
 
-function setConfig(config) {
-  localStorage.setItem(configKey, JSON.stringify(config));
+function fmtUptime(s) {
+  if (!s) return "—";
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
-function setStatus(text, mode) {
-  el.statusBadge.textContent = text;
-  el.statusBadge.classList.remove("status-idle", "status-ok", "status-error");
-  el.statusBadge.classList.add(mode);
+function bytesToHex(arr) {
+  if (!Array.isArray(arr)) return String(arr || "");
+  return arr.map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-function shortHash(hash, width = 12) {
-  if (!hash || typeof hash !== "string") return "-";
-  if (hash.length <= width * 2) return hash;
-  return `${hash.slice(0, width)}...${hash.slice(-width)}`;
-}
-
-function formatAmount(raw) {
-  return Number(raw).toLocaleString();
-}
-
-function formatTime(ts) {
-  if (!ts) return "-";
-  return new Date(ts * 1000).toISOString().replace("T", " ").replace(/\.000Z$/, " UTC");
-}
-
-async function fetchJson(url) {
-  const response = await fetch(url, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-  });
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
-  }
-  return response.json();
-}
-
-// ---- Clickable navigation helpers ----
-
+/* ── Navigation ── */
 function doSearch(type, value) {
-  el.queryType.value = type;
-  el.queryValue.value = value;
+  el.searchType.value = type;
+  el.searchInput.value = value;
   el.searchForm.dispatchEvent(new Event("submit", { cancelable: true }));
-  el.queryOutput.scrollIntoView({ behavior: "smooth", block: "start" });
+  document.getElementById("explorer").scrollIntoView({ behavior: "smooth" });
 }
 
-function hashLink(hash, type) {
+function makeLink(text, type, value) {
   const a = document.createElement("a");
   a.className = "hash-link";
-  a.textContent = shortHash(hash, 10);
-  a.title = hash;
+  a.textContent = text;
+  a.title = value;
   a.href = "#";
-  a.addEventListener("click", (e) => {
-    e.preventDefault();
-    doSearch(type, hash);
-  });
+  a.onclick = (e) => { e.preventDefault(); doSearch(type, value); };
   return a;
 }
 
-function addressLink(addr) {
-  const a = document.createElement("a");
-  a.className = "hash-link";
-  a.textContent = shortHash(addr, 10);
-  a.title = addr;
-  a.href = "#";
-  a.addEventListener("click", (e) => {
-    e.preventDefault();
-    doSearch("account", addr);
-  });
-  return a;
+/* ── Status ── */
+function setStatus(ok) {
+  el.statusDot.className = ok ? "pulse ok" : "pulse error";
+  el.statusText.textContent = ok ? "Mainnet" : "Offline";
 }
 
-// ---- Structured result rendering ----
+/* ── Data loading ── */
+async function refresh() {
+  try {
+    const [health, supply, latestBlock, signers, peers] = await Promise.all([
+      api("/api/v1/health"),
+      api("/api/v1/supply").catch(() => null),
+      api("/api/v1/blocks/latest").catch(() => null),
+      api("/api/v1/admin/signers").catch(() => null),
+      api("/api/v1/peers").catch(() => null),
+    ]);
 
-function renderResultCard(type, rows, extra) {
-  const card = document.createElement("div");
-  card.className = "result-card";
-  const label = document.createElement("p");
-  label.className = "result-type";
-  label.textContent = type;
-  card.appendChild(label);
+    setStatus(true);
+
+    const height = health.latest_block_index ?? 0;
+    el.heroHeight.textContent = fmtNum(height);
+    el.heroSupply.textContent = supply ? fmtNum(supply.total_supply) : "—";
+    el.heroPeers.textContent = String(health.connected_peers ?? 0);
+
+    const sigTotal = signers?.total ?? 0;
+    el.heroValidators.textContent = String(sigTotal);
+
+    el.tickerHash.textContent = short(health.latest_block_hash, 12);
+    el.tickerUptime.textContent = fmtUptime(health.uptime_seconds);
+    el.tickerMempool.textContent = String(health.mempool_size ?? 0);
+    el.tickerVersion.textContent = health.version || "—";
+
+    el.ciStorage.textContent = health.storage_healthy ? "Healthy" : "Degraded";
+    el.ciMemory.textContent = health.memory_usage_mb ? `${health.memory_usage_mb.toFixed(0)} MB` : "—";
+
+    // Validators
+    el.netValidatorCount.textContent = String(sigTotal);
+    el.netValidatorList.innerHTML = "";
+    if (signers) {
+      if (signers.primary) {
+        const d = document.createElement("div");
+        d.className = "net-list-item primary";
+        d.textContent = signers.primary;
+        el.netValidatorList.appendChild(d);
+      }
+      (signers.additional || []).forEach(pk => {
+        const d = document.createElement("div");
+        d.className = "net-list-item";
+        d.textContent = pk;
+        el.netValidatorList.appendChild(d);
+      });
+    }
+
+    // Peers
+    const peerArr = peers?.peers || [];
+    el.netPeerCount.textContent = String(peerArr.length);
+    el.netPeerList.innerHTML = "";
+    peerArr.forEach(p => {
+      const d = document.createElement("div");
+      d.className = "net-list-item";
+      d.textContent = p;
+      el.netPeerList.appendChild(d);
+    });
+
+    await loadBlocks(height);
+  } catch (e) {
+    setStatus(false);
+    console.error("refresh failed", e);
+  }
+}
+
+async function loadBlocks(latestHeight) {
+  const start = Math.max(0, latestHeight - 9);
+  const heights = [];
+  for (let h = latestHeight; h >= start; h--) heights.push(h);
+
+  const blocks = await Promise.all(heights.map(h => api(`/api/v1/blocks/${h}`).catch(() => null)));
+  el.blocksBody.innerHTML = "";
+
+  blocks.filter(Boolean).forEach(b => {
+    const tr = document.createElement("tr");
+    const hash = b.hash || "—";
+    const txCount = Array.isArray(b.transactions) ? b.transactions.length : (b.tx_count ?? 0);
+
+    const tdH = document.createElement("td");
+    tdH.appendChild(makeLink(String(b.height ?? b.index ?? "—"), "block-height", String(b.height ?? b.index)));
+
+    const tdHash = document.createElement("td");
+    tdHash.appendChild(makeLink(short(hash, 10), "block-hash", hash));
+
+    const tdTime = document.createElement("td");
+    tdTime.textContent = fmtTime(b.timestamp);
+
+    const tdTx = document.createElement("td");
+    tdTx.textContent = String(txCount);
+
+    tr.append(tdH, tdHash, tdTime, tdTx);
+    el.blocksBody.appendChild(tr);
+  });
+}
+
+/* ── Search ── */
+function detectType(val) {
+  if (/^\d+$/.test(val)) return "block-height";
+  if (val.length === 64 && /^[0-9a-fA-F]+$/.test(val)) return "tx-hash"; // could be block or tx hash
+  return "account";
+}
+
+async function runSearch(e) {
+  e.preventDefault();
+  const raw = el.searchInput.value.trim();
+  if (!raw) return;
+
+  let type = el.searchType.value;
+  if (type === "auto") type = detectType(raw);
+
+  const endpoints = {
+    "block-height": `/api/v1/blocks/${encodeURIComponent(raw)}`,
+    "block-hash": `/api/v1/blocks/hash/${encodeURIComponent(raw)}`,
+    "tx-hash": `/api/v1/transactions/${encodeURIComponent(raw)}`,
+    "tx-address": `/api/v1/transactions/address/${encodeURIComponent(raw)}?limit=25`,
+    account: `/api/v1/accounts/${encodeURIComponent(raw)}`,
+  };
+
+  el.searchResults.innerHTML = "";
+
+  try {
+    const data = await api(endpoints[type]);
+    renderResult(type, data);
+  } catch (err) {
+    // For auto-detect hash, try block hash if tx hash failed
+    if (type === "tx-hash") {
+      try {
+        const data = await api(`/api/v1/blocks/hash/${encodeURIComponent(raw)}`);
+        renderResult("block-hash", data);
+        return;
+      } catch {}
+    }
+    const div = document.createElement("div");
+    div.className = "result-error";
+    div.textContent = `Not found: ${err.message}`;
+    el.searchResults.appendChild(div);
+  }
+}
+
+function renderResult(type, data) {
+  if (type === "tx-address" && Array.isArray(data)) {
+    if (data.length === 0) {
+      el.searchResults.innerHTML = '<div class="result-error">No transactions found for this address.</div>';
+      return;
+    }
+    data.forEach(tx => el.searchResults.appendChild(buildTxCard(tx)));
+    return;
+  }
+  if (type === "block-height" || type === "block-hash") {
+    el.searchResults.appendChild(buildBlockCard(data));
+    return;
+  }
+  if (type === "tx-hash") {
+    el.searchResults.appendChild(buildTxCard(data));
+    return;
+  }
+  if (type === "account") {
+    el.searchResults.appendChild(buildAccountCard(data));
+    return;
+  }
+}
+
+function card(typeLabel, rows, extra) {
+  const div = document.createElement("div");
+  div.className = "result-card";
+  const lbl = document.createElement("div");
+  lbl.className = "result-type";
+  lbl.textContent = typeLabel;
+  div.appendChild(lbl);
 
   const grid = document.createElement("div");
-  grid.className = "result-row";
-  rows.forEach(([k, v, isLink]) => {
-    const lbl = document.createElement("span");
-    lbl.className = "result-label";
-    lbl.textContent = k;
-    grid.appendChild(lbl);
+  grid.className = "result-grid";
+  rows.forEach(([k, v]) => {
+    const l = document.createElement("span");
+    l.className = "result-label";
+    l.textContent = k;
+    grid.appendChild(l);
 
-    const val = document.createElement("span");
-    if (isLink && v instanceof HTMLElement) {
-      val.className = "result-value";
-      val.appendChild(v);
-    } else {
-      val.className = typeof v === "number" ? "result-value number" : "result-value";
-      val.textContent = String(v);
-    }
-    grid.appendChild(val);
+    const r = document.createElement("span");
+    r.className = "result-value";
+    if (v instanceof HTMLElement) { r.appendChild(v); }
+    else if (typeof v === "number") { r.className = "result-value num"; r.textContent = fmtNum(v); }
+    else { r.textContent = String(v ?? "—"); }
+    grid.appendChild(r);
   });
-  card.appendChild(grid);
-  if (extra) card.appendChild(extra);
-  return card;
+  div.appendChild(grid);
+  if (extra) div.appendChild(extra);
+  return div;
 }
 
-function renderBlock(data) {
-  const height = data.height ?? data.index ?? "-";
-  const hash = data.hash || "-";
-  const txs = Array.isArray(data.transactions) ? data.transactions : [];
+function buildBlockCard(b) {
+  const hash = b.hash || "—";
+  const txs = Array.isArray(b.transactions) ? b.transactions : [];
+
   const rows = [
-    ["Height", height],
-    ["Hash", hashLink(hash, "block-hash"), true],
-    ["Timestamp", formatTime(data.timestamp)],
-    ["Signer", data.signer ? addressLink(data.signer) : "-", !!data.signer],
-    ["Tx Count", txs.length],
-    ["Prev Hash", data.previous_hash ? hashLink(data.previous_hash, "block-hash") : "-", !!data.previous_hash],
+    ["Height", b.height ?? b.index ?? "—"],
+    ["Hash", hash],
+    ["Parent", b.parentHash ? makeLink(short(b.parentHash, 10), "block-hash", b.parentHash) : "—"],
+    ["Time", fmtTime(b.timestamp)],
+    ["Transactions", txs.length],
   ];
 
   let txSection = null;
   if (txs.length > 0) {
     txSection = document.createElement("div");
-    txSection.className = "result-tx-list";
-    const h4 = document.createElement("h4");
-    h4.textContent = "Transactions";
-    txSection.appendChild(h4);
-    txs.forEach((tx) => {
-      const txHash = typeof tx === "string" ? tx : (tx.hash_hex || tx.hash || "-");
-      const link = hashLink(String(txHash), "tx-hash");
+    txSection.className = "result-txlist";
+    const h5 = document.createElement("h5");
+    h5.textContent = "Transactions";
+    txSection.appendChild(h5);
+    txs.forEach(tx => {
+      const txHash = tx.hash || tx.hash_hex || bytesToHex(tx.hash) || "—";
+      const from = tx.from || tx.sender_hex || bytesToHex(tx.sender) || "?";
+      const to = tx.to || "?";
+      const val = tx.value != null ? tx.value : "—";
+
       const row = document.createElement("div");
-      row.style.marginBottom = "0.2rem";
-      row.appendChild(link);
+      row.style.cssText = "display:flex; gap:1rem; align-items:center; padding:0.3rem 0; font-size:0.82rem;";
+      row.appendChild(makeLink(short(txHash, 8), "tx-hash", txHash));
+
+      const info = document.createElement("span");
+      info.className = "result-value";
+      info.style.fontSize = "0.78rem";
+      info.textContent = `${short(from, 6)} → ${short(to, 6)}  ·  ${val}`;
+      row.appendChild(info);
       txSection.appendChild(row);
     });
   }
-  return renderResultCard("Block", rows, txSection);
+
+  return card("Block", rows, txSection);
 }
 
-function renderTransaction(data) {
-  const hash = data.hash_hex || (Array.isArray(data.hash) ? data.hash.map((b) => b.toString(16).padStart(2, "0")).join("") : data.hash || "-");
-  const sender = data.sender_hex || (Array.isArray(data.sender) ? data.sender.map((b) => b.toString(16).padStart(2, "0")).join("") : data.sender || "-");
+function buildTxCard(tx) {
+  const hash = tx.hash_hex || bytesToHex(tx.hash) || "—";
+  const sender = tx.sender_hex || tx.from || bytesToHex(tx.sender) || "—";
 
-  let recipientStr = "-";
-  const r = data.recipient;
-  if (r) {
-    if (r.Wallet) {
-      recipientStr = Array.isArray(r.Wallet) ? r.Wallet.map((b) => b.toString(16).padStart(2, "0")).join("") : String(r.Wallet);
-    } else if (r.Contract) {
-      const cid = r.Contract.id || r.Contract;
-      recipientStr = Array.isArray(cid) ? cid.map((b) => b.toString(16).padStart(2, "0")).join("") : String(cid);
-    }
-  }
+  let recipientStr = "—";
+  const r = tx.recipient || {};
+  if (tx.to) recipientStr = tx.to;
+  else if (r.Wallet) recipientStr = bytesToHex(r.Wallet);
+  else if (r.Contract) recipientStr = bytesToHex(r.Contract?.id || r.Contract);
 
-  let payloadStr = "-";
-  const p = data.payload;
+  let payloadStr = "—";
+  const p = tx.payload;
   if (p) {
-    if (p.Transfer) payloadStr = `Transfer ${formatAmount(p.Transfer.amount)}`;
+    if (p.Transfer) payloadStr = `Transfer ${fmtNum(p.Transfer.amount)}`;
     else if (p.ContractDeploy) payloadStr = "Contract Deploy";
-    else if (p.ContractCall) payloadStr = `Call ${p.ContractCall.method || "?"}`;
+    else if (p.ContractCall) payloadStr = `Call: ${p.ContractCall.method || "?"}`;
     else if (p.Data) payloadStr = `Data (${(p.Data.data || []).length} bytes)`;
     else payloadStr = JSON.stringify(p);
   }
+  if (tx.value != null && payloadStr === "—") payloadStr = `Transfer ${tx.value}`;
 
   const rows = [
     ["Hash", hash],
-    ["Sender", addressLink(sender), true],
-    ["Recipient", addressLink(recipientStr), true],
+    ["From", makeLink(short(sender, 10), "account", sender)],
+    ["To", makeLink(short(recipientStr, 10), "account", recipientStr)],
     ["Payload", payloadStr],
-    ["Nonce", data.nonce ?? "-"],
-    ["Timestamp", formatTime(data.timestamp)],
-    ["Gas", `${formatAmount(data.gas_limit || 0)} limit / ${data.gas_price || 0} price`],
-    ["Chain ID", data.chain_id ?? 1],
+    ["Nonce", tx.nonce ?? "—"],
+    ["Time", fmtTime(tx.timestamp)],
+    ["Gas", `${fmtNum(tx.gas_limit || tx.gas || 0)} limit / ${tx.gas_price ?? 0} price`],
   ];
-  return renderResultCard("Transaction", rows);
+  return card("Transaction", rows);
 }
 
-function renderAccount(data) {
-  const pk = data.public_key || data.pubkey || "-";
+function buildAccountCard(a) {
+  const pk = a.public_key || a.pubkey || "—";
   const rows = [
     ["Public Key", pk],
-    ["Balance", formatAmount(data.balance ?? 0)],
-    ["Nonce", data.nonce ?? 0],
+    ["Balance", fmtNum(a.balance ?? 0)],
+    ["Nonce", a.nonce ?? 0],
   ];
-  return renderResultCard("Account", rows);
+  return card("Account", rows);
 }
 
-function renderSearchResult(type, data) {
-  el.queryOutput.innerHTML = "";
+/* ── WebSocket ── */
+let ws = null;
 
-  if (type === "tx-address" && Array.isArray(data)) {
-    if (data.length === 0) {
-      el.queryOutput.innerHTML = '<p class="muted-hint">No transactions found for this address.</p>';
-      return;
-    }
-    data.forEach((tx) => el.queryOutput.appendChild(renderTransaction(tx)));
-    return;
-  }
-
-  if (type === "block-height" || type === "block-hash") {
-    el.queryOutput.appendChild(renderBlock(data));
-    return;
-  }
-  if (type === "tx-hash") {
-    el.queryOutput.appendChild(renderTransaction(data));
-    return;
-  }
-  if (type === "account") {
-    el.queryOutput.appendChild(renderAccount(data));
-    return;
-  }
-
-  const pre = document.createElement("pre");
-  pre.className = "result-fallback";
-  pre.textContent = JSON.stringify(data, null, 2);
-  el.queryOutput.appendChild(pre);
-}
-
-// ---- Event log ----
-
-function addLogLine(text, level = "info") {
-  const row = document.createElement("div");
-  row.className = `log-line ${level === "info" ? "" : level}`.trim();
-  row.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
-  el.eventLog.prepend(row);
-  while (el.eventLog.children.length > 120) {
-    el.eventLog.removeChild(el.eventLog.lastChild);
-  }
-}
-
-// ---- Config ----
-
-function applyConfigInputs() {
-  const config = getConfig();
-  el.apiBase.value = config.apiBase;
-  el.wsBase.value = config.wsBase;
-}
-
-// ---- Blocks table ----
-
-async function loadLatestBlocks() {
-  const apiBase = normalizeApiBase(el.apiBase.value);
-  const latest = await fetchJson(`${apiBase}/api/v1/blocks/latest`);
-  const latestHeight = Number(latest.height ?? latest.index ?? 0);
-  const start = Math.max(0, latestHeight - 9);
-  const heights = [];
-  for (let h = latestHeight; h >= start; h -= 1) {
-    heights.push(h);
-  }
-
-  const rows = await Promise.all(
-    heights.map(async (height) => {
-      try {
-        return await fetchJson(`${apiBase}/api/v1/blocks/${height}`);
-      } catch {
-        return null;
-      }
-    }),
-  );
-
-  el.blocksTableBody.innerHTML = "";
-  rows.filter(Boolean).forEach((block) => {
-    const tr = document.createElement("tr");
-    const hash = String(block.hash || "-");
-    const txCount = Array.isArray(block.transactions)
-      ? block.transactions.length
-      : Number(block.tx_count ?? 0);
-
-    const tdHeight = document.createElement("td");
-    const heightLink = document.createElement("a");
-    heightLink.className = "hash-link";
-    heightLink.textContent = String(block.height ?? block.index ?? "-");
-    heightLink.href = "#";
-    heightLink.addEventListener("click", (e) => {
-      e.preventDefault();
-      doSearch("block-height", String(block.height ?? block.index));
-    });
-    tdHeight.appendChild(heightLink);
-
-    const tdHash = document.createElement("td");
-    tdHash.appendChild(hashLink(hash, "block-hash"));
-
-    const tdTime = document.createElement("td");
-    tdTime.textContent = formatTime(block.timestamp);
-
-    const tdTxCount = document.createElement("td");
-    tdTxCount.textContent = String(txCount);
-
-    tr.appendChild(tdHeight);
-    tr.appendChild(tdHash);
-    tr.appendChild(tdTime);
-    tr.appendChild(tdTxCount);
-    el.blocksTableBody.appendChild(tr);
-  });
-}
-
-// ---- Network panel ----
-
-async function refreshNetwork() {
-  const apiBase = normalizeApiBase(el.apiBase.value);
-  try {
-    const [supply, peers, signers] = await Promise.all([
-      fetchJson(`${apiBase}/api/v1/supply`).catch(() => null),
-      fetchJson(`${apiBase}/api/v1/peers`).catch(() => null),
-      fetchJson(`${apiBase}/api/v1/admin/signers`).catch(() => null),
-    ]);
-
-    if (supply) {
-      el.supplyValue.textContent = formatAmount(supply.total_supply ?? 0);
-      el.accountsValue.textContent = supply.account_count != null ? formatAmount(supply.account_count) : "-";
-    }
-
-    if (peers) {
-      const peerArr = Array.isArray(peers) ? peers : [];
-      el.peersValue.textContent = String(peerArr.length);
-      el.peerList.textContent = peerArr.length ? peerArr.map((p) => (typeof p === "string" ? p : JSON.stringify(p))).join("\n") : "No peers connected";
-    }
-
-    if (signers) {
-      const sigArr = Array.isArray(signers) ? signers : [];
-      el.signersValue.textContent = String(sigArr.length);
-      el.signerList.textContent = sigArr.length ? sigArr.map((s) => (typeof s === "string" ? s : JSON.stringify(s))).join("\n") : "No signers";
-    }
-  } catch {
-    // network panel is best-effort
-  }
-}
-
-// ---- Snapshot ----
-
-async function refreshSnapshot() {
-  const apiBase = normalizeApiBase(el.apiBase.value);
-  try {
-    const [health, latest] = await Promise.all([
-      fetchJson(`${apiBase}/api/v1/health`),
-      fetchJson(`${apiBase}/api/v1/blocks/latest`),
-    ]);
-
-    el.healthValue.textContent = health.status || "ok";
-    el.heightValue.textContent = String(latest.height ?? latest.index ?? "-");
-    el.hashValue.textContent = latest.hash || "-";
-    const txCount = Array.isArray(latest.transactions)
-      ? latest.transactions.length
-      : Number(latest.tx_count ?? 0);
-    el.txCountValue.textContent = String(txCount);
-    setStatus("Connected", "status-ok");
-    await Promise.all([loadLatestBlocks(), refreshNetwork()]);
-  } catch (error) {
-    setStatus("Unreachable", "status-error");
-    el.healthValue.textContent = "error";
-    el.heightValue.textContent = "-";
-    el.hashValue.textContent = "-";
-    el.txCountValue.textContent = "-";
-    el.blocksTableBody.innerHTML = "";
-    addLogLine(`Snapshot failed: ${error.message}`, "error");
-  }
-}
-
-// ---- Search ----
-
-async function runSearch(event) {
-  event.preventDefault();
-  const apiBase = normalizeApiBase(el.apiBase.value);
-  const type = el.queryType.value;
-  const value = el.queryValue.value.trim();
-  if (!value) return;
-
-  const endpoints = {
-    "block-height": `${apiBase}/api/v1/blocks/${encodeURIComponent(value)}`,
-    "block-hash": `${apiBase}/api/v1/blocks/hash/${encodeURIComponent(value)}`,
-    "tx-hash": `${apiBase}/api/v1/transactions/${encodeURIComponent(value)}`,
-    "tx-address": `${apiBase}/api/v1/transactions/address/${encodeURIComponent(value)}?limit=25`,
-    account: `${apiBase}/api/v1/accounts/${encodeURIComponent(value)}`,
-  };
-
-  try {
-    const data = await fetchJson(endpoints[type]);
-    renderSearchResult(type, data);
-  } catch (error) {
-    el.queryOutput.innerHTML = "";
-    const pre = document.createElement("pre");
-    pre.className = "result-fallback";
-    pre.textContent = JSON.stringify(
-      { error: error.message, hint: "Verify endpoint config and query value format." },
-      null,
-      2,
-    );
-    el.queryOutput.appendChild(pre);
-  }
-}
-
-// ---- WebSocket ----
-
-function connectWs() {
+function wsConnect() {
   if (ws && ws.readyState <= 1) return;
-  const wsBase = normalizeWsBase(el.wsBase.value);
-
-  ws = new WebSocket(wsBase);
+  ws = new WebSocket(cfg.ws);
   ws.onopen = () => {
-    addLogLine(`WS connected to ${wsBase}`);
-    setStatus("Connected", "status-ok");
-    ["blocks", "transactions", "mempool"].forEach((channel) => {
-      ws.send(JSON.stringify({ type: "subscribe", channel }));
-    });
+    logLine("Connected", "info");
+    ["blocks", "transactions", "mempool"].forEach(ch =>
+      ws.send(JSON.stringify({ type: "subscribe", channel: ch }))
+    );
   };
-
-  ws.onmessage = (event) => {
-    let payload = event.data;
+  ws.onmessage = (e) => {
     try {
-      payload = JSON.parse(event.data);
+      const p = JSON.parse(e.data);
+      const ch = p.channel || p.type || "event";
+      logLine(`${ch}: ${JSON.stringify(p.event ?? p)}`);
     } catch {
-      addLogLine(`WS raw: ${event.data}`, "warn");
-      return;
+      logLine(e.data, "warn");
     }
-    const channel = payload.channel || payload.type || "unknown";
-    addLogLine(`${channel}: ${JSON.stringify(payload.event ?? payload)}`);
   };
-
-  ws.onerror = () => {
-    addLogLine("WS connection error", "error");
-    setStatus("WS Error", "status-error");
-  };
-
-  ws.onclose = () => {
-    addLogLine("WS disconnected", "warn");
-  };
+  ws.onerror = () => logLine("Connection error", "error");
+  ws.onclose = () => logLine("Disconnected", "warn");
 }
 
-function disconnectWs() {
-  if (!ws) return;
-  ws.close();
-  ws = null;
+function logLine(text, level = "info") {
+  const d = document.createElement("div");
+  d.className = `log-line${level !== "info" ? " " + level : ""}`;
+  d.textContent = `${new Date().toLocaleTimeString()} · ${text}`;
+  el.eventLog.prepend(d);
+  while (el.eventLog.children.length > 150) el.eventLog.removeChild(el.eventLog.lastChild);
 }
 
-// ---- Init ----
-
-function saveConfigFromInputs() {
-  const config = {
-    apiBase: normalizeApiBase(el.apiBase.value),
-    wsBase: normalizeWsBase(el.wsBase.value),
-  };
-  setConfig(config);
-  addLogLine("Endpoint config saved");
-}
-
-function wireUi() {
-  el.saveConfigBtn.addEventListener("click", () => {
-    saveConfigFromInputs();
-    refreshSnapshot();
-  });
-  el.refreshBtn.addEventListener("click", () => refreshSnapshot());
-  el.clearLogBtn.addEventListener("click", () => {
-    el.eventLog.innerHTML = "";
-  });
-  el.searchForm.addEventListener("submit", runSearch);
-  el.wsConnectBtn.addEventListener("click", connectWs);
-  el.wsDisconnectBtn.addEventListener("click", disconnectWs);
-}
-
+/* ── Init ── */
 function init() {
-  applyConfigInputs();
-  wireUi();
-  refreshSnapshot();
+  el.cfgApi.value = cfg.api;
+  el.cfgWs.value = cfg.ws;
+
+  el.cfgSave.onclick = () => {
+    cfg = { api: el.cfgApi.value.replace(/\/+$/, "") || defaults.api, ws: el.cfgWs.value.replace(/\/+$/, "") || defaults.ws };
+    saveCfg(cfg);
+    refresh();
+  };
+
+  el.searchForm.addEventListener("submit", runSearch);
+  el.wsConnect.onclick = wsConnect;
+  el.wsDisconnect.onclick = () => { if (ws) { ws.close(); ws = null; } };
+  el.wsClear.onclick = () => { el.eventLog.innerHTML = ""; };
+
+  refresh();
+  setInterval(refresh, 15000);
 }
 
 init();
