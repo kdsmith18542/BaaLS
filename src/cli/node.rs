@@ -644,6 +644,8 @@ fn spawn_health_server(
                         request.remote_addr().map(|addr| addr.ip().is_loopback()).unwrap_or(false);
                     let is_auth_token_endpoint = request.method() == &Method::Post
                         && matches!(request_url_str, "/auth/token" | "/api/v1/auth/token");
+                    let is_oracle_endpoint = request.method() == &Method::Post
+                        && request_url_str == "/api/v1/oracle/attest";
                     let is_mutating_endpoint = request.method() == &Method::Post
                         && matches!(
                             request_url_str,
@@ -658,7 +660,10 @@ fn spawn_health_server(
                         );
                     let is_admin_endpoint = matches!(request_url_str, "/api/v1/admin/signers")
                         || request_url_str.starts_with("/api/v1/admin/signers/");
-                    if (is_mutating_endpoint || is_auth_token_endpoint || is_admin_endpoint)
+                    if (is_mutating_endpoint
+                        || is_auth_token_endpoint
+                        || is_admin_endpoint
+                        || is_oracle_endpoint)
                         && !is_loopback
                     {
                         respond_json(
@@ -1682,6 +1687,190 @@ gas_used_per_block {}\n",
                                 serde_json::json!({"error": "Invalid hex public key"}).to_string(),
                             ),
                         }
+                    } else if is_oracle_endpoint {
+                        // K.2 — POST /api/v1/oracle/attest
+                        // ChronoNode submits a DormancyProof; BaaLS verifies the ChronoNode
+                        // ed25519 signature, counter-signs with the node key, stores in the
+                        // oracle namespace, and returns the OracleAttestation.
+                        let mut body = String::new();
+                        let _ = request.as_reader().read_to_string(&mut body);
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                use crate::oracle::{
+                                    attestation_storage_key, chain_index_key, chains_storage_key,
+                                    oracle_namespace_id, sign_attestation, DormancyProof,
+                                };
+                                use crate::ContractId;
+
+                                let proof: DormancyProof = serde_json::from_str(&body)
+                                    .map_err(|e| format!("invalid proof JSON: {}", e))?;
+
+                                if proof.version.is_empty() {
+                                    return Err("missing version".into());
+                                }
+                                if proof.chain_id.is_empty() {
+                                    return Err("missing chain_id".into());
+                                }
+                                if proof.address.is_empty() {
+                                    return Err("missing address".into());
+                                }
+
+                                // Verify ChronoNode's signature on the proof (required)
+                                proof
+                                    .verify_chrononode_signature()
+                                    .map_err(|e| format!("ChronoNode signature invalid: {}", e))?;
+
+                                // Get current BaaLS chain anchor
+                                let (block_index, block_hash) = runtime
+                                    .storage()
+                                    .get_latest_block()?
+                                    .map(|b| (b.index, b.hash))
+                                    .unwrap_or((0, [0u8; 32]));
+
+                                // Sign with BaaLS node key
+                                let attestation = sign_attestation(
+                                    proof.clone(),
+                                    &node_signing_key,
+                                    block_index,
+                                    block_hash,
+                                );
+
+                                // Persist in oracle namespace (contract storage)
+                                let ns_id = ContractId::from_bytes(&oracle_namespace_id());
+                                let storage_key =
+                                    attestation_storage_key(&proof.chain_id, &proof.address);
+                                let storage_val = serde_json::to_vec(&attestation)?;
+                                runtime.storage().contract_storage_write(
+                                    &ns_id,
+                                    &storage_key,
+                                    &storage_val,
+                                )?;
+
+                                // Update chain address index (append-only list of attested addresses)
+                                let index_key = chain_index_key(&proof.chain_id);
+                                let existing = runtime
+                                    .storage()
+                                    .contract_storage_read(&ns_id, &index_key)?
+                                    .unwrap_or_default();
+                                let mut addresses: Vec<String> = if existing.is_empty() {
+                                    vec![]
+                                } else {
+                                    serde_json::from_slice(&existing).unwrap_or_default()
+                                };
+                                if !addresses.contains(&proof.address) {
+                                    addresses.push(proof.address.clone());
+                                    runtime.storage().contract_storage_write(
+                                        &ns_id,
+                                        &index_key,
+                                        &serde_json::to_vec(&addresses)?,
+                                    )?;
+                                }
+
+                                // Update global chain registry for submitter discovery.
+                                let chains_key = chains_storage_key();
+                                let existing_chains = runtime
+                                    .storage()
+                                    .contract_storage_read(&ns_id, &chains_key)?
+                                    .unwrap_or_default();
+                                let mut chains: Vec<String> = if existing_chains.is_empty() {
+                                    vec![]
+                                } else {
+                                    serde_json::from_slice(&existing_chains).unwrap_or_default()
+                                };
+                                if !chains.contains(&proof.chain_id) {
+                                    chains.push(proof.chain_id.clone());
+                                    runtime.storage().contract_storage_write(
+                                        &ns_id,
+                                        &chains_key,
+                                        &serde_json::to_vec(&chains)?,
+                                    )?;
+                                }
+
+                                info!(
+                                "[ORACLE] Attested dormancy: chain={} addr={} since_block={} at_baals_block={}",
+                                proof.chain_id, proof.address, proof.dormant_since_block, block_index
+                            );
+
+                                Ok(serde_json::json!({
+                                    "status": "ok",
+                                    "attestation": serde_json::to_value(&attestation)?,
+                                }))
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (400, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
+                    } else if request.method() == &Method::Get
+                        && request_url_str.starts_with("/api/v1/oracle/attestations/")
+                    {
+                        // K.3 — GET /api/v1/oracle/attestations/{chain_id}/{address}
+                        // OR    GET /api/v1/oracle/attestations/{chain_id}  (list all for chain)
+                        let suffix = &request_url_str["/api/v1/oracle/attestations/".len()..];
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                use crate::oracle::{
+                                    attestation_storage_key, chain_index_key, oracle_namespace_id,
+                                    OracleAttestation,
+                                };
+                                use crate::ContractId;
+
+                                let ns_id = ContractId::from_bytes(&oracle_namespace_id());
+
+                                // suffix is either "chain_id/address" or just "chain_id"
+                                if let Some(slash) = suffix.find('/') {
+                                    let chain_id = &suffix[..slash];
+                                    let address = &suffix[slash + 1..];
+                                    let key = attestation_storage_key(chain_id, address);
+                                    let raw = runtime
+                                        .storage()
+                                        .contract_storage_read(&ns_id, &key)?
+                                        .ok_or("attestation not found")?;
+                                    let attestation: OracleAttestation =
+                                        serde_json::from_slice(&raw)?;
+                                    Ok(serde_json::json!({ "attestation": attestation }))
+                                } else {
+                                    // List all attested addresses for this chain
+                                    let chain_id = suffix;
+                                    let index_key = chain_index_key(chain_id);
+                                    let existing = runtime
+                                        .storage()
+                                        .contract_storage_read(&ns_id, &index_key)?
+                                        .unwrap_or_default();
+                                    let addresses: Vec<String> = if existing.is_empty() {
+                                        vec![]
+                                    } else {
+                                        serde_json::from_slice(&existing).unwrap_or_default()
+                                    };
+                                    let mut attestations = Vec::new();
+                                    for addr in &addresses {
+                                        let key = attestation_storage_key(chain_id, addr);
+                                        if let Some(raw) =
+                                            runtime.storage().contract_storage_read(&ns_id, &key)?
+                                        {
+                                            if let Ok(a) =
+                                                serde_json::from_slice::<OracleAttestation>(&raw)
+                                            {
+                                                attestations.push(serde_json::to_value(&a)?);
+                                            }
+                                        }
+                                    }
+                                    Ok(serde_json::json!({
+                                        "chain_id": chain_id,
+                                        "count": attestations.len(),
+                                        "attestations": attestations,
+                                    }))
+                                }
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (404, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
                     } else {
                         let _ = request.respond(
                             Response::from_string("Not Found").with_status_code(StatusCode(404)),
@@ -1722,18 +1911,26 @@ pub fn handle_node(
                     #[link(name = "kernel32")]
                     extern "system" {
                         fn GetStdHandle(nStdHandle: i32) -> *mut std::ffi::c_void;
-                        fn SetHandleInformation(hObject: *mut std::ffi::c_void, dwMask: u32, dwFlags: u32) -> i32;
+                        fn SetHandleInformation(
+                            hObject: *mut std::ffi::c_void,
+                            dwMask: u32,
+                            dwFlags: u32,
+                        ) -> i32;
                     }
                     const STD_OUTPUT_HANDLE: i32 = -11;
                     const STD_ERROR_HANDLE: i32 = -12;
                     const HANDLE_FLAG_INHERIT: u32 = 1;
                     unsafe {
                         let stdout_handle = GetStdHandle(STD_OUTPUT_HANDLE);
-                        if !stdout_handle.is_null() && stdout_handle != -1isize as *mut std::ffi::c_void {
+                        if !stdout_handle.is_null()
+                            && stdout_handle != -1isize as *mut std::ffi::c_void
+                        {
                             SetHandleInformation(stdout_handle, HANDLE_FLAG_INHERIT, 0);
                         }
                         let stderr_handle = GetStdHandle(STD_ERROR_HANDLE);
-                        if !stderr_handle.is_null() && stderr_handle != -1isize as *mut std::ffi::c_void {
+                        if !stderr_handle.is_null()
+                            && stderr_handle != -1isize as *mut std::ffi::c_void
+                        {
                             SetHandleInformation(stderr_handle, HANDLE_FLAG_INHERIT, 0);
                         }
                     }

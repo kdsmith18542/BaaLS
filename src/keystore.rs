@@ -460,4 +460,144 @@ impl Keystore {
             Err(KeystoreError::Crypto("Unrecognized consensus key format".to_string()))
         }
     }
+
+    /// Path to the EVM bridge signing key file (secp256k1, encrypted)
+    pub fn evm_key_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+        data_dir.join("evm.key.enc")
+    }
+
+    /// Generate a new secp256k1 EVM bridge key for signing attestations on EVM chains.
+    pub fn generate_evm_key(
+        data_dir: &std::path::Path,
+        password: &str,
+    ) -> Result<Vec<u8>, KeystoreError> {
+        use k256::ecdsa::SigningKey as K256SigningKey;
+        use std::convert::TryFrom;
+
+        // Generate secp256k1 private key (32 bytes)
+        let mut sk_bytes = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rng(), &mut sk_bytes);
+        let _sk = K256SigningKey::try_from(&sk_bytes[..])
+            .map_err(|e| KeystoreError::Crypto(format!("Invalid EVM key: {}", e)))?;
+        let sk_bytes = sk_bytes.to_vec();
+
+        let path = Self::evm_key_path(data_dir);
+
+        let mut rng = rand::rng();
+        let mut nonce = [0u8; NONCE_LEN];
+        rng.fill_bytes(&mut nonce);
+
+        let mut key = [0u8; KEY_LEN];
+        let mut salt = [0u8; ARGON2_SALT_LEN];
+        rng.fill_bytes(&mut salt);
+
+        argon2::Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            argon2::Params::new(
+                ARGON2_MEM_COST,
+                ARGON2_TIME_COST,
+                ARGON2_PARALLELISM,
+                Some(KEY_LEN),
+            )
+            .map_err(|e| KeystoreError::Crypto(format!("Argon2 params: {}", e)))?,
+        )
+        .hash_password_into(password.as_bytes(), &salt, &mut key)
+        .map_err(|e| KeystoreError::Crypto(format!("Argon2 failed: {}", e)))?;
+
+        let cipher = Aes256Gcm::new_from_slice(&key)
+            .map_err(|_| KeystoreError::Crypto("Invalid key".to_string()))?;
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce), sk_bytes.as_ref())
+            .map_err(|_| KeystoreError::Crypto("Encryption failed".to_string()))?;
+        key.zeroize();
+        let mut sk_copy = sk_bytes.clone();
+        sk_copy.zeroize();
+
+        let mut file_data = Vec::new();
+        file_data.push(FORMAT_MAGIC);
+        file_data.push(FORMAT_V2);
+        file_data.extend_from_slice(&ARGON2_MEM_COST.to_le_bytes());
+        file_data.push(ARGON2_TIME_COST as u8);
+        file_data.push(ARGON2_PARALLELISM as u8);
+        file_data.extend_from_slice(&salt);
+        file_data.extend_from_slice(&nonce);
+        file_data.extend_from_slice(&ciphertext);
+
+        let tmp_path = path.with_extension("tmp");
+        {
+            let mut file =
+                std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp_path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            file.write_all(&file_data)?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&tmp_path, &path)?;
+        log::info!("Generated and encrypted EVM key at {:?}", path);
+
+        Ok(sk_bytes)
+    }
+
+    /// Load the EVM bridge signing key from encrypted storage.
+    pub fn load_evm_key(
+        data_dir: &std::path::Path,
+        password: &str,
+    ) -> Result<Vec<u8>, KeystoreError> {
+        let path = Self::evm_key_path(data_dir);
+        if !path.exists() {
+            return Err(KeystoreError::NotFound("EVM key file not found".to_string()));
+        }
+        if path.is_symlink() {
+            return Err(KeystoreError::Crypto(
+                "EVM key path is a symlink — rejected for security".to_string(),
+            ));
+        }
+        let mut data = Vec::new();
+        std::fs::File::open(&path)?.read_to_end(&mut data)?;
+
+        if data.len() > 2 && data[0] == FORMAT_MAGIC && data[1] == FORMAT_V2 {
+            let mut mem_cost_bytes = [0u8; 4];
+            mem_cost_bytes.copy_from_slice(&data[2..6]);
+            let mem_cost = u32::from_le_bytes(mem_cost_bytes);
+            let time_cost = data[6] as u32;
+            let parallelism = data[7] as u32;
+            let salt = &data[8..8 + ARGON2_SALT_LEN];
+            let nonce = &data[8 + ARGON2_SALT_LEN..8 + ARGON2_SALT_LEN + NONCE_LEN];
+            let ciphertext = &data[8 + ARGON2_SALT_LEN + NONCE_LEN..];
+
+            let mut key = [0u8; KEY_LEN];
+            argon2::Argon2::new(
+                argon2::Algorithm::Argon2id,
+                argon2::Version::V0x13,
+                argon2::Params::new(mem_cost, time_cost, parallelism, Some(KEY_LEN))
+                    .map_err(|e| KeystoreError::Crypto(format!("Argon2 params: {}", e)))?,
+            )
+            .hash_password_into(password.as_bytes(), salt, &mut key)
+            .map_err(|e| KeystoreError::Crypto(format!("Argon2 failed: {}", e)))?;
+
+            let cipher = Aes256Gcm::new_from_slice(&key)
+                .map_err(|_| KeystoreError::Crypto("Invalid key".to_string()))?;
+            let plaintext = cipher
+                .decrypt(Nonce::from_slice(nonce), ciphertext)
+                .map_err(|_| KeystoreError::InvalidPassword)?;
+            key.zeroize();
+
+            if plaintext.len() != 32 {
+                return Err(KeystoreError::Crypto("Invalid EVM key length".to_string()));
+            }
+            Ok(plaintext)
+        } else if data.len() == 32 {
+            log::warn!(
+                "Loading EVM key from unencrypted file. \
+                 Set BAALS_EVM_PASSWORD and remove evm.key to use encrypted storage."
+            );
+            Ok(data)
+        } else {
+            Err(KeystoreError::Crypto("Unrecognized EVM key format".to_string()))
+        }
+    }
 }

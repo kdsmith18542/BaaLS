@@ -3233,7 +3233,8 @@ fn test_genesis_alloc_and_round_robin() {
     let mut config = Config::default();
     config.node.data_dir = data_dir.to_string_lossy().to_string();
 
-    let genesis_sk = Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
+    let genesis_sk =
+        Runtime::<SledStorage, PoAConsensus, NoopSync>::generate_signing_key().unwrap();
     let genesis_pk = PublicKey::from(genesis_sk.verifying_key());
     let genesis_pk_hex = hex::encode(genesis_pk.to_bytes());
 
@@ -3245,13 +3246,8 @@ fn test_genesis_alloc_and_round_robin() {
     let key_path = data_dir.join("consensus.key");
     std::fs::write(&key_path, genesis_sk.to_bytes()).unwrap();
 
-    let (runtime, public_key, _signing_key) = baals::cli::node::build_runtime(
-        &data_dir,
-        &config,
-        &[],
-        "127.0.0.1:0",
-        false,
-    ).unwrap();
+    let (runtime, public_key, _signing_key) =
+        baals::cli::node::build_runtime(&data_dir, &config, &[], "127.0.0.1:0", false).unwrap();
 
     assert_eq!(public_key, genesis_pk);
 
@@ -3284,13 +3280,8 @@ fn test_empty_block_production() {
     let key_path = data_dir.join("consensus.key");
     std::fs::write(&key_path, sk.to_bytes()).unwrap();
 
-    let (runtime, _public_key, _signing_key) = baals::cli::node::build_runtime(
-        &data_dir,
-        &config,
-        &[],
-        "127.0.0.1:0",
-        false,
-    ).unwrap();
+    let (runtime, _public_key, _signing_key) =
+        baals::cli::node::build_runtime(&data_dir, &config, &[], "127.0.0.1:0", false).unwrap();
 
     // Wait and check if blocks are produced.
     let start_time = std::time::Instant::now();
@@ -3329,13 +3320,8 @@ fn test_empty_block_production_with_quorum_requires_peer_signatures() {
     let key_path = data_dir.join("consensus.key");
     std::fs::write(&key_path, sk.to_bytes()).unwrap();
 
-    let (runtime, _public_key, _signing_key) = baals::cli::node::build_runtime(
-        &data_dir,
-        &config,
-        &[],
-        "127.0.0.1:0",
-        false,
-    ).unwrap();
+    let (runtime, _public_key, _signing_key) =
+        baals::cli::node::build_runtime(&data_dir, &config, &[], "127.0.0.1:0", false).unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(700));
     let state = runtime.get_chain_state().unwrap();
@@ -3561,7 +3547,10 @@ fn test_state_snapshot_sync() {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(synced, "Node B should sync Node A's state snapshot and reach height 1 within 30s");
+    assert!(
+        synced,
+        "Node B should sync Node A's state snapshot and reach height 1 within 30s"
+    );
 
     // Verify account state on Node B matches Node A
     let acc_user_a = rt_a.get_account(&user_pk).unwrap().unwrap();

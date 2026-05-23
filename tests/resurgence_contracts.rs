@@ -177,10 +177,7 @@ fn submit_tx_and_expect_failure(
     tokio_rt.block_on(runtime.produce_block()).unwrap();
 
     let receipt = runtime.storage().get_receipt(&tx_hash).unwrap().expect("Receipt not found");
-    assert!(
-        !receipt.success,
-        "Transaction unexpectedly succeeded when failure was expected"
-    );
+    assert!(!receipt.success, "Transaction unexpectedly succeeded when failure was expected");
 }
 
 fn submit_contract_call_tx(
@@ -536,8 +533,13 @@ fn test_resurgence_staking_and_governance() {
 
     let count = query_contract::<u64>(&runtime, &admin_pk, &gov_id, "latestProposalId", vec![]);
     assert_eq!(count, 1);
-    let state_after_propose =
-        query_contract::<u8>(&runtime, &admin_pk, &gov_id, "state", vec![bincode::serialize(&1u64).unwrap()]);
+    let state_after_propose = query_contract::<u8>(
+        &runtime,
+        &admin_pk,
+        &gov_id,
+        "state",
+        vec![bincode::serialize(&1u64).unwrap()],
+    );
     assert_eq!(state_after_propose, 1u8);
 
     // Vote on proposal
@@ -607,8 +609,13 @@ fn test_resurgence_staking_and_governance() {
         vec![bincode::serialize(&1u64).unwrap()],
     );
     assert!(prop.executed);
-    let final_state =
-        query_contract::<u8>(&runtime, &admin_pk, &gov_id, "state", vec![bincode::serialize(&1u64).unwrap()]);
+    let final_state = query_contract::<u8>(
+        &runtime,
+        &admin_pk,
+        &gov_id,
+        "state",
+        vec![bincode::serialize(&1u64).unwrap()],
+    );
     assert_eq!(final_state, 7u8);
 
     // Verify rate change was applied to the staking pool contract
@@ -972,10 +979,7 @@ fn test_staking_pool_manager_batch_stake_and_dynamic_rate() {
         &user_sk,
         &distributor_id,
         "mintAndDistribute",
-        vec![
-            bincode::serialize(&user_pk.to_bytes()).unwrap(),
-            bincode::serialize(&1u128).unwrap(),
-        ],
+        vec![bincode::serialize(&user_pk.to_bytes()).unwrap(), bincode::serialize(&1u128).unwrap()],
     );
 
     submit_contract_call_tx(

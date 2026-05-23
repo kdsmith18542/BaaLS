@@ -292,10 +292,18 @@ impl Storage for AnyStorage {
     fn set_storage_metadata(&self, key: &str, value: &str) -> Result<(), StorageError> {
         dispatch!(self, set_storage_metadata, key, value)
     }
-    fn take_snapshot(&self, height: u64, snapshots_dir: &std::path::Path) -> Result<(), StorageError> {
+    fn take_snapshot(
+        &self,
+        height: u64,
+        snapshots_dir: &std::path::Path,
+    ) -> Result<(), StorageError> {
         dispatch!(self, take_snapshot, height, snapshots_dir)
     }
-    fn restore_from_snapshot(&self, height: u64, snapshots_dir: &std::path::Path) -> Result<(), StorageError> {
+    fn restore_from_snapshot(
+        &self,
+        height: u64,
+        snapshots_dir: &std::path::Path,
+    ) -> Result<(), StorageError> {
         dispatch!(self, restore_from_snapshot, height, snapshots_dir)
     }
     fn list_snapshots(&self, snapshots_dir: &std::path::Path) -> Result<Vec<u64>, StorageError> {

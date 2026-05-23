@@ -20,6 +20,8 @@ pub mod config;
 pub mod consensus;
 /// WASM smart contract engine and host functions
 pub mod contracts;
+/// Phase K — EVM submitter for posting attestations to EVM chains
+pub mod evm_submitter;
 /// Foreign Function Interface (C bindings)
 pub mod ffi;
 /// Secure encrypted keystore for private key management
@@ -28,6 +30,8 @@ pub mod keystore;
 pub mod ledger;
 /// Performance metrics collection and reporting
 pub mod metrics;
+/// Phase K — Resurgence Protocol oracle integration (dormancy attestation signing)
+pub mod oracle;
 pub mod redb_storage;
 /// Write-ahead rollback log for reorg support
 pub mod rollback;

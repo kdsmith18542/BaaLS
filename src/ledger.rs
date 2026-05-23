@@ -583,26 +583,39 @@ impl<S: Storage, C: ContractEngine> Ledger<S, C> {
                                     }
                                 }
 
-                                // Recompute the contract's storage root to reflect all changes for each touched contract
-                                for (target_contract_id, updates) in
-                                    &result.side_effects.storage_updates
-                                {
+                                // Recompute storage roots for contracts touched by this call.
+                                // This includes the primary called contract even if no writes were
+                                // emitted during execution, keeping account root metadata aligned
+                                // with on-disk contract state.
+                                let mut contracts_requiring_root_update: HashSet<ContractId> =
+                                    HashSet::new();
+                                contracts_requiring_root_update.insert(contract_id.clone());
+                                contracts_requiring_root_update
+                                    .extend(result.side_effects.storage_updates.keys().cloned());
+
+                                for target_contract_id in contracts_requiring_root_update {
                                     let contract_account_pk =
-                                        contract_account_public_key(target_contract_id);
+                                        contract_account_public_key(&target_contract_id);
                                     if let Some(mut contract_account) =
                                         self.storage.get_account(&contract_account_pk)?
                                     {
                                         let mut all_kvs: HashMap<Vec<u8>, Vec<u8>> = self
                                             .storage
-                                            .contract_storage_read_all(target_contract_id)?
+                                            .contract_storage_read_all(&target_contract_id)?
                                             .into_iter()
                                             .collect();
 
-                                        for (key, val) in &updates.writes {
-                                            all_kvs.insert(key.clone(), val.clone());
-                                        }
-                                        for key in &updates.deletes {
-                                            all_kvs.remove(key);
+                                        if let Some(updates) = result
+                                            .side_effects
+                                            .storage_updates
+                                            .get(&target_contract_id)
+                                        {
+                                            for (key, val) in &updates.writes {
+                                                all_kvs.insert(key.clone(), val.clone());
+                                            }
+                                            for key in &updates.deletes {
+                                                all_kvs.remove(key);
+                                            }
                                         }
 
                                         let mut smt = SparseMerkleTree::new();

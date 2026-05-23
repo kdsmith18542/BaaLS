@@ -43,7 +43,7 @@ sysinfo = "0.33"
 toml = "0.8"
 env_logger = "0.10"
 tiny_http = { version = "0.12", features = ["ssl-rustls"] }
-ureq = "2.12"
+ureq = { version = "2.12", features = ["json"] }
 rustls = { version = "0.23", features = ["ring"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
@@ -57,6 +57,7 @@ hmac = "0.12"
 tempfile = "3.8"
 lru = "0.12"
 libc = "0.2"
+k256 = { version = "0.13", features = ["ecdsa"] }
 
 [dev-dependencies]
 criterion = "0.8"

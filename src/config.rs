@@ -134,6 +134,35 @@ pub struct FeeConfig {
     pub treasury_address: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OracleConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// JSON-RPC endpoint for the EVM hub chain (e.g. Arbitrum Sepolia)
+    #[serde(default)]
+    pub evm_rpc: String,
+    /// RewardDistributor contract address on the hub chain
+    #[serde(default)]
+    pub reward_distributor: String,
+    /// Amoy (Polygon) JSON-RPC for spoke-chain verification
+    #[serde(default)]
+    pub amoy_rpc: String,
+    /// Env var name that holds the BaaLS EVM signing key (secp256k1, hex)
+    #[serde(default = "default_evm_key_env")]
+    pub evm_private_key_env: String,
+    /// EVM chain ID of the hub (421614 = Arbitrum Sepolia)
+    #[serde(default = "default_evm_chain_id")]
+    pub evm_chain_id: u64,
+}
+
+fn default_evm_key_env() -> String {
+    "BAALS_EVM_PRIVATE_KEY".to_string()
+}
+
+fn default_evm_chain_id() -> u64 {
+    421614
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub node: NodeConfig,
@@ -143,6 +172,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub fees: FeeConfig,
+    #[serde(default)]
+    pub oracle: OracleConfig,
 }
 
 fn default_data_dir() -> String {
@@ -290,6 +321,7 @@ impl Default for Config {
                 log_max_files: default_log_max_files(),
             },
             fees: FeeConfig::default(),
+            oracle: OracleConfig::default(),
         }
     }
 }
@@ -448,9 +480,9 @@ impl Config {
                     .map_err(|_| ConfigError::Invalid("Invalid round_robin (true/false)".into()))?
             }
             "consensus.produce_empty_blocks" => {
-                self.consensus.produce_empty_blocks = value
-                    .parse()
-                    .map_err(|_| ConfigError::Invalid("Invalid produce_empty_blocks (true/false)".into()))?
+                self.consensus.produce_empty_blocks = value.parse().map_err(|_| {
+                    ConfigError::Invalid("Invalid produce_empty_blocks (true/false)".into())
+                })?
             }
             "network.max_peers" => {
                 self.network.max_peers =
