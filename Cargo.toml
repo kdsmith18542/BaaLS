@@ -39,7 +39,7 @@ pbkdf2 = "0.12"
 zeroize = "1.7"
 dirs = "5.0"
 log = "0.4"
-sysinfo = "0.33"
+sysinfo = "0.39"
 toml = "0.8"
 env_logger = "0.10"
 tiny_http = { version = "0.12", features = ["ssl-rustls"] }
