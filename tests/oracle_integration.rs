@@ -30,6 +30,7 @@ mod phase_k_oracle_tests {
             threshold_blocks: 100000,
             signer_pubkey: Some(hex::encode(vk.to_bytes())),
             signature: None,
+            evm_wallet: None,
         };
 
         // Sign it
@@ -57,6 +58,7 @@ mod phase_k_oracle_tests {
             threshold_blocks: 100000,
             signer_pubkey: None,
             signature: None,
+            evm_wallet: None,
         };
 
         assert!(proof.verify_chrononode_signature().is_err());
@@ -78,6 +80,7 @@ mod phase_k_oracle_tests {
             threshold_blocks: 100000,
             signer_pubkey: Some(hex::encode(chrononode_vk.to_bytes())),
             signature: None,
+            evm_wallet: None,
         };
 
         let canonical_msg = proof.canonical_message();
@@ -144,8 +147,9 @@ mod phase_k_oracle_tests {
             evm_chain_id: 421614,
         };
 
-        let evm_key = vec![42u8; 32];
-        let _submitter = EVMSubmitter::new(config.clone(), evm_key);
+        // EVMSubmitter::new reads key from the env var; without it set, returns None
+        let submitter = EVMSubmitter::new(config.clone());
+        assert!(submitter.is_none(), "expected None when env var is not set");
 
         // Verify config is accessible (this is a basic sanity check)
         assert!(config.enabled);
@@ -170,6 +174,7 @@ mod phase_k_oracle_tests {
                 threshold_blocks: 100000,
                 signer_pubkey: Some(hex::encode(vk.to_bytes())),
                 signature: None,
+                evm_wallet: None,
             };
 
             let canonical_msg = proof.canonical_message();
@@ -197,6 +202,7 @@ mod phase_k_oracle_tests {
             threshold_blocks: 50,
             signer_pubkey: None,
             signature: None,
+            evm_wallet: None,
         };
 
         let canonical = proof.canonical_message();
@@ -220,6 +226,7 @@ mod phase_k_oracle_tests {
             threshold_blocks: 50,
             signer_pubkey: None,
             signature: None,
+            evm_wallet: None,
         };
 
         let proof2 = DormancyProof {
@@ -231,6 +238,7 @@ mod phase_k_oracle_tests {
             threshold_blocks: 50,
             signer_pubkey: None,
             signature: None,
+            evm_wallet: None,
         };
 
         let msg1 = proof1.canonical_message();
@@ -254,6 +262,7 @@ mod phase_k_oracle_tests {
             threshold_blocks: 100000,
             signer_pubkey: Some(hex::encode(chrononode_vk.to_bytes())),
             signature: None,
+            evm_wallet: None,
         };
 
         let canonical_msg = proof.canonical_message();

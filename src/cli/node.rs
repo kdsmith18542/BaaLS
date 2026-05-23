@@ -2058,6 +2058,22 @@ pub fn handle_node(
             crate::ws_server::start_ws_server(ws_bind, ws_rx, runtime.is_running_handle());
             info!("WebSocket server started on ws://127.0.0.1:{}", cfg.node.ws_port);
 
+            // K.5 — EVMSubmitter background task
+            if let Some(submitter) = crate::evm_submitter::EVMSubmitter::new(cfg.oracle.clone()) {
+                let storage_for_evm = runtime.storage().clone();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("failed to build tokio runtime for EVMSubmitter");
+                    rt.block_on(submitter.run(&storage_for_evm));
+                });
+                info!("[EVM] EVMSubmitter background task started");
+            } else if cfg.oracle.enabled {
+                log::warn!("[EVM] Oracle enabled but {} env var not set — EVMSubmitter disabled",
+                    cfg.oracle.evm_private_key_env);
+            }
+
             let health_bind = format!("127.0.0.1:{}", cfg.node.health_port);
             let api_bind = format!("0.0.0.0:{}", port);
             if cfg.network.tls_enabled {

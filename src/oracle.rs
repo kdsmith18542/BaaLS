@@ -42,6 +42,9 @@ pub struct DormancyProof {
     pub signer_pubkey: Option<String>,
     /// ChronoNode operator ed25519 signature over canonical_message() (hex, 64 bytes)
     pub signature: Option<String>,
+    /// EVM address (checksummed hex, 0x-prefixed) that should receive RESURGE.
+    /// Required for EVMSubmitter to call submitDormancyProof on the hub chain.
+    pub evm_wallet: Option<String>,
 }
 
 /// BaaLS-signed oracle attestation returned to ChronoNode after validation.
