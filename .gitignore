@@ -43,4 +43,6 @@ Thumbs.db
 *.temp
 main_rs_errors.txt
 plan_remaining.md
-plan.md 
+plan.md
+agents.md
+AGENTS.md
