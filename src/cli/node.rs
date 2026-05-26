@@ -584,7 +584,7 @@ fn spawn_health_server(
             let _ = request.respond(response);
         }
 
-        let mut rate_limiter = RateLimiter::new(10, 1);
+        let mut rate_limiter = RateLimiter::new(50, 1);
         if health_only {
             info!("HTTP health endpoint listening on http://{}/health", bind_addr);
         } else {
