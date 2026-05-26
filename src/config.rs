@@ -163,6 +163,54 @@ fn default_evm_chain_id() -> u64 {
     421614
 }
 
+// ── Phase L: BaaLS relay bridge watcher config ────────────────────────────────
+
+fn default_log_chunk_size() -> u64 {
+    100
+}
+
+/// A single spoke chain to watch for BridgeClaimRequested events.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RelaySpoke {
+    /// Human-readable label used as state-file key (e.g. "amoy", "base-sepolia").
+    pub label: String,
+    /// JSON-RPC endpoint for this spoke chain.
+    pub rpc: String,
+    /// CrossChainSender contract address on this spoke chain (0x-prefixed).
+    pub sender_address: String,
+    /// Block number to begin scanning on the very first run (0 = chain genesis).
+    #[serde(default)]
+    pub start_block: u64,
+    /// Max block range per eth_getLogs call (default 100; reduce if RPC rejects).
+    #[serde(default = "default_log_chunk_size")]
+    pub log_chunk_size: u64,
+}
+
+fn default_relay_poll_secs() -> u64 {
+    30
+}
+
+fn default_relay_state_path() -> String {
+    "/var/lib/baals/relay_state.json".to_string()
+}
+
+/// Configuration for the BaaLS relay bridge watcher (Phase L).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RelayConfig {
+    /// Set to true to enable the relay watcher.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Spoke chains to watch.
+    #[serde(default)]
+    pub spokes: Vec<RelaySpoke>,
+    /// How often to poll spoke chains (seconds, min 10).
+    #[serde(default = "default_relay_poll_secs")]
+    pub poll_interval_secs: u64,
+    /// Path for persisting scanned-block cursors and processed-nonce set.
+    #[serde(default = "default_relay_state_path")]
+    pub state_path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub node: NodeConfig,
@@ -174,6 +222,8 @@ pub struct Config {
     pub fees: FeeConfig,
     #[serde(default)]
     pub oracle: OracleConfig,
+    #[serde(default)]
+    pub relay: RelayConfig,
 }
 
 fn default_data_dir() -> String {
@@ -322,6 +372,7 @@ impl Default for Config {
             },
             fees: FeeConfig::default(),
             oracle: OracleConfig::default(),
+            relay: RelayConfig::default(),
         }
     }
 }

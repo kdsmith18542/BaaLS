@@ -16,11 +16,12 @@
     <nav class="nav">
       <div class="nav-inner">
         <a href="#" class="nav-brand">
-          <span class="nav-logo">B</span>
+          <img src="./baalslogo.png" alt="BaaLS" class="nav-logo-img" />
           <span>BaaLS</span>
         </a>
         <div class="nav-links">
           <a href="#explorer">Explorer</a>
+          <a href="#ecosystem">Ecosystem</a>
           <a href="#network">Network</a>
           <a href="https://github.com" class="nav-gh" target="_blank" rel="noopener">GitHub</a>
         </div>
@@ -108,11 +109,31 @@
                 <option value="tx-hash">Tx Hash</option>
                 <option value="account">Account</option>
                 <option value="tx-address">Tx by Address</option>
+                <option value="contract-id">Contract ID</option>
               </select>
             </div>
             <input id="searchInput" type="text" placeholder="Search by block height, hash, or address…" required />
             <button type="submit" class="btn btn-primary btn-search">Search</button>
           </form>
+
+          <form id="unifiedForm" class="search-bar unified-bar" autocomplete="off">
+            <div class="search-type-wrap">
+              <select id="unifiedType" aria-label="Unified jump type">
+                <option value="auto">Unified Jump</option>
+                <option value="baals-tx">BaaLS Tx Hash</option>
+                <option value="evm-tx">EVM Tx Hash</option>
+                <option value="proof-hash">Proof Hash</option>
+                <option value="wasm-hash">WASM Hash</option>
+                <option value="manifest-hash">Manifest Hash</option>
+                <option value="ccip-id">CCIP Message ID</option>
+                <option value="contract-id">Contract ID</option>
+                <option value="address">Address</option>
+              </select>
+            </div>
+            <input id="unifiedInput" type="text" placeholder="Jump across BaaLS / ChronoNode / Resurgence / Canvas using hashes and IDs…" />
+            <button type="submit" class="btn btn-outline btn-search">Go</button>
+          </form>
+          <div id="unifiedResult" class="unified-result"></div>
 
           <div id="searchResults" class="search-results"></div>
 
@@ -124,6 +145,7 @@
                   <tr>
                     <th>Height</th>
                     <th>Hash</th>
+                    <th>Producer</th>
                     <th>Time</th>
                     <th>Txns</th>
                   </tr>
@@ -131,6 +153,113 @@
                 <tbody id="blocksBody"></tbody>
               </table>
             </div>
+          </div>
+
+          <div class="blocks-section">
+            <h3>Oracle Attestations</h3>
+            <div class="attest-controls">
+              <label for="oracleChain">Chain</label>
+              <select id="oracleChain">
+                <option value="bitcoin">bitcoin</option>
+                <option value="bitcoin-light">bitcoin-light</option>
+                <option value="dogecoin">dogecoin</option>
+                <option value="litecoin">litecoin</option>
+                <option value="ethereum">ethereum</option>
+              </select>
+              <button id="oracleReload" class="btn btn-outline btn-sm" type="button">Reload</button>
+            </div>
+            <div class="blocks-table-wrap">
+              <table class="blocks-table">
+                <thead>
+                  <tr>
+                    <th>Address</th>
+                    <th>EVM Wallet</th>
+                    <th>Attested Block</th>
+                    <th>BaaLS Block Hash</th>
+                    <th>Proof Link</th>
+                    <th>EVM Mint</th>
+                  </tr>
+                </thead>
+                <tbody id="oracleBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="blocks-section">
+            <div class="section-header-row">
+              <h3>Mempool</h3>
+              <button id="mempoolReload" class="btn btn-outline btn-sm" type="button">Reload</button>
+            </div>
+            <div id="mempoolList" class="mempool-list">Loading…</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ─── Ecosystem Surfaces ─── -->
+      <section class="section section-alt" id="ecosystem">
+        <div class="section-inner">
+          <div class="section-header">
+            <h2>Ecosystem Surfaces</h2>
+            <p class="section-sub">Scaffolding view for BaaLS, ChronoNode, Resurgence, and CanvasContracts explorer/registry lanes.</p>
+          </div>
+
+          <div class="eco-grid">
+            <article class="eco-card">
+              <div class="eco-card-header">
+                <img src="./baalslogo.png" alt="BaaLS" class="eco-logo" />
+                <div>
+                  <span class="eco-kind">Live Here</span>
+                  <h3>BaaLS Block Explorer</h3>
+                </div>
+              </div>
+              <p>Blocks, transactions, accounts, contracts, validators, peers, mempool, and oracle attestations.</p>
+              <div class="eco-status" id="ecoBaalsStatus">Oracle attestations: checking…</div>
+              <details class="eco-trace">
+                <summary>Recent Oracle Trace</summary>
+                <div id="ecoOracleTrace" class="eco-trace-list">Loading…</div>
+              </details>
+              <a href="#explorer" class="btn btn-outline btn-sm">Open Local Section</a>
+            </article>
+
+            <article class="eco-card">
+              <div class="eco-card-header">
+                <img src="./chrononodelogo.png" alt="ChronoNode" class="eco-logo" />
+                <div>
+                  <span class="eco-kind">External</span>
+                  <h3>ChronoNode Proof Explorer</h3>
+                </div>
+              </div>
+              <p>Archive/proof timelines, dormancy status, checkpoints, and artifact pointers.</p>
+              <div class="eco-status" id="ecoChronoStatus">Health: checking…</div>
+              <div class="eco-links" id="ecoChronoLinks"></div>
+              <a id="ecoChronoUrl" href="https://chrono.baals.network" target="_blank" rel="noopener" class="btn btn-outline btn-sm">Open ChronoNode</a>
+            </article>
+
+            <article class="eco-card">
+              <div class="eco-card-header">
+                <img src="./resurgencelogo.png" alt="Resurgence" class="eco-logo" />
+                <div>
+                  <span class="eco-kind">External</span>
+                  <h3>Resurgence Protocol Explorer</h3>
+                </div>
+              </div>
+              <p>Pool, governance, oracle mint, and CCIP visibility views for RESURGE flows.</p>
+              <div class="eco-status" id="ecoResurgeStatus">Reachability: checking…</div>
+              <a id="ecoResurgeUrl" href="https://resurge.baals.network" target="_blank" rel="noopener" class="btn btn-outline btn-sm">Open Resurgence</a>
+            </article>
+
+            <article class="eco-card">
+              <div class="eco-card-header">
+                <img src="./canvascontractslogo.png" alt="Canvas Contracts" class="eco-logo" />
+                <div>
+                  <span class="eco-kind">External</span>
+                  <h3>Canvas Artifact Registry</h3>
+                </div>
+              </div>
+              <p>Graph/WASM/manifest provenance with deployment and archive cross-links.</p>
+              <div class="eco-status" id="ecoCanvasStatus">Reachability: checking…</div>
+              <a id="ecoCanvasUrl" href="https://canvas.baals.network" target="_blank" rel="noopener" class="btn btn-outline btn-sm">Open Canvas</a>
+            </article>
           </div>
         </div>
       </section>
@@ -147,6 +276,11 @@
             <div class="net-card">
               <h4>Validators</h4>
               <div class="net-card-value" id="netValidatorCount">—</div>
+              <div class="net-validator-meta">
+                <div><span class="ci-label">Current Proposer</span><span class="ci-value" id="netCurrentProposer">—</span></div>
+                <div><span class="ci-label">Quorum Threshold</span><span class="ci-value" id="netQuorumThreshold">—</span></div>
+                <div><span class="ci-label">Round-Robin</span><span class="ci-value" id="netRoundRobin">—</span></div>
+              </div>
               <div class="net-list" id="netValidatorList"></div>
             </div>
             <div class="net-card">
@@ -161,6 +295,10 @@
                 <div><span class="ci-label">Memory</span><span class="ci-value" id="ciMemory">—</span></div>
                 <div><span class="ci-label">Consensus</span><span class="ci-value">PoA (Ed25519)</span></div>
                 <div><span class="ci-label">P2P</span><span class="ci-value">TLS / Mutual Auth</span></div>
+                <div><span class="ci-label">Fee Policy</span><span class="ci-value" id="ciFeePolicy">—</span></div>
+                <div><span class="ci-label">WS Port</span><span class="ci-value" id="ciWsPort">—</span></div>
+                <div><span class="ci-label">Backend</span><span class="ci-value" id="ciBackend">—</span></div>
+                <div><span class="ci-label">Chain ID</span><span class="ci-value" id="ciChainId">—</span></div>
               </div>
             </div>
           </div>
@@ -176,6 +314,18 @@
               <label>
                 <span>WebSocket URL</span>
                 <input id="cfgWs" type="url" placeholder="wss://baals.network/ws" />
+              </label>
+              <label>
+                <span>ChronoNode URL</span>
+                <input id="cfgChrono" type="url" placeholder="https://chrono.baals.network" />
+              </label>
+              <label>
+                <span>Resurgence URL</span>
+                <input id="cfgResurge" type="url" placeholder="https://resurge.baals.network" />
+              </label>
+              <label>
+                <span>Canvas URL</span>
+                <input id="cfgCanvas" type="url" placeholder="https://canvas.baals.network" />
               </label>
               <button id="cfgSave" class="btn btn-outline btn-sm">Save & Reconnect</button>
             </div>

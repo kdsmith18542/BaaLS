@@ -2074,6 +2074,20 @@ pub fn handle_node(
                     cfg.oracle.evm_private_key_env);
             }
 
+            // L.1-L.4 — RelayWatcher background task (BaaLS relay bridge)
+            if let Some(watcher) = crate::evm_submitter::RelayWatcher::new(cfg.relay.clone(), cfg.oracle.clone()) {
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("failed to build tokio runtime for RelayWatcher");
+                    rt.block_on(watcher.run());
+                });
+                info!("[Relay] BridgeClaimWatcher background task started");
+            } else if cfg.relay.enabled {
+                log::warn!("[Relay] relay.enabled=true but watcher is misconfigured — RelayWatcher disabled");
+            }
+
             let health_bind = format!("127.0.0.1:{}", cfg.node.health_port);
             let api_bind = format!("0.0.0.0:{}", port);
             if cfg.network.tls_enabled {

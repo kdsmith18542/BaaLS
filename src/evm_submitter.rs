@@ -8,7 +8,7 @@
 ///
 /// Transaction signing uses the secp256k1 key from the `evm_private_key_env` env var.
 /// The corresponding address must hold DORMANCY_ORACLE_ROLE on RewardDistributor.
-use crate::config::OracleConfig;
+use crate::config::{OracleConfig, RelayConfig};
 use crate::oracle::OracleAttestation;
 use crate::storage::Storage;
 use crate::ContractId;
@@ -16,7 +16,7 @@ use k256::ecdsa::{RecoveryId, Signature as K256Signature, SigningKey as K256Sign
 use k256::ecdsa::signature::hazmat::PrehashSigner;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_keccak::{Hasher, Keccak};
@@ -287,6 +287,20 @@ fn send_raw_tx(rpc_url: &str, raw_tx_hex: &str) -> Result<String, Box<dyn std::e
     Ok(tx_hash)
 }
 
+/// Poll for tx receipt and return true if status=1 (success), false if reverted, None if not yet mined.
+fn check_tx_success(rpc_url: &str, tx_hash: &str) -> Option<bool> {
+    let result = rpc_call(
+        rpc_url,
+        "eth_getTransactionReceipt",
+        serde_json::json!([tx_hash]),
+    ).ok()?;
+    if result.is_null() {
+        return None; // not yet mined
+    }
+    let status = result["status"].as_str()?;
+    Some(status == "0x1")
+}
+
 /// Derive the EVM address (checksummed hex) from a secp256k1 signing key.
 fn evm_address(sk: &K256SigningKey) -> String {
     let vk = sk.verifying_key();
@@ -534,6 +548,300 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+// ── Phase L: BaaLS Relay Bridge Watcher ──────────────────────────────────────
+//
+// Watches spoke chains for BridgeClaimRequested(address,uint256,uint256) events
+// emitted by CrossChainSender.bridgeClaimRelay(). For each new event, calls
+// RewardDistributor.mintForRelay(user, amount, crossChainSender, nonce) on the hub.
+//
+// Deduplication: (crossChainSender_lower, nonce_hex) pairs are stored in a JSON
+// state file that also tracks the last-scanned block per spoke so restarts resume
+// from where they left off rather than rescanning from genesis.
+
+fn bridge_claim_requested_topic() -> [u8; 32] {
+    keccak256(b"BridgeClaimRequested(address,uint256,uint256)")
+}
+
+fn mint_for_relay_selector() -> [u8; 4] {
+    let h = keccak256(b"mintForRelay(address,uint256,address,uint256)");
+    [h[0], h[1], h[2], h[3]]
+}
+
+/// ABI-encode mintForRelay(address user, uint256 amount, address crossChainSender, uint256 nonce).
+/// All args are fixed-size, so calldata = 4 (selector) + 4×32 = 132 bytes.
+fn encode_mint_for_relay(
+    user: &str,
+    amount_slot: &[u8; 32],
+    cross_chain_sender: &str,
+    nonce_slot: &[u8; 32],
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let user_raw = hex::decode(user.trim_start_matches("0x"))?;
+    if user_raw.len() != 20 {
+        return Err(format!("user must be 20 bytes, got {}", user_raw.len()).into());
+    }
+    let sender_raw = hex::decode(cross_chain_sender.trim_start_matches("0x"))?;
+    if sender_raw.len() != 20 {
+        return Err(format!("crossChainSender must be 20 bytes, got {}", sender_raw.len()).into());
+    }
+
+    let mut user_slot = [0u8; 32];
+    user_slot[12..].copy_from_slice(&user_raw);
+    let mut sender_slot = [0u8; 32];
+    sender_slot[12..].copy_from_slice(&sender_raw);
+
+    let mut calldata = Vec::with_capacity(132);
+    calldata.extend_from_slice(&mint_for_relay_selector());
+    calldata.extend_from_slice(&user_slot);
+    calldata.extend_from_slice(amount_slot);
+    calldata.extend_from_slice(&sender_slot);
+    calldata.extend_from_slice(nonce_slot);
+    Ok(calldata)
+}
+
+/// On-disk state for the relay watcher (JSON).
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct RelayPersist {
+    /// Last block scanned per spoke label — resume point on restart.
+    #[serde(default)]
+    last_scanned_block: HashMap<String, u64>,
+    /// Processed dedup keys: "<sender_lower>:<nonce_hex>".
+    #[serde(default)]
+    processed: HashSet<String>,
+}
+
+pub struct RelayWatcher {
+    relay_cfg: RelayConfig,
+    oracle_cfg: OracleConfig,
+    signing_key: K256SigningKey,
+    evm_address: String,
+}
+
+impl RelayWatcher {
+    /// Create a RelayWatcher. Returns `None` if relay is disabled, misconfigured, or
+    /// the signing key env var is absent/invalid.
+    pub fn new(relay_cfg: RelayConfig, oracle_cfg: OracleConfig) -> Option<Self> {
+        if !relay_cfg.enabled {
+            return None;
+        }
+        if relay_cfg.spokes.is_empty() {
+            warn!("[Relay] relay.enabled=true but no spokes configured — watcher disabled");
+            return None;
+        }
+        if oracle_cfg.reward_distributor.is_empty() || oracle_cfg.evm_rpc.is_empty() {
+            warn!("[Relay] relay.enabled=true but oracle.reward_distributor or oracle.evm_rpc is empty — watcher disabled");
+            return None;
+        }
+        let key_hex = match std::env::var(&oracle_cfg.evm_private_key_env) {
+            Ok(k) => k,
+            Err(_) => {
+                warn!("[Relay] Env var '{}' not set — watcher disabled", oracle_cfg.evm_private_key_env);
+                return None;
+            }
+        };
+        let key_bytes = hex::decode(key_hex.trim()).ok()?;
+        let sk = K256SigningKey::from_slice(&key_bytes).ok()?;
+        let addr = evm_address(&sk);
+        info!(
+            "[Relay] Watcher initialized. Signing address: {} — {} spoke(s): {}",
+            addr,
+            relay_cfg.spokes.len(),
+            relay_cfg.spokes.iter().map(|s| s.label.as_str()).collect::<Vec<_>>().join(", ")
+        );
+        Some(Self { relay_cfg, oracle_cfg, signing_key: sk, evm_address: addr })
+    }
+
+    /// Background poll loop — runs indefinitely.
+    pub async fn run(&self) {
+        let poll_secs = self.relay_cfg.poll_interval_secs.max(10);
+        loop {
+            if let Err(e) = self.poll_all_spokes() {
+                error!("[Relay] Poll error: {}", e);
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(poll_secs)).await;
+        }
+    }
+
+    fn load_state(&self) -> RelayPersist {
+        match std::fs::read_to_string(&self.relay_cfg.state_path) {
+            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+            Err(_) => RelayPersist::default(),
+        }
+    }
+
+    fn save_state(&self, state: &RelayPersist) {
+        if let Ok(s) = serde_json::to_string_pretty(state) {
+            if let Err(e) = std::fs::write(&self.relay_cfg.state_path, s) {
+                warn!("[Relay] Failed to save state to {}: {}", self.relay_cfg.state_path, e);
+            }
+        }
+    }
+
+    fn poll_all_spokes(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = self.load_state();
+        let topic0 = bridge_claim_requested_topic();
+        let topic0_hex = format!("0x{}", hex::encode(topic0));
+
+        for spoke in &self.relay_cfg.spokes {
+            if let Err(e) = self.poll_spoke(spoke, &topic0_hex, &mut state) {
+                warn!("[Relay] {} error: {}", spoke.label, e);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn poll_spoke(
+        &self,
+        spoke: &crate::config::RelaySpoke,
+        topic0_hex: &str,
+        state: &mut RelayPersist,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let from_block = state
+            .last_scanned_block
+            .get(&spoke.label)
+            .copied()
+            .unwrap_or(spoke.start_block);
+
+        let latest_hex = rpc_call(&spoke.rpc, "eth_blockNumber", serde_json::json!([]))?;
+        let latest_str = latest_hex.as_str().ok_or("blockNumber not a string")?;
+        let latest_block = u64::from_str_radix(latest_str.trim_start_matches("0x"), 16)?;
+
+        if from_block >= latest_block {
+            debug!("[Relay] {} at block {} — nothing new", spoke.label, from_block);
+            return Ok(());
+        }
+
+        // Use per-spoke log_chunk_size (default 100) to stay within public-RPC limits.
+        let chunk = spoke.log_chunk_size.max(1);
+        let to_block = (from_block + chunk).min(latest_block);
+
+        let logs = rpc_call(
+            &spoke.rpc,
+            "eth_getLogs",
+            serde_json::json!([{
+                "fromBlock": format!("0x{:x}", from_block),
+                "toBlock":   format!("0x{:x}", to_block),
+                "address":   spoke.sender_address,
+                "topics":    [topic0_hex],
+            }]),
+        )?;
+
+        let log_arr = logs.as_array().cloned().unwrap_or_default();
+
+        let mut any_failed = false;
+        for log in &log_arr {
+            if let Err(e) = self.process_log(log, &spoke.sender_address, state) {
+                warn!("[Relay] {} log processing error: {}", spoke.label, e);
+                any_failed = true;
+            }
+        }
+
+        // Only advance scan position if all events in this chunk succeeded.
+        // If any failed (e.g. mintForRelay reverted), keep last_scanned_block at from_block
+        // so the failed event is retried on the next poll. Already-processed events are
+        // skipped by the dedup_key check so they won't be double-submitted.
+        if !any_failed {
+            state.last_scanned_block.insert(spoke.label.clone(), to_block);
+            self.save_state(state);
+        }
+
+        if !log_arr.is_empty() {
+            info!(
+                "[Relay] {} blocks {}-{}: {} BridgeClaimRequested event(s) processed{}",
+                spoke.label,
+                from_block,
+                to_block,
+                log_arr.len(),
+                if any_failed { " (some failed — will retry)" } else { "" }
+            );
+        }
+
+        Ok(())
+    }
+
+    fn process_log(
+        &self,
+        log: &serde_json::Value,
+        sender_address: &str,
+        state: &mut RelayPersist,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // topics[1]: indexed staker address — bytes32, last 20 bytes are the address
+        let topics = log["topics"].as_array().ok_or("no topics array")?;
+        if topics.len() < 2 {
+            return Err("expected ≥2 topics (topic0 + indexed staker)".into());
+        }
+        let staker_topic = topics[1].as_str().ok_or("topics[1] not a string")?;
+        let staker_raw = hex::decode(staker_topic.trim_start_matches("0x"))?;
+        if staker_raw.len() != 32 {
+            return Err(format!("topics[1] expected 32 bytes, got {}", staker_raw.len()).into());
+        }
+        let staker = format!("0x{}", hex::encode(&staker_raw[12..]));
+
+        // data: amount (uint256, 32 bytes) ++ nonce (uint256, 32 bytes)
+        let data_hex = log["data"].as_str().ok_or("no data field")?;
+        let data_raw = hex::decode(data_hex.trim_start_matches("0x"))?;
+        if data_raw.len() < 64 {
+            return Err(format!("data too short: {} bytes", data_raw.len()).into());
+        }
+        let amount_slot: [u8; 32] = data_raw[0..32].try_into()?;
+        let nonce_slot: [u8; 32] = data_raw[32..64].try_into()?;
+        let nonce_hex = hex::encode(nonce_slot);
+
+        let dedup_key = format!("{}:{}", sender_address.to_lowercase(), nonce_hex);
+        if state.processed.contains(&dedup_key) {
+            debug!("[Relay] Already processed: {}", dedup_key);
+            return Ok(());
+        }
+
+        info!(
+            "[Relay] Relay claim: staker={} nonce={} sender={}",
+            staker, nonce_hex, sender_address
+        );
+
+        let calldata = encode_mint_for_relay(&staker, &amount_slot, sender_address, &nonce_slot)?;
+        let evm_nonce = get_nonce(&self.oracle_cfg.evm_rpc, &self.evm_address)?;
+        let gas_price = get_gas_price(&self.oracle_cfg.evm_rpc)?;
+        let raw_tx = sign_legacy_tx(
+            &self.signing_key,
+            evm_nonce,
+            gas_price,
+            200_000,
+            &self.oracle_cfg.reward_distributor,
+            &calldata,
+            self.oracle_cfg.evm_chain_id,
+        )?;
+        let tx_hash = send_raw_tx(&self.oracle_cfg.evm_rpc, &raw_tx)?;
+        info!(
+            "[Relay] mintForRelay submitted: tx={} staker={} nonce={}",
+            tx_hash, staker, nonce_hex
+        );
+
+        // Wait up to ~15s for receipt to confirm success before marking processed.
+        let mut confirmed = false;
+        for _ in 0..5 {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            match check_tx_success(&self.oracle_cfg.evm_rpc, &tx_hash) {
+                Some(true) => { confirmed = true; break; }
+                Some(false) => {
+                    warn!("[Relay] mintForRelay tx reverted: {} — will retry on next poll", tx_hash);
+                    return Err(format!("mintForRelay reverted: {}", tx_hash).into());
+                }
+                None => continue, // not yet mined
+            }
+        }
+
+        if confirmed {
+            state.processed.insert(dedup_key);
+            self.save_state(state);
+        } else {
+            // Not confirmed within timeout — treat as unprocessed so next poll retries.
+            warn!("[Relay] mintForRelay tx not confirmed in time: {} — will retry", tx_hash);
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,5 +916,71 @@ mod tests {
             addr.to_lowercase(),
             "0x201624cba366250d08bcda95e6ef64151687a447"
         );
+    }
+
+    // ── Phase L relay tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_bridge_claim_requested_topic() {
+        let topic = bridge_claim_requested_topic();
+        let hex = format!("0x{}", hex::encode(topic));
+        println!("BridgeClaimRequested topic: {}", hex);
+        // Verify against on-chain confirmed value
+        assert_eq!(hex, "0x093b86e9ff45f8c6748611e4f8d284abde89dc7f4c010451d9138d319c4fd9d5");
+    }
+
+    #[test]
+    fn test_mint_for_relay_selector() {
+        let sel = mint_for_relay_selector();
+        assert_eq!(sel.len(), 4);
+        assert_ne!(sel, [0u8; 4]);
+        // Must differ from submitDormancyProof selector
+        assert_ne!(sel, submit_dormancy_selector());
+    }
+
+    #[test]
+    fn test_encode_mint_for_relay_length() {
+        let mut amount = [0u8; 32];
+        amount[24..].copy_from_slice(&500u64.to_be_bytes());
+        let mut nonce = [0u8; 32];
+        // nonce = 0
+
+        let calldata = encode_mint_for_relay(
+            "0x201624cBa366250D08bCdA95e6eF64151687A447",
+            &amount,
+            "0x3F1E0400fb8f19FeFA8aA6B8d23468949E73a7B5",
+            &nonce,
+        )
+        .unwrap();
+        // 4 (selector) + 4 × 32 (fixed args) = 132 bytes
+        assert_eq!(calldata.len(), 132, "unexpected calldata length: {}", calldata.len());
+        // First 4 bytes are selector
+        assert_eq!(&calldata[..4], &mint_for_relay_selector());
+    }
+
+    #[test]
+    fn test_encode_mint_for_relay_user_position() {
+        let mut amount = [0u8; 32];
+        amount[31] = 1; // amount = 1
+        let nonce = [0u8; 32];
+        let user = "0xDeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF";
+
+        let calldata = encode_mint_for_relay(user, &amount, "0x1234567890123456789012345678901234567890", &nonce).unwrap();
+        // user slot is at bytes 4..36 (after selector); last 20 bytes are address
+        let user_bytes = hex::decode("DeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF").unwrap();
+        assert_eq!(&calldata[4..16], &[0u8; 12]); // 12-byte left-pad
+        assert_eq!(&calldata[16..36], user_bytes.as_slice());
+    }
+
+    #[test]
+    fn test_relay_persist_dedup() {
+        let mut state = RelayPersist::default();
+        let key = "0xsender:0000000000000000000000000000000000000000000000000000000000000000".to_string();
+        assert!(!state.processed.contains(&key));
+        state.processed.insert(key.clone());
+        assert!(state.processed.contains(&key));
+        // Different nonce — not present
+        let key2 = "0xsender:0000000000000000000000000000000000000000000000000000000000000001".to_string();
+        assert!(!state.processed.contains(&key2));
     }
 }

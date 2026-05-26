@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# eco-log — Append a structured ecosystem event to /var/log/ecosystem/pipeline.jsonl
+#
+# Usage:
+#   eco-log <service> <event_type> <status> [--key value ...]
+#
+#   eco-log baals evm_submitter_tx_sent success \
+#     --chain dogecoin \
+#     --source-address D5y75... \
+#     --evm-wallet 0x4206... \
+#     --tx-hash 0x9e21... \
+#     --correlation-id "dormancy:dogecoin:D5y75..."
+#
+# Required positional args: service, event_type, status
+# Optional flags:     --chain, --source-address, --evm-wallet, --tx-hash,
+#                     --proof-hash, --correlation-id, --message,
+#                     --component, --block
+
+set -euo pipefail
+
+LOG_FILE="/var/log/ecosystem/pipeline.jsonl"
+
+[ $# -ge 3 ] || {
+    echo "Usage: eco-log <service> <event_type> <status> [--key value ...]" >&2
+    exit 1
+}
+
+SERVICE="$1"
+EVENT_TYPE="$2"
+STATUS="$3"
+shift 3
+
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+CHAIN=""
+SOURCE_ADDRESS=""
+EVM_WALLET=""
+TX_HASH=""
+PROOF_HASH=""
+CORRELATION_ID=""
+MESSAGE=""
+COMPONENT=""
+BLOCK=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --chain)          CHAIN="$2"; shift 2 ;;
+        --source-address) SOURCE_ADDRESS="$2"; shift 2 ;;
+        --evm-wallet)     EVM_WALLET="$2"; shift 2 ;;
+        --tx-hash)        TX_HASH="$2"; shift 2 ;;
+        --proof-hash)     PROOF_HASH="$2"; shift 2 ;;
+        --correlation-id) CORRELATION_ID="$2"; shift 2 ;;
+        --message)        MESSAGE="$2"; shift 2 ;;
+        --component)      COMPONENT="$2"; shift 2 ;;
+        --block)          BLOCK="$2"; shift 2 ;;
+        *) echo "Unknown flag: $1" >&2; exit 1 ;;
+    esac
+done
+
+# Auto-generate correlation_id if not provided
+if [ -z "$CORRELATION_ID" ] && [ -n "$CHAIN" ] && [ -n "$SOURCE_ADDRESS" ]; then
+    CORRELATION_ID="dormancy:${CHAIN}:${SOURCE_ADDRESS}"
+fi
+
+# Build JSON manually to avoid jq dependency
+JSON='"ts":"'"$NOW"'","level":"info","service":"'"$SERVICE"'","event_type":"'"$EVENT_TYPE"'","status":"'"$STATUS"'"'
+[ -n "$COMPONENT" ]       && JSON="$JSON"',"component":"'"$COMPONENT"'"'
+[ -n "$CHAIN" ]            && JSON="$JSON"',"chain":"'"$CHAIN"'"'
+[ -n "$SOURCE_ADDRESS" ]  && JSON="$JSON"',"source_address":"'"$SOURCE_ADDRESS"'"'
+[ -n "$EVM_WALLET" ]      && JSON="$JSON"',"evm_wallet":"'"$EVM_WALLET"'"'
+[ -n "$TX_HASH" ]          && JSON="$JSON"',"tx_hash":"'"$TX_HASH"'"'
+[ -n "$PROOF_HASH" ]       && JSON="$JSON"',"proof_hash":"'"$PROOF_HASH"'"'
+[ -n "$CORRELATION_ID" ]  && JSON="$JSON"',"correlation_id":"'"$CORRELATION_ID"'"'
+[ -n "$BLOCK" ]            && JSON="$JSON"',"block":"'"$BLOCK"'"'
+[ -n "$MESSAGE" ]          && JSON="$JSON"',"message":"'"$MESSAGE"'"'
+
+echo "{$JSON}" >> "$LOG_FILE"

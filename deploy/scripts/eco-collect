@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# eco-collect — Collect pipeline events from journald
+# Run every 2 minutes via cron or systemd timer
+# Uses only POSIX tools: sed, grep, cut, journalctl
+
+set -euo pipefail
+
+ECO_LOG="/usr/local/bin/eco-log"
+SINCE="${ECO_SINCE:-2 minutes ago}"
+LAST_RUN="/tmp/eco-collect-last-run"
+NOW="$(date +%s)"
+
+# Determine the actual time window since last run
+if [ -f "$LAST_RUN" ]; then
+    LAST_TS="$(cat "$LAST_RUN")"
+    SINCE="@${LAST_TS}"
+fi
+echo "$NOW" > "$LAST_RUN"
+
+# ── BaaLS EVM Submitter events ──
+journalctl -u baalsd -u baalsd-node2 --since "$SINCE" --no-pager 2>/dev/null | \
+  grep -iE '\[EVM\].*Submitt' | \
+while IFS= read -r line; do
+    # Extract fields from: [EVM] Submitted: chain=dogecoin addr=D5y75... evm=0x4206... tx=0x9e21...
+    CHAIN=$(echo "$line" | sed -n 's/.*chain=\([^ ]*\).*/\1/p' 2>/dev/null || true)
+    ADDR=$(echo "$line" | sed -n 's/.*addr=\([^ ]*\).*/\1/p' 2>/dev/null || true)
+    EVM=$(echo "$line" | sed -n 's/.*evm=\([^ ]*\).*/\1/p' 2>/dev/null || true)
+    TX=$(echo "$line" | sed -n 's/.*tx=\([^ ]*\).*/\1/p' 2>/dev/null || true)
+    ATTEMPT=$(echo "$line" | sed -n 's/.*attempt \([0-9]*\).*/\1/p' 2>/dev/null || true)
+    
+    [ -z "$CHAIN" ] && [ -z "$ADDR" ] && continue
+    
+    CID="dormancy:${CHAIN}:${ADDR}"
+    
+    if echo "$line" | grep -qi "Submitted:"; then
+        STATUS="success"
+        EVENT="evm_submitter_tx_sent"
+    elif echo "$line" | grep -qi "Submit failed"; then
+        STATUS="failed"
+        EVENT="evm_submitter_tx_failed"
+    else
+        continue
+    fi
+    
+    EXTRA="--component evm_submitter --chain $CHAIN --source-address $ADDR --evm-wallet $EVM --correlation-id $CID"
+    [ -n "$TX" ] && EXTRA="$EXTRA --tx-hash $TX"
+    [ -n "$ATTEMPT" ] && EXTRA="$EXTRA --message attempt-${ATTEMPT}"
+    # shellcheck disable=SC2086
+    "$ECO_LOG" baals "$EVENT" "$STATUS" $EXTRA 2>/dev/null || true
+done

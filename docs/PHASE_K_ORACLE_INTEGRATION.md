@@ -1,5 +1,7 @@
 # Phase K — Resurgence Protocol Oracle Integration
 
+**Status (2026-05-25):** Live REST oracle path is active in production-like use. Dedicated WASM oracle contract remains optional future hardening.
+
 ## Overview
 
 Phase K integrates BaaLS as the immutable attestation registry between ChronoNode (dormancy detection on UTXO chains) and the Resurgence EVM contracts (reward minting on Arbitrum/Polygon).
@@ -48,51 +50,28 @@ export BAALS_EVM_PRIVATE_KEY="0xabcd..."  # secp256k1 private key for EVM signin
 ### Background
 
 - **Consensus key**: Ed25519 signing key for BaaLS block consensus. Rotated via `admin rotate-consensus-key`.
-- **EVM key**: secp256k1 signing key for EVM attestations. Rotated via `admin rotate-evm-key` (proposed).
+- **EVM key**: secp256k1 signing key for EVM submissions. Loaded from `oracle.evm_private_key_env`.
 
 Both keys are encrypted at rest with Argon2id + AES-256-GCM.
 
 ### Rotation Procedure (Manual)
 
-#### Step 1: Generate New EVM Key
+#### Step 1: Prepare New EVM Key + Address
 
-```bash
-baalsd admin generate-evm-key \
-  --data-dir ./data \
-  --output ./new-evm.key
-```
+Generate/derive a new secp256k1 keypair externally and record the new EVM address.
 
-This creates an encrypted file `./new-evm.key` containing the new secp256k1 private key.
-
-#### Step 2: Record New EVM Public Address
-
-The new key's address on EVM chains is derived from the secp256k1 public key:
-
-```bash
-baalsd admin evm-key-info \
-  --key-path ./new-evm.key
-```
-
-Output:
-```json
-{
-  "address": "0x1234567890123456789012345678901234567890",
-  "public_key": "0x...",
-  "chain_id": 421614
-}
-```
-
-#### Step 3: Update Resurgence Governor
+#### Step 2: Update Resurgence Governance Authorization
 
 On Arbitrum, use Timelock governance to:
 
-1. Call `RewardDistributor.setOracleAddress(0x...new_address...)`
+1. Grant `DORMANCY_ORACLE_ROLE` to the new EVM address.
 2. Wait for timelock delay (~1 day)
 3. Execute transaction
+4. (Optional) Revoke `DORMANCY_ORACLE_ROLE` from the old address after cutover verification.
 
 This authorizes the new BaaLS EVM key for attestation signing.
 
-#### Step 4: Activate New Key on BaaLS
+#### Step 3: Activate New Key on BaaLS
 
 ```bash
 # Update config.toml to point to new key
@@ -106,30 +85,13 @@ export BAALS_EVM_PRIVATE_KEY_NEW="0x...new_key..."
 systemctl restart baalsd
 ```
 
-Alternatively, if using encrypted key files:
+#### Step 4: Verify New Key is Active
 
-```bash
-# Backup old key
-cp ./data/evm.key.enc ./data/evm.key.enc.backup
-
-# Move new key into place
-mv ./new-evm.key ./data/evm.key.enc
-
-# Restart
-systemctl restart baalsd
-```
-
-#### Step 5: Verify New Key is Active
-
-```bash
-curl -s http://localhost:18080/api/v1/health | jq '.oracle_pubkey'
-```
-
-Should match the new address from Step 2.
+Submit a controlled test attestation and confirm the resulting EVM tx is sent from the new address and accepted by `RewardDistributor`.
 
 ### Automated Rotation via CLI Command (Proposed K.8 Enhancement)
 
-Future CLI will support atomic rotation:
+Future CLI may support atomic rotation:
 
 ```bash
 baalsd admin rotate-evm-key \
@@ -151,7 +113,7 @@ This would:
 
 **Endpoint:** `POST /api/v1/oracle/attest`
 
-**Authentication:** None (external endpoint for ChronoNode)
+**Authentication:** No JWT required. Endpoint is loopback-restricted by node policy (ChronoNode should submit from localhost/co-located environment or approved local proxy).
 
 **Request Body (DormancyProof):**
 ```json
@@ -236,7 +198,7 @@ This would:
    ```yaml
    # chrononode/config.yaml
    oracle:
-     baals_url: "http://baals.network:18080"
+     baals_url: "http://127.0.0.1:18080"
      endpoint: "/api/v1/oracle/attest"
      retry_count: 5
      retry_backoff_seconds: 60
@@ -252,7 +214,7 @@ This would:
 
 ```bash
 # ChronoNode detects address dormant for 100k blocks
-curl -X POST http://baals.network:18080/api/v1/oracle/attest \
+curl -X POST http://127.0.0.1:18080/api/v1/oracle/attest \
   -H "Content-Type: application/json" \
   -d '{
     "version": "chrononode:dormancy:v1",
@@ -277,19 +239,19 @@ curl -X POST http://baals.network:18080/api/v1/oracle/attest \
 ### Arbitrum Sepolia (Hub Chain)
 
 1. **Deploy Resurgence RewardDistributor** with oracle-consumer logic:
-   - Accepts `submitOracleAttestation(attestation, signature)` calls
-   - Verifies BaaLS ed25519 signature against registered oracle address
+   - Accepts `submitDormancyProof(...)` calls
+   - Authorizes caller via `DORMANCY_ORACLE_ROLE`
    - Records dormancy proof, authorizes RESURGE minting
 
-2. **Register BaaLS Oracle Address**:
+2. **Authorize BaaLS EVM submitter address**:
    ```solidity
-   RewardDistributor.setOracleAddress(0x...baals_evm_address...);
+   RewardDistributor.grantRole(DORMANCY_ORACLE_ROLE, 0x...baals_evm_address...);
    ```
 
 3. **EVMSubmitter (K.5)** reads finalized attestations from BaaLS and submits to RewardDistributor:
    - Polls `/api/v1/oracle/attestations/{chain_id}` every 30 seconds
    - Signs each attestation with the EVM bridge key
-   - Submits to `RewardDistributor.submitOracleAttestation()`
+   - Submits to `RewardDistributor.submitDormancyProof()`
    - Tracks submission state: pending → confirmed / failed
    - Retries with exponential backoff (2^attempts minutes)
 
@@ -406,14 +368,14 @@ curl http://localhost:18080/api/v1/oracle/attestations/bitcoin/1A1z7agoat7qcUeF
 
 ## Roadmap
 
-- ✅ K.1 Oracle WASM contract (record, query, list)
+- ⏳ K.1 Dedicated Oracle WASM contract (optional hardening; live path currently uses REST oracle namespace storage)
 - ✅ K.2 REST: POST `/api/v1/oracle/attest`
 - ✅ K.3 REST: GET `/api/v1/oracle/attestations/{chain_id}/{address}`
 - ✅ K.4 EVM bridge keypair generation & loading
 - ✅ K.5 EVMSubmitter module (poll, sign, submit, retry)
 - ✅ K.6 Config structure with EVM settings
 - ✅ K.7 Integration tests
-- ✅ K.8 Documentation (this file)
+- 🔄 K.8 Operational key rotation runbook hardening (command-level automation still future)
 - 🔄 Enhanced: `admin rotate-evm-key` CLI command (atomic key rotation)
 - 🔄 Enhanced: Proof anchoring to specific block heights
 - 🔄 Enhanced: Multi-chain relay (Arbitrum → Polygon cross-chain verification)

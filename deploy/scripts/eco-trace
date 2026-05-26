@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# eco-trace — Search the ecosystem pipeline log
+#
+# Usage:
+#   eco-trace <chain> <address>              # Trace a single address through the pipeline
+#   eco-trace --correlation-id <id>          # Search by correlation ID
+#   eco-trace --tx-hash <0x...>              # Search by EVM tx hash
+#   eco-trace --service baals                # Filter by service
+#   eco-trace --event-type evm_submitter_tx_confirmed  # Filter by event
+#   eco-trace --tail 20                      # Show last N events
+#   eco-trace --since "2026-05-25"           # Events since date
+#   eco-trace --status failed                # Only failed events
+#
+# Default (no args): show last 20 events
+
+set -euo pipefail
+
+LOG_FILE="${ECO_LOG_FILE:-/var/log/ecosystem/pipeline.jsonl}"
+
+if [ ! -f "$LOG_FILE" ]; then
+    echo "No ecosystem log found at $LOG_FILE" >&2
+    exit 1
+fi
+
+CHAIN=""
+ADDRESS=""
+CORRELATION_ID=""
+TX_HASH=""
+SERVICE=""
+EVENT_TYPE=""
+STATUS=""
+SINCE=""
+TAIL="20"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --correlation-id) CORRELATION_ID="$2"; shift 2 ;;
+        --tx-hash)        TX_HASH="$2"; shift 2 ;;
+        --chain)          CHAIN="$2"; shift 2 ;;
+        --service)        SERVICE="$2"; shift 2 ;;
+        --event-type)     EVENT_TYPE="$2"; shift 2 ;;
+        --status)         STATUS="$2"; shift 2 ;;
+        --since)          SINCE="$2"; shift 2 ;;
+        --tail)           TAIL="$2"; shift 2 ;;
+        --help|-h)
+            head -20 "$0" | sed -n '/^# Usage:/,/^$/p'
+            exit 0
+            ;;
+        *)
+            if [ -z "$CHAIN" ]; then
+                CHAIN="$1"
+            elif [ -z "$ADDRESS" ]; then
+                ADDRESS="$1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+# If chain + address provided, build correlation ID
+if [ -n "$CHAIN" ] && [ -n "$ADDRESS" ]; then
+    CORRELATION_ID="dormancy:${CHAIN}:${ADDRESS}"
+fi
+
+# Build grep pattern
+PATTERN=""
+append_pattern() { PATTERN="${PATTERN:+$PATTERN.*}$1"; }
+
+[ -n "$CHAIN" ]            && append_pattern "\"chain\":\"$CHAIN\""
+[ -n "$ADDRESS" ]          && append_pattern "\"source_address\":\"$ADDRESS\""
+[ -n "$CORRELATION_ID" ]  && append_pattern "\"correlation_id\":\"$CORRELATION_ID\""
+[ -n "$TX_HASH" ]        && append_pattern "\"tx_hash\":\"$TX_HASH\""
+[ -n "$SERVICE" ]         && append_pattern "\"service\":\"$SERVICE\""
+[ -n "$EVENT_TYPE" ]     && append_pattern "\"event_type\":\"$EVENT_TYPE\""
+[ -n "$STATUS" ]          && append_pattern "\"status\":\"$STATUS\""
+
+if [ -n "$SINCE" ]; then
+    SINCE_TS="$SINCE"
+    # If it's just a date, append T00:00:00Z
+    [[ "$SINCE_TS" == *T* ]] || SINCE_TS="${SINCE_TS}T00:00:00Z"
+fi
+
+if [ -n "$PATTERN" ]; then
+    if [ -n "$SINCE" ]; then
+        grep "$PATTERN" "$LOG_FILE" | awk -v since="$SINCE_TS" -F'"' '$4 >= since' | tail -n "${TAIL}"
+    else
+        grep "$PATTERN" "$LOG_FILE" | tail -n "${TAIL}"
+    fi
+else
+    tail -n "${TAIL}" "$LOG_FILE"
+fi

@@ -1,5 +1,9 @@
 # BaaLS - Blockchain as a Local Service
 
+<p align="center">
+  <img src="baalslogo.png" alt="BaaLS Logo" width="360" />
+</p>
+
 BaaLS is a local-first, embeddable blockchain runtime written in Rust. It is designed for applications that need tamper-evident state transitions, deterministic execution, and optional peer sync without requiring a global public chain.
 
 ## Why BaaLS
