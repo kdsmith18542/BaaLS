@@ -1,8 +1,8 @@
 /* ── Config ── */
 const isLocal = ["localhost", "127.0.0.1"].includes(window.location.hostname);
 const defaults = {
-  api: isLocal ? "http://127.0.0.1:8080" : window.location.origin,
-  ws: isLocal ? "ws://127.0.0.1:8081" : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
+  api: isLocal ? "http://127.0.0.1:18080" : window.location.origin,
+  ws: isLocal ? "ws://127.0.0.1:18081" : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
   chrono: "https://chrono.baals.network",
   resurge: "https://resurge.baals.network",
   canvas: "https://canvas.baals.network",
