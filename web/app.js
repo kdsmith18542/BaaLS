@@ -165,24 +165,25 @@ async function probeUrl(url) {
 }
 
 async function fetchBaalsOracleSummary() {
-  const calls = ORACLE_CHAIN_CANDIDATES.map((chainId) =>
-    api(`/api/v1/oracle/attestations/${encodeURIComponent(chainId)}`)
-      .then((data) => {
-        const attestations = Array.isArray(data?.attestations) ? data.attestations : [];
-        const samples = attestations
-          .slice(0, 2)
-          .map((a) => ({
-            chainId,
-            address: a?.proof?.address || "unknown",
-            evmWallet: a?.proof?.evm_wallet || "unknown",
-            block: a?.attested_at_block ?? "—",
-            hash: a?.baals_block_hash || "",
-          }));
-        return { chainId, ok: true, count: Number(data?.count || 0), samples };
-      })
-      .catch(() => ({ chainId, ok: false, count: 0, samples: [] }))
-  );
-  const results = await Promise.all(calls);
+  const results = [];
+  for (const chainId of ORACLE_CHAIN_CANDIDATES) {
+    try {
+      const data = await api(`/api/v1/oracle/attestations/${encodeURIComponent(chainId)}`);
+      const attestations = Array.isArray(data?.attestations) ? data.attestations : [];
+      const samples = attestations
+        .slice(0, 2)
+        .map((a) => ({
+          chainId,
+          address: a?.proof?.address || "unknown",
+          evmWallet: a?.proof?.evm_wallet || "unknown",
+          block: a?.attested_at_block ?? "—",
+          hash: a?.baals_block_hash || "",
+        }));
+      results.push({ chainId, ok: true, count: Number(data?.count || 0), samples });
+    } catch {
+      results.push({ chainId, ok: false, count: 0, samples: [] });
+    }
+  }
   const live = results.filter((r) => r.ok);
   const total = live.reduce((acc, r) => acc + r.count, 0);
   const recent = live.flatMap((r) => r.samples).slice(0, 6);
@@ -364,7 +365,11 @@ async function loadBlocks(latestHeight) {
   const heights = [];
   for (let h = latestHeight; h >= start; h--) heights.push(h);
 
-  const blocks = await Promise.all(heights.map(h => api(`/api/v1/blocks/${h}`).catch(() => null)));
+  const blocks = [];
+  for (const h of heights) {
+    const b = await api(`/api/v1/blocks/${h}`).catch(() => null);
+    blocks.push(b);
+  }
   el.blocksBody.innerHTML = "";
 
   blocks.filter(Boolean).forEach(b => {
