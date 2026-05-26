@@ -47,65 +47,17 @@ export BAALS_EVM_PRIVATE_KEY="0xabcd..."  # secp256k1 private key for EVM signin
 
 ## Oracle Keypair Rotation
 
-### Background
+Operational runbook is now documented in:
 
-- **Consensus key**: Ed25519 signing key for BaaLS block consensus. Rotated via `admin rotate-consensus-key`.
-- **EVM key**: secp256k1 signing key for EVM submissions. Loaded from `oracle.evm_private_key_env`.
+- `docs/RELAY_ORACLE_KEY_ROTATION.md`
 
-Both keys are encrypted at rest with Argon2id + AES-256-GCM.
+Key points:
 
-### Rotation Procedure (Manual)
-
-#### Step 1: Prepare New EVM Key + Address
-
-Generate/derive a new secp256k1 keypair externally and record the new EVM address.
-
-#### Step 2: Update Resurgence Governance Authorization
-
-On Arbitrum, use Timelock governance to:
-
-1. Grant `DORMANCY_ORACLE_ROLE` to the new EVM address.
-2. Wait for timelock delay (~1 day)
-3. Execute transaction
-4. (Optional) Revoke `DORMANCY_ORACLE_ROLE` from the old address after cutover verification.
-
-This authorizes the new BaaLS EVM key for attestation signing.
-
-#### Step 3: Activate New Key on BaaLS
-
-```bash
-# Update config.toml to point to new key
-[oracle]
-evm_private_key_env = "BAALS_EVM_PRIVATE_KEY_NEW"
-
-# Set the env var
-export BAALS_EVM_PRIVATE_KEY_NEW="0x...new_key..."
-
-# Restart node
-systemctl restart baalsd
-```
-
-#### Step 4: Verify New Key is Active
-
-Submit a controlled test attestation and confirm the resulting EVM tx is sent from the new address and accepted by `RewardDistributor`.
-
-### Automated Rotation via CLI Command (Proposed K.8 Enhancement)
-
-Future CLI may support atomic rotation:
-
-```bash
-baalsd admin rotate-evm-key \
-  --data-dir ./data \
-  --effective-height 1000000 \
-  --new-key-path new-evm.key
-```
-
-This would:
-1. Generate new key at `new-evm.key`
-2. Create a signed transaction indicating rotation at block height 1000000
-3. Broadcast rotation tx to mempool (requires quorum)
-4. At block 1000000, the runtime would activate the new key
-5. Store pending rotation metadata in config
+- Oracle and relay use the same secp256k1 signer configured by `oracle.evm_private_key_env`.
+- Role grants must be completed before cutover:
+  - `DORMANCY_ORACLE_ROLE`
+  - `RELAY_MINTER_ROLE`
+- Consensus key rotation remains separate (`baalsd admin rotate-consensus-key`).
 
 ## REST API Reference
 
@@ -375,7 +327,7 @@ curl http://localhost:18080/api/v1/oracle/attestations/bitcoin/1A1z7agoat7qcUeF
 - ✅ K.5 EVMSubmitter module (poll, sign, submit, retry)
 - ✅ K.6 Config structure with EVM settings
 - ✅ K.7 Integration tests
-- 🔄 K.8 Operational key rotation runbook hardening (command-level automation still future)
+- ✅ K.8 Operational key rotation runbook documented (`docs/RELAY_ORACLE_KEY_ROTATION.md`)
 - 🔄 Enhanced: `admin rotate-evm-key` CLI command (atomic key rotation)
 - 🔄 Enhanced: Proof anchoring to specific block heights
 - 🔄 Enhanced: Multi-chain relay (Arbitrum → Polygon cross-chain verification)
@@ -385,4 +337,5 @@ curl http://localhost:18080/api/v1/oracle/attestations/bitcoin/1A1z7agoat7qcUeF
 - **Resurgence Protocol**: [https://github.com/GrindSquad/resurgence-protocol](https://github.com/GrindSquad/resurgence-protocol)
 - **ChronoNode**: [https://github.com/GrindSquad/chrononode](https://github.com/GrindSquad/chrononode)
 - **BaaLS Documentation**: [./OPERATING.md](./OPERATING.md)
+- **Rotation Runbook**: [./RELAY_ORACLE_KEY_ROTATION.md](./RELAY_ORACLE_KEY_ROTATION.md)
 - **Dormancy Proof Format**: Defined in `src/oracle.rs::DormancyProof`

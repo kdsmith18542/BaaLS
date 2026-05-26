@@ -1,0 +1,18 @@
+{
+  "schema_version": "baals:arweave-anchors:v1",
+  "anchors": [
+    {
+      "timestamp_utc": "2026-05-26T03:50:06Z",
+      "tx_id": "8ifAT1ABc7p1gj4Zf6wsxAc1vfyQMJT96AVSAj2XrW5F",
+      "status": "uploaded",
+      "manifest_path": "deploy/baals-deployment-manifest-20260526T035006Z.json",
+      "manifest_sha256": "8e5c060e9ee845d9fc7206c6f52ae794b0d852ad7d81f3e7e835fd68f2f909c5",
+      "genesis_hash": "6edd9f6f9cc92cded36e6c4a580933f9c9f1b90562b46903b806f21902a1a54f",
+      "node_id": "0a82b7b0d6be0cde841d31fda2a0c9ceff7636c81332bc2ed9cc981f5f537abc",
+      "reward_distributor": "0xCDfd46512dA68e2eD555D1d0Ac09aB1Acf38f2Ed",
+      "latest_height": 49919,
+      "gateway_url": "https://gateway.irys.xyz/8ifAT1ABc7p1gj4Zf6wsxAc1vfyQMJT96AVSAj2XrW5F",
+      "uploaded_at_utc": "2026-05-26T03:54:16Z"
+    }
+  ]
+}

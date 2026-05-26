@@ -276,6 +276,28 @@ baalsd admin tls-fingerprint --cert-path ./certs/server.crt
 baalsd admin token-generate --length 32
 ```
 
+### Oracle/Relay EVM Key Rotation
+
+For the shared Phase K/Phase L secp256k1 signer rotation procedure, use:
+
+- `docs/RELAY_ORACLE_KEY_ROTATION.md`
+
+That runbook covers governance role grants, config cutover (`oracle.evm_private_key_env`),
+service restart, verification, and rollback.
+
+### Arweave Deployment Anchoring
+
+```bash
+# Build manifest only
+scripts/anchor-deployment.sh --no-upload
+
+# Build + upload via irys (pass network/wallet args after --)
+scripts/anchor-deployment.sh -- --network devnet
+```
+
+Anchors are tracked in `deploy/arweave-anchors.json`.
+Operational note and completion checklist: `deploy/arweave-anchoring.md`.
+
 ## Contract Tools
 
 ```bash

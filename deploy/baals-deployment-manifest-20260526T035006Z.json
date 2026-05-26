@@ -1,0 +1,20 @@
+{
+  "schema_version": "baals:deployment-anchor:v1",
+  "generated_at_utc": "2026-05-26T03:50:06Z",
+  "api_url": "https://baals.network",
+  "config_path": "/etc/baals/config.toml",
+  "data_dir": "/var/lib/baals",
+  "chain": {
+    "genesis_hash": "6edd9f6f9cc92cded36e6c4a580933f9c9f1b90562b46903b806f21902a1a54f",
+    "latest_height": 49919,
+    "latest_hash": "8e38547a1df8b2ee7cc64a3272b49efecd35f8041516d687932d4996fc80f4d7",
+    "node_id": "0a82b7b0d6be0cde841d31fda2a0c9ceff7636c81332bc2ed9cc981f5f537abc",
+    "node_id_source": "cli-override"
+  },
+  "oracle": {
+    "reward_distributor": "0xCDfd46512dA68e2eD555D1d0Ac09aB1Acf38f2Ed",
+    "evm_chain_id": 421614,
+    "evm_private_key_env": "BAALS_EVM_PRIVATE_KEY"
+  },
+  "config_hash_sha256": "265d27d9b3b177a25b85af1dbd7c282f3a4030acf9d3cfaef71f20ef70075d73"
+}
