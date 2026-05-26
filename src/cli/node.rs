@@ -1457,6 +1457,30 @@ fn spawn_health_server(
                             }
                         };
                         respond_json(request, status, body);
+
+                    } else if request.method() == &Method::Get && matches!(request_url_str, "/mempool" | "/api/v1/mempool") {
+                        let response_json = (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                            let txs = runtime.get_mempool()?;
+                            let list: Vec<serde_json::Value> = txs.into_iter().map(|tx| {
+                                serde_json::json!({
+                                    "hash": hex::encode(tx.hash),
+                                    "sender": hex::encode(tx.sender.as_bytes()),
+                                    "nonce": tx.nonce,
+                                    "recipient": format!("{}", tx.recipient),
+                                    "payload": format!("{:?}", tx.payload),
+                                    "gas_limit": tx.gas_limit,
+                                    "gas_price": tx.gas_price,
+                                    "priority": tx.priority,
+                                    "timestamp": tx.timestamp,
+                                })
+                            }).collect();
+                            Ok(serde_json::json!({"pending": list, "count": list.len()}))
+                        })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => (500, serde_json::json!({"error": e.to_string()}).to_string())
+                        };
+                        respond_json(request, status, body);
                     } else if request.method() == &Method::Get && request_url_str == "/metrics" {
                         let response_text = (|| -> Result<String, Box<dyn std::error::Error>> {
                             let health = runtime.get_health_status()?;
