@@ -31,6 +31,11 @@ mod phase_k_oracle_tests {
             signer_pubkey: Some(hex::encode(vk.to_bytes())),
             signature: None,
             evm_wallet: None,
+            claim_type: 0,
+            confidence_tier: 0,
+            source_tx_hash: None,
+            zk_proof: None,
+            public_inputs: None,
         };
 
         // Sign it
@@ -59,6 +64,11 @@ mod phase_k_oracle_tests {
             signer_pubkey: None,
             signature: None,
             evm_wallet: None,
+            claim_type: 0,
+            confidence_tier: 0,
+            source_tx_hash: None,
+            zk_proof: None,
+            public_inputs: None,
         };
 
         assert!(proof.verify_chrononode_signature().is_err());
@@ -81,6 +91,11 @@ mod phase_k_oracle_tests {
             signer_pubkey: Some(hex::encode(chrononode_vk.to_bytes())),
             signature: None,
             evm_wallet: None,
+            claim_type: 0,
+            confidence_tier: 0,
+            source_tx_hash: None,
+            zk_proof: None,
+            public_inputs: None,
         };
 
         let canonical_msg = proof.canonical_message();
@@ -175,6 +190,11 @@ mod phase_k_oracle_tests {
                 signer_pubkey: Some(hex::encode(vk.to_bytes())),
                 signature: None,
                 evm_wallet: None,
+                claim_type: 0,
+                confidence_tier: 0,
+                source_tx_hash: None,
+                zk_proof: None,
+                public_inputs: None,
             };
 
             let canonical_msg = proof.canonical_message();
@@ -203,6 +223,11 @@ mod phase_k_oracle_tests {
             signer_pubkey: None,
             signature: None,
             evm_wallet: None,
+            claim_type: 0,
+            confidence_tier: 0,
+            source_tx_hash: None,
+            zk_proof: None,
+            public_inputs: None,
         };
 
         let canonical = proof.canonical_message();
@@ -227,6 +252,11 @@ mod phase_k_oracle_tests {
             signer_pubkey: None,
             signature: None,
             evm_wallet: None,
+            claim_type: 0,
+            confidence_tier: 0,
+            source_tx_hash: None,
+            zk_proof: None,
+            public_inputs: None,
         };
 
         let proof2 = DormancyProof {
@@ -239,6 +269,11 @@ mod phase_k_oracle_tests {
             signer_pubkey: None,
             signature: None,
             evm_wallet: None,
+            claim_type: 0,
+            confidence_tier: 0,
+            source_tx_hash: None,
+            zk_proof: None,
+            public_inputs: None,
         };
 
         let msg1 = proof1.canonical_message();
@@ -263,6 +298,11 @@ mod phase_k_oracle_tests {
             signer_pubkey: Some(hex::encode(chrononode_vk.to_bytes())),
             signature: None,
             evm_wallet: None,
+            claim_type: 0,
+            confidence_tier: 0,
+            source_tx_hash: None,
+            zk_proof: None,
+            public_inputs: None,
         };
 
         let canonical_msg = proof.canonical_message();

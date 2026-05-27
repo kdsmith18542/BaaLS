@@ -117,25 +117,25 @@ ChronoNode already has a functional BaaLS adapter (`chrononode-adapter-baals`). 
 
 Finish the visual contract builder so developers can build WASM contracts without writing Rust directly.
 
-### Critical Gap
+### Critical Gap — ✅ RESOLVED
 
-The `AST → WASM` codegen step is currently stubbed — returns a hardcoded 30-byte empty module. The graph IR, AST, validator, and 12 node types all work. The compilation pipeline needs the final WASM bytecode generation.
+The `AST → WASM` codegen is **fully implemented** (1015 lines in `canvascontract/src/compiler/wasm_gen.rs`). The compilation pipeline (Graph IR → AST → validator → WASM codegen → wasmtime validation) produces real WASM modules. 9 tests pass including wasmtime execution tests for arithmetic, conditionals, storage, and imports for all 4 host function families (baals, crypto, chrononode, resurgence).
 
 ### Steps
 
-1. Implement real WASM codegen from Canvas AST (replace hardcoded stub)
+1. ~~Implement real WASM codegen from Canvas AST (replace hardcoded stub)~~ ✅ DONE
 2. Wire BaaLS deployment to live endpoints (replace mock BaalsClient)
-3. Complete remaining 5 frontend node types in the React palette
-4. Connect debugger/timeline view to ChronoNode for contract execution history
+3. ~~Complete remaining frontend node types in React palette~~ ✅ DONE — now 39 node types across 8 categories
+4. ~~Connect debugger/timeline view to ChronoNode for contract execution history~~ ✅ DONE — simulation trace panel with per-step input/output/error
 5. Test end-to-end: build contract visually → compile → deploy to BaaLS → verify execution
 
 ### Current State
 
-- ~65% feature complete
-- Backend compiler pipeline works (Graph IR → AST → validator)
+- ~85% feature complete
+- Backend compiler pipeline works end-to-end (Graph IR → AST → validator → WASM codegen → wasmtime validation)
 - CLI functional (compile, simulate, validate, deploy, editor commands)
-- React + Tauri desktop app with drag-and-drop canvas
-- 12 node types implemented (arithmetic, logic, storage operations)
+- React frontend with drag-and-drop canvas, 39 node types, 8 categories, compilation + simulation workflows
+- 39 node types implemented (logic, arithmetic, control flow, state, crypto, BaaLS runtime, ChronoNode, Resurgence)
 
 ---
 

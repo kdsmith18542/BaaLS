@@ -1895,6 +1895,212 @@ gas_used_per_block {}\n",
                             }
                         };
                         respond_json(request, status, body);
+                    } else if request.method() == &Method::Get
+                        && request_url_str.starts_with("/api/v1/oracle/attestations")
+                    {
+                        // K.4 — GET /api/v1/oracle/attestations?status=pending
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                use crate::oracle::{
+                                    attestation_storage_key, chain_index_key, chains_storage_key,
+                                    oracle_namespace_id, OracleAttestation,
+                                };
+                                use crate::ContractId;
+
+                                let ns_id = ContractId::from_bytes(&oracle_namespace_id());
+
+                                let query_string = request_url_str
+                                    .split('?')
+                                    .nth(1)
+                                    .unwrap_or("");
+                                let status_filter = query_string
+                                    .split('&')
+                                    .find(|p| p.starts_with("status="))
+                                    .and_then(|p| p.split('=').nth(1));
+
+                                let chains_raw = runtime
+                                    .storage()
+                                    .contract_storage_read(&ns_id, &chains_storage_key())?;
+                                let chain_ids: Vec<String> = chains_raw
+                                    .map(|r| serde_json::from_slice(&r).unwrap_or_default())
+                                    .unwrap_or_default();
+
+                                let mut all_attestations = Vec::new();
+                                for chain_id in chain_ids {
+                                    let index_key = chain_index_key(&chain_id);
+                                    let existing = runtime
+                                        .storage()
+                                        .contract_storage_read(&ns_id, &index_key)?
+                                        .unwrap_or_default();
+                                    let addresses: Vec<String> = if existing.is_empty() {
+                                        vec![]
+                                    } else {
+                                        serde_json::from_slice(&existing).unwrap_or_default()
+                                    };
+                                    for addr in &addresses {
+                                        let key = attestation_storage_key(&chain_id, addr);
+                                        if let Some(raw) =
+                                            runtime.storage().contract_storage_read(&ns_id, &key)?
+                                        {
+                                            if let Ok(a) =
+                                                serde_json::from_slice::<OracleAttestation>(&raw)
+                                            {
+                                                if let Some(filter) = status_filter {
+                                                    let attestation_status = a
+                                                        .error
+                                                        .as_ref()
+                                                        .map(|_| "failed")
+                                                        .unwrap_or("confirmed");
+                                                    if attestation_status != filter {
+                                                        continue;
+                                                    }
+                                                }
+                                                all_attestations.push(serde_json::to_value(&a)?);
+                                            }
+                                        }
+                                    }
+                                }
+                                Ok(serde_json::json!({
+                                    "count": all_attestations.len(),
+                                    "attestations": all_attestations,
+                                }))
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (400, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
+                    } else if request.method() == &Method::Get
+                        && request_url_str.starts_with("/api/v1/oracle/claims/")
+                    {
+                        // K.5 — GET /api/v1/oracle/claims/{claim_id}
+                        let claim_id = &request_url_str["/api/v1/oracle/claims/".len()..];
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                use crate::oracle::{
+                                    attestation_storage_key, chain_index_key, chains_storage_key,
+                                    oracle_namespace_id, OracleAttestation,
+                                };
+                                use crate::ContractId;
+
+                                let ns_id = ContractId::from_bytes(&oracle_namespace_id());
+                                let chains_raw = runtime
+                                    .storage()
+                                    .contract_storage_read(&ns_id, &chains_storage_key())?;
+                                let chain_ids: Vec<String> = chains_raw
+                                    .map(|r| serde_json::from_slice(&r).unwrap_or_default())
+                                    .unwrap_or_default();
+
+                                for chain_id in chain_ids {
+                                    let index_key = chain_index_key(&chain_id);
+                                    let existing = runtime
+                                        .storage()
+                                        .contract_storage_read(&ns_id, &index_key)?
+                                        .unwrap_or_default();
+                                    let addresses: Vec<String> = if existing.is_empty() {
+                                        vec![]
+                                    } else {
+                                        serde_json::from_slice(&existing).unwrap_or_default()
+                                    };
+                                    for addr in &addresses {
+                                        let key = attestation_storage_key(&chain_id, addr);
+                                        if let Some(raw) =
+                                            runtime.storage().contract_storage_read(&ns_id, &key)?
+                                        {
+                                            if let Ok(a) =
+                                                serde_json::from_slice::<OracleAttestation>(&raw)
+                                            {
+                                                if a.claim_id.as_deref() == Some(claim_id)
+                                                    || a.attestation_id == claim_id
+                                                {
+                                                    return Ok(serde_json::json!({ "attestation": a }));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Err("claim not found".into())
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (404, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
+                    } else if request.method() == &Method::Post
+                        && request_url_str.starts_with("/api/v1/oracle/claims/")
+                        && request_url_str.ends_with("/retry")
+                    {
+                        // K.6 — POST /api/v1/oracle/claims/{claim_id}/retry
+                        let claim_id = &request_url_str["/api/v1/oracle/claims/".len()..];
+                        let claim_id = claim_id.trim_end_matches("/retry");
+                        let response_json =
+                            (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+                                use crate::oracle::{
+                                    attestation_storage_key, chain_index_key, chains_storage_key,
+                                    oracle_namespace_id, OracleAttestation,
+                                };
+                                use crate::ContractId;
+
+                                let ns_id = ContractId::from_bytes(&oracle_namespace_id());
+                                let chains_raw = runtime
+                                    .storage()
+                                    .contract_storage_read(&ns_id, &chains_storage_key())?;
+                                let chain_ids: Vec<String> = chains_raw
+                                    .map(|r| serde_json::from_slice(&r).unwrap_or_default())
+                                    .unwrap_or_default();
+
+                                for chain_id in chain_ids {
+                                    let index_key = chain_index_key(&chain_id);
+                                    let existing = runtime
+                                        .storage()
+                                        .contract_storage_read(&ns_id, &index_key)?
+                                        .unwrap_or_default();
+                                    let addresses: Vec<String> = if existing.is_empty() {
+                                        vec![]
+                                    } else {
+                                        serde_json::from_slice(&existing).unwrap_or_default()
+                                    };
+                                    for addr in &addresses {
+                                        let key = attestation_storage_key(&chain_id, addr);
+                                        if let Some(raw) =
+                                            runtime.storage().contract_storage_read(&ns_id, &key)?
+                                        {
+                                            if let Ok(mut a) =
+                                                serde_json::from_slice::<OracleAttestation>(&raw)
+                                            {
+                                                if a.claim_id.as_deref() == Some(claim_id)
+                                                    || a.attestation_id == claim_id
+                                                {
+                                                    a.error = None;
+                                                    a.evm_tx_hash = None;
+                                                    let storage_val = serde_json::to_vec(&a)?;
+                                                    runtime.storage().contract_storage_write(
+                                                        &ns_id,
+                                                        &key,
+                                                        &storage_val,
+                                                    )?;
+                                                    return Ok(serde_json::json!({
+                                                        "status": "queued_for_retry",
+                                                        "claim_id": claim_id,
+                                                    }));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Err("claim not found".into())
+                            })();
+                        let (status, body) = match response_json {
+                            Ok(json) => (200, json.to_string()),
+                            Err(e) => {
+                                (404, serde_json::json!({"error": e.to_string()}).to_string())
+                            }
+                        };
+                        respond_json(request, status, body);
                     } else {
                         let _ = request.respond(
                             Response::from_string("Not Found").with_status_code(StatusCode(404)),

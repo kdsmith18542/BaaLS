@@ -39,6 +39,13 @@ fn submit_dormancy_selector() -> [u8; 4] {
     [h[0], h[1], h[2], h[3]]
 }
 
+/// 4-byte selector for submitZkDormancyClaim(bytes,bytes,bytes32,bytes32,address,uint8,uint256,uint256,uint256,uint256)
+fn submit_zk_dormancy_selector() -> [u8; 4] {
+    let sig = b"submitZkDormancyClaim(bytes,bytes,bytes32,bytes32,address,uint8,uint256,uint256,uint256,uint256)";
+    let h = keccak256(sig);
+    [h[0], h[1], h[2], h[3]]
+}
+
 /// ABI-encode a call to submitDormancyProof. Returns selector + encoded args.
 ///
 /// Parameters map to DormancyProof fields:
@@ -111,6 +118,102 @@ fn encode_submit_dormancy(
     calldata.extend_from_slice(&offset_slot);
     calldata.extend_from_slice(&sig_len_slot);
     calldata.extend_from_slice(&sig_padded);
+
+    Ok(calldata)
+}
+
+/// ABI-encode a call to submitZkDormancyClaim.
+/// Parameters:
+///   groth16Proof    = dynamic bytes (SP1 Groth16 proof)
+///   publicInputs    = dynamic bytes (SP1 public inputs)
+///   chainId         = bytes32
+///   proofHash       = bytes32
+///   evmWallet       = address
+///   claimType       = uint8
+///   dormantSinceBlock / currentBlock / thresholdBlocks / lastSeenTimestamp = uint256
+fn encode_submit_zk_dormancy(
+    groth16_proof: &[u8],
+    public_inputs: &[u8],
+    chain_id_str: &str,
+    proof_hash_hex: &str,
+    evm_wallet_hex: &str,
+    claim_type: u8,
+    dormant_since_block: u64,
+    current_block: u64,
+    threshold_blocks: u64,
+    last_seen_timestamp: u64,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // chainId: left-aligned bytes32
+    let chain_id_bytes = chain_id_str.as_bytes();
+    let mut chain_id_slot = [0u8; 32];
+    let copy_len = chain_id_bytes.len().min(32);
+    chain_id_slot[..copy_len].copy_from_slice(&chain_id_bytes[..copy_len]);
+
+    // proofHash: bytes32
+    let proof_hash_bytes = hex::decode(proof_hash_hex.trim_start_matches("0x"))?;
+    let mut proof_hash_slot = [0u8; 32];
+    let ph_copy = proof_hash_bytes.len().min(32);
+    proof_hash_slot[..ph_copy].copy_from_slice(&proof_hash_bytes[..ph_copy]);
+
+    // evmWallet: address (20 bytes, left-padded)
+    let wallet_hex = evm_wallet_hex.trim_start_matches("0x");
+    let wallet_bytes = hex::decode(wallet_hex)?;
+    let mut wallet_slot = [0u8; 32];
+    wallet_slot[12..].copy_from_slice(&wallet_bytes);
+
+    // claimType: uint8 → uint256
+    let mut claim_type_slot = [0u8; 32];
+    claim_type_slot[31] = claim_type;
+
+    // uint256 slots
+    let mut dormant_slot = [0u8; 32];
+    dormant_slot[24..].copy_from_slice(&dormant_since_block.to_be_bytes());
+    let mut current_slot = [0u8; 32];
+    current_slot[24..].copy_from_slice(&current_block.to_be_bytes());
+    let mut threshold_slot = [0u8; 32];
+    threshold_slot[24..].copy_from_slice(&threshold_blocks.to_be_bytes());
+    let mut timestamp_slot = [0u8; 32];
+    timestamp_slot[24..].copy_from_slice(&last_seen_timestamp.to_be_bytes());
+
+    // Dynamic bytes: groth16Proof and publicInputs
+    let static_len: u64 = 10 * 32;
+
+    let groth16_offset = static_len;
+    let public_inputs_offset = static_len + 32 + ((groth16_proof.len() as u64 + 31) / 32 * 32);
+
+    let mut groth16_offset_slot = [0u8; 32];
+    groth16_offset_slot[24..].copy_from_slice(&groth16_offset.to_be_bytes());
+    let mut public_inputs_offset_slot = [0u8; 32];
+    public_inputs_offset_slot[24..].copy_from_slice(&public_inputs_offset.to_be_bytes());
+
+    let mut groth16_len_slot = [0u8; 32];
+    groth16_len_slot[24..].copy_from_slice(&(groth16_proof.len() as u64).to_be_bytes());
+    let groth16_padded_len = (groth16_proof.len() + 31) / 32 * 32;
+    let mut groth16_padded = vec![0u8; groth16_padded_len];
+    groth16_padded[..groth16_proof.len()].copy_from_slice(groth16_proof);
+
+    let mut pi_len_slot = [0u8; 32];
+    pi_len_slot[24..].copy_from_slice(&(public_inputs.len() as u64).to_be_bytes());
+    let pi_padded_len = (public_inputs.len() + 31) / 32 * 32;
+    let mut pi_padded = vec![0u8; pi_padded_len];
+    pi_padded[..public_inputs.len()].copy_from_slice(public_inputs);
+
+    let mut calldata = Vec::new();
+    calldata.extend_from_slice(&submit_zk_dormancy_selector());
+    calldata.extend_from_slice(&chain_id_slot);
+    calldata.extend_from_slice(&proof_hash_slot);
+    calldata.extend_from_slice(&wallet_slot);
+    calldata.extend_from_slice(&claim_type_slot);
+    calldata.extend_from_slice(&dormant_slot);
+    calldata.extend_from_slice(&current_slot);
+    calldata.extend_from_slice(&threshold_slot);
+    calldata.extend_from_slice(&timestamp_slot);
+    calldata.extend_from_slice(&groth16_offset_slot);
+    calldata.extend_from_slice(&public_inputs_offset_slot);
+    calldata.extend_from_slice(&groth16_len_slot);
+    calldata.extend_from_slice(&groth16_padded);
+    calldata.extend_from_slice(&pi_len_slot);
+    calldata.extend_from_slice(&pi_padded);
 
     Ok(calldata)
 }
@@ -449,37 +552,76 @@ impl EVMSubmitter {
                     }
                 };
 
-                let new_state = match self.submit_attestation(&attestation, &evm_wallet) {
-                    Ok(tx_hash) => {
-                        info!(
-                            "[EVM] Submitted: chain={} addr={} evm={} tx={}",
-                            chain_id, address, evm_wallet, tx_hash
-                        );
-                        SubmissionState {
-                            evm_tx_hash: Some(tx_hash),
-                            status: "pending".to_string(),
-                            attempts: state.attempts + 1,
-                            last_attempt_time: unix_now(),
-                            ..state
+                let is_zk = attestation.proof.claim_type == 8
+                    && attestation.proof.zk_proof.is_some()
+                    && attestation.proof.public_inputs.is_some();
+
+                let new_state = if is_zk {
+                    match self.submit_sp1_attestation(
+                        &attestation,
+                        &evm_wallet,
+                        &hex::decode(attestation.proof.zk_proof.as_deref().unwrap_or(""))?,
+                        &hex::decode(attestation.proof.public_inputs.as_deref().unwrap_or(""))?,
+                    ) {
+                        Ok(tx_hash) => {
+                            info!(
+                                "[EVM] Submitted SP1: chain={} addr={} evm={} tx={}",
+                                chain_id, address, evm_wallet, tx_hash
+                            );
+                            SubmissionState {
+                                evm_tx_hash: Some(tx_hash),
+                                status: "pending".to_string(),
+                                attempts: state.attempts + 1,
+                                last_attempt_time: unix_now(),
+                                ..state
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                "[EVM] SP1 submit failed (attempt {}): chain={} addr={} err={}",
+                                state.attempts + 1, chain_id, address, e
+                            );
+                            SubmissionState {
+                                status: if state.attempts >= 4 { "failed".to_string() } else { "pending".to_string() },
+                                attempts: state.attempts + 1,
+                                last_attempt_time: unix_now(),
+                                ..state
+                            }
                         }
                     }
-                    Err(e) => {
-                        warn!(
-                            "[EVM] Submit failed (attempt {}): chain={} addr={} err={}",
-                            state.attempts + 1,
-                            chain_id,
-                            address,
-                            e
-                        );
-                        SubmissionState {
-                            status: if state.attempts >= 4 {
-                                "failed".to_string()
-                            } else {
-                                "pending".to_string()
-                            },
-                            attempts: state.attempts + 1,
-                            last_attempt_time: unix_now(),
-                            ..state
+                } else {
+                    match self.submit_attestation(&attestation, &evm_wallet) {
+                        Ok(tx_hash) => {
+                            info!(
+                                "[EVM] Submitted: chain={} addr={} evm={} tx={}",
+                                chain_id, address, evm_wallet, tx_hash
+                            );
+                            SubmissionState {
+                                evm_tx_hash: Some(tx_hash),
+                                status: "pending".to_string(),
+                                attempts: state.attempts + 1,
+                                last_attempt_time: unix_now(),
+                                ..state
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                "[EVM] Submit failed (attempt {}): chain={} addr={} err={}",
+                                state.attempts + 1,
+                                chain_id,
+                                address,
+                                e
+                            );
+                            SubmissionState {
+                                status: if state.attempts >= 4 {
+                                    "failed".to_string()
+                                } else {
+                                    "pending".to_string()
+                                },
+                                attempts: state.attempts + 1,
+                                last_attempt_time: unix_now(),
+                                ..state
+                            }
                         }
                     }
                 };
@@ -531,6 +673,51 @@ impl EVMSubmitter {
             nonce,
             gas_price,
             500_000,
+            &self.config.reward_distributor,
+            &calldata,
+            self.config.evm_chain_id,
+        )?;
+
+        let tx_hash = send_raw_tx(&self.config.evm_rpc, &raw_tx)?;
+        Ok(tx_hash)
+    }
+
+    /// Build, sign, and send a submitZkDormancyClaim transaction for SP1 zkVM proofs.
+    fn submit_sp1_attestation(
+        &self,
+        attestation: &OracleAttestation,
+        evm_wallet: &str,
+        groth16_proof: &[u8],
+        public_inputs: &[u8],
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let proof = &attestation.proof;
+
+        let calldata = encode_submit_zk_dormancy(
+            groth16_proof,
+            public_inputs,
+            &proof.chain_id,
+            attestation.proof_hash.as_deref().unwrap_or("0x0000000000000000000000000000000000000000000000000000000000000000"),
+            evm_wallet,
+            proof.claim_type,
+            proof.dormant_since_block,
+            proof.current_block,
+            proof.threshold_blocks,
+            attestation.attested_at_block,
+        )?;
+
+        let nonce = get_nonce(&self.config.evm_rpc, &self.evm_address)?;
+        let gas_price = get_gas_price(&self.config.evm_rpc)?;
+
+        debug!(
+            "[EVM] Building SP1 tx: nonce={} gasPrice={} to={}",
+            nonce, gas_price, self.config.reward_distributor
+        );
+
+        let raw_tx = sign_legacy_tx(
+            &self.signing_key,
+            nonce,
+            gas_price,
+            800_000,
             &self.config.reward_distributor,
             &calldata,
             self.config.evm_chain_id,

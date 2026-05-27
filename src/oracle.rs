@@ -13,6 +13,7 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Fixed 32-byte namespace used as the "contract ID" for oracle attestation storage.
 /// Derived from SHA256("baals:oracle:v1") — no real WASM contract required; the REST
@@ -45,6 +46,20 @@ pub struct DormancyProof {
     /// EVM address (checksummed hex, 0x-prefixed) that should receive RESURGE.
     /// Required for EVMSubmitter to call submitDormancyProof on the hub chain.
     pub evm_wallet: Option<String>,
+    /// Legacy claim type index (matches LegacyClaimType enum in EVM)
+    #[serde(default)]
+    pub claim_type: u8,
+    /// Confidence tier (1-7, lower is stronger)
+    #[serde(default)]
+    pub confidence_tier: u8,
+    /// Source transaction hash for transfer/burn claims
+    pub source_tx_hash: Option<String>,
+    /// SP1 zkVM Groth16 proof bytes (hex-encoded)
+    #[serde(default)]
+    pub zk_proof: Option<String>,
+    /// SP1 public inputs (hex-encoded)
+    #[serde(default)]
+    pub public_inputs: Option<String>,
 }
 
 /// BaaLS-signed oracle attestation returned to ChronoNode after validation.
@@ -59,6 +74,24 @@ pub struct OracleAttestation {
     pub attested_at_block: u64,
     /// BaaLS block hash at time of attestation (hex, 32 bytes)
     pub baals_block_hash: String,
+    /// Unique attestation ID (hash of proof + block)
+    pub attestation_id: String,
+    /// Canonical claim ID (computed from proof fields)
+    pub claim_id: Option<String>,
+    /// EVM tx hash after submission (set by EVMSubmitter)
+    pub evm_tx_hash: Option<String>,
+    /// BaaLS internal tx hash for the attestation record
+    pub baals_tx_hash: Option<String>,
+    /// Hash of the dormancy proof (for replay protection)
+    pub proof_hash: Option<String>,
+    /// Lifecycle status: pending, submitted, confirmed, failed
+    pub status: String,
+    /// Unix timestamp when attestation was created
+    pub created_at: u64,
+    /// Unix timestamp when attestation was submitted to EVM
+    pub submitted_at: Option<u64>,
+    /// Error message if submission failed
+    pub error: Option<String>,
 }
 
 impl DormancyProof {
@@ -115,12 +148,64 @@ pub fn sign_attestation(
 ) -> OracleAttestation {
     let vk = signing_key.verifying_key();
     let sig = signing_key.sign(&proof.canonical_message());
+
+    let attestation_id = {
+        let mut h = Sha256::new();
+        h.update(b"attestation:");
+        h.update(proof.chain_id.as_bytes());
+        h.update(proof.address.as_bytes());
+        h.update(&attested_at_block.to_be_bytes());
+        h.update(&baals_block_hash);
+        format!("0x{}", hex::encode(h.finalize()))
+    };
+
+    let claim_id = if proof.source_tx_hash.is_some() || proof.claim_type > 0 {
+        let mut h = Sha256::new();
+        h.update(b"claim:");
+        h.update(proof.chain_id.as_bytes());
+        h.update(proof.address.as_bytes());
+        if let Some(evm) = &proof.evm_wallet {
+            h.update(evm.as_bytes());
+        }
+        h.update(&proof.claim_type.to_be_bytes());
+        if let Some(tx) = &proof.source_tx_hash {
+            h.update(tx.as_bytes());
+        }
+        Some(format!("0x{}", hex::encode(h.finalize())))
+    } else {
+        None
+    };
+
+    let proof_hash = {
+        let mut h = Sha256::new();
+        h.update(b"proof:");
+        h.update(proof.chain_id.as_bytes());
+        h.update(proof.address.as_bytes());
+        h.update(&proof.dormant_since_block.to_be_bytes());
+        h.update(&proof.current_block.to_be_bytes());
+        format!("0x{}", hex::encode(h.finalize()))
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
     OracleAttestation {
         baals_pubkey: hex::encode(vk.to_bytes()),
         baals_signature: hex::encode(sig.to_bytes()),
         attested_at_block,
         baals_block_hash: hex::encode(baals_block_hash),
         proof,
+        attestation_id,
+        claim_id,
+        evm_tx_hash: None,
+        baals_tx_hash: None,
+        proof_hash: Some(proof_hash),
+        status: "pending".to_string(),
+        created_at: now,
+        submitted_at: None,
+        error: None,
     }
 }
 

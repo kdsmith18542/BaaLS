@@ -2359,12 +2359,16 @@ impl SyncLayer for CustomSync {
         let sock_addr: SocketAddr = addr
             .parse()
             .map_err(|e| SyncError::NetworkError(format!("Invalid address '{}': {}", addr, e)))?;
-        // Generate a valid Ed25519 keypair as placeholder; the real peer ID
-        // is discovered during handshake authentication.
-        let mut dummy_bytes = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rng(), &mut dummy_bytes);
-        let dummy_sk = SigningKey::from_bytes(&dummy_bytes);
-        let peer_id = PublicKey::from(dummy_sk.verifying_key());
+        // Deterministic placeholder peer ID from address hash; the real peer ID
+        // is discovered and replaced during handshake authentication.
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"baals:peer:");
+        hasher.update(addr.as_bytes());
+        let hash = hasher.finalize();
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&hash);
+        let placeholder_sk = SigningKey::from_bytes(&seed);
+        let peer_id = PublicKey::from(placeholder_sk.verifying_key());
         self.known_peers.blocking_write().insert(peer_id, sock_addr);
         self.bootstrap_peers.lock().expect("bootstrap lock").push(sock_addr);
         log::info!("Added peer: {}", addr);

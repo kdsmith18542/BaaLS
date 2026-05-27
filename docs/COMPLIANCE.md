@@ -56,7 +56,8 @@ Mutating endpoints require `Authorization: Bearer <jwt>` issued by `POST /auth/t
 ## CLI Coverage (Current)
 
 - Fully implemented core groups: `node`, `wallet`, `tx`, `query`, `db`, `dev`, `key`, `proof`, `doctor`
-- Partially implemented / planned subcommands: selected `p2p`, `contract`, `admin`, `api` advanced flows are explicitly marked not implemented where runtime wiring is missing
+- Fully implemented advanced groups: `p2p` (5 commands), `contract` (5 commands), `admin` (5 commands), `api` (5 commands)
+- All 20 CLI subcommands have real handler implementations — no stubs remain
 
 ## Reproducibility
 

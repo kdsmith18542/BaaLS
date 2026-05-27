@@ -46,6 +46,8 @@ pub mod sync;
 /// Core types and data structures (accounts, blocks, transactions, etc.)
 pub mod types;
 pub mod ws_server;
+/// CanvasContracts policy evaluation runtime (Phase 5)
+pub mod policy_runtime;
 
 pub use any_storage::*;
 pub use config::*;
