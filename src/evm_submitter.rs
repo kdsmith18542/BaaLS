@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use sha2::Digest;
 use tiny_keccak::{Hasher, Keccak};
 
 // ── ABI / selector ────────────────────────────────────────────────────────────
@@ -32,44 +33,41 @@ fn keccak256(data: &[u8]) -> [u8; 32] {
     out
 }
 
-/// 4-byte selector for submitDormancyProof(bytes32,address,uint256,uint256,uint256,bytes32,bytes)
-fn submit_dormancy_selector() -> [u8; 4] {
-    let sig = b"submitDormancyProof(bytes32,address,uint256,uint256,uint256,bytes32,bytes)";
+/// 4-byte selector for submitLegacyClaim
+fn submit_legacy_claim_selector() -> [u8; 4] {
+    let sig = b"submitLegacyClaim((bytes32,bytes32,address,bytes32,bytes32,uint8,uint8,uint256,uint256,uint256,uint256),bytes)";
     let h = keccak256(sig);
     [h[0], h[1], h[2], h[3]]
 }
 
-/// 4-byte selector for submitZkDormancyClaim(bytes,bytes,bytes32,bytes32,address,uint8,uint256,uint256,uint256,uint256)
+/// 4-byte selector for submitZkDormancyClaim
 fn submit_zk_dormancy_selector() -> [u8; 4] {
-    let sig = b"submitZkDormancyClaim(bytes,bytes,bytes32,bytes32,address,uint8,uint256,uint256,uint256,uint256)";
+    let sig = b"submitZkDormancyClaim(bytes,bytes,string,uint64,uint64,uint64,(bytes32,bytes32,address,bytes32,bytes32,uint8,uint8,uint256,uint256,uint256,uint256))";
     let h = keccak256(sig);
     [h[0], h[1], h[2], h[3]]
 }
 
-/// ABI-encode a call to submitDormancyProof. Returns selector + encoded args.
-///
-/// Parameters map to DormancyProof fields:
-///   chainId          = bytes32(chain_id padded)
-///   dormantWallet    = evm_wallet address (20 bytes, left-zero-padded to 32)
-///   dormantSinceBlock / currentBlock / thresholdBlocks = u64 → uint256
-///   signerPubkey     = bytes32(signer_pubkey, first 32 bytes)
-///   signature        = raw ed25519 sig bytes (dynamic bytes)
-fn encode_submit_dormancy(
-    chain_id_str: &str,
+/// ABI-encode a call to LegacyClaimRegistry.submitLegacyClaim. Returns selector + encoded args.
+fn encode_submit_legacy_claim(
+    attestation: &OracleAttestation,
     evm_wallet_hex: &str,
-    dormant_since_block: u64,
-    current_block: u64,
-    threshold_blocks: u64,
-    signer_pubkey_hex: &str,
-    signature_hex: &str,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    // chainId: pad chain_id_str bytes into 32-byte right-justified? No, bytes32 is left-aligned.
-    let chain_id_bytes = chain_id_str.as_bytes();
+    let proof = &attestation.proof;
+
+    // 1. sourceChainId: left-aligned bytes32
+    let chain_id_bytes = proof.chain_id.as_bytes();
     let mut chain_id_slot = [0u8; 32];
     let copy_len = chain_id_bytes.len().min(32);
     chain_id_slot[..copy_len].copy_from_slice(&chain_id_bytes[..copy_len]);
 
-    // dormantWallet: 20-byte address, left-padded with 12 zero bytes
+    // 2. sourceAddressHash: Sha256 of address
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(proof.address.as_bytes());
+    let source_address_hash = hasher.finalize();
+    let mut address_hash_slot = [0u8; 32];
+    address_hash_slot.copy_from_slice(&source_address_hash);
+
+    // 3. evmWallet: address (20 bytes, left-padded with 12 zeros)
     let wallet_hex = evm_wallet_hex.trim_start_matches("0x");
     let wallet_bytes = hex::decode(wallet_hex)?;
     if wallet_bytes.len() != 20 {
@@ -78,114 +76,243 @@ fn encode_submit_dormancy(
     let mut wallet_slot = [0u8; 32];
     wallet_slot[12..].copy_from_slice(&wallet_bytes);
 
-    // uint256 slots (u64 → 32-byte BE, zero-padded)
-    let mut dormant_slot = [0u8; 32];
-    dormant_slot[24..].copy_from_slice(&dormant_since_block.to_be_bytes());
-    let mut current_slot = [0u8; 32];
-    current_slot[24..].copy_from_slice(&current_block.to_be_bytes());
-    let mut threshold_slot = [0u8; 32];
-    threshold_slot[24..].copy_from_slice(&threshold_blocks.to_be_bytes());
+    // 4. proofHash: bytes32
+    let mut proof_hash_slot = [0u8; 32];
+    if let Some(ph_str) = &attestation.proof_hash {
+        let ph_bytes = hex::decode(ph_str.trim_start_matches("0x"))?;
+        let ph_copy = ph_bytes.len().min(32);
+        proof_hash_slot[..ph_copy].copy_from_slice(&ph_bytes[..ph_copy]);
+    }
 
-    // signerPubkey: first 32 bytes of hex-decoded pubkey
-    let pubkey_bytes = hex::decode(signer_pubkey_hex)?;
-    let mut pubkey_slot = [0u8; 32];
-    let pk_copy = pubkey_bytes.len().min(32);
-    pubkey_slot[..pk_copy].copy_from_slice(&pubkey_bytes[..pk_copy]);
+    // 5. sourceTxHash: bytes32
+    let mut source_tx_hash_slot = [0u8; 32];
+    if let Some(tx_str) = &proof.source_tx_hash {
+        let tx_bytes = hex::decode(tx_str.trim_start_matches("0x"))?;
+        let tx_copy = tx_bytes.len().min(32);
+        source_tx_hash_slot[..tx_copy].copy_from_slice(&tx_bytes[..tx_copy]);
+    }
 
-    // signature: dynamic bytes — offset is at slot 6 = 7 * 32 = 224
-    let sig_bytes = hex::decode(signature_hex)?;
-    let offset: u64 = 7 * 32; // 7 static slots before tail
+    // 6. claimType: uint8 -> uint256
+    let mut claim_type_slot = [0u8; 32];
+    claim_type_slot[31] = proof.claim_type;
+
+    // 7. confidenceTier: uint8 -> uint256
+    let mut confidence_tier_slot = [0u8; 32];
+    confidence_tier_slot[31] = proof.confidence_tier;
+
+    // 8. lastSeenTimestamp: uint256
+    let mut timestamp_slot = [0u8; 32];
+    timestamp_slot[24..].copy_from_slice(&attestation.created_at.to_be_bytes());
+
+    // 9. dormancySeconds: uint256
+    let blocks = proof.current_block.saturating_sub(proof.dormant_since_block);
+    let block_time = if proof.chain_id.to_lowercase().contains("bitcoin") || proof.chain_id.to_lowercase().contains("btc") {
+        600
+    } else if proof.chain_id.to_lowercase().contains("doge") {
+        60
+    } else {
+        60
+    };
+    let dormancy_seconds = blocks * block_time;
+    let mut dormancy_slot = [0u8; 32];
+    dormancy_slot[24..].copy_from_slice(&dormancy_seconds.to_be_bytes());
+
+    // 10. rewardAmount: uint256
+    let base_reward: u64 = 1000;
+    let conf_mult = match proof.claim_type {
+        2 => 1.10, // BurnProof
+        3 => 0.90, // LockProof
+        8 => 1.00, // ZkDormancyProof
+        1 => 1.00, // TransferToVault
+        4 => 0.80, // SignatureDormancyProof
+        5 => 0.60, // PublicRpcEvidenceProof
+        6 => 0.40, // ExplorerEvidenceProof
+        _ => 1.00,
+    };
+    let dorm_mult = if dormancy_seconds >= 315_360_000 {
+        3.0
+    } else if dormancy_seconds >= 157_680_000 {
+        2.0
+    } else if dormancy_seconds >= 94_608_000 {
+        1.5
+    } else if dormancy_seconds >= 31_536_000 {
+        1.0
+    } else {
+        0.5
+    };
+    let reward_tokens = (base_reward as f64 * conf_mult * dorm_mult) as u128;
+    let reward_wei = reward_tokens * 1_000_000_000_000_000_000;
+    let mut reward_slot = [0u8; 32];
+    reward_slot[16..].copy_from_slice(&reward_wei.to_be_bytes());
+
+    // 11. campaignId: uint256
+    let campaign_id_slot = [0u8; 32];
+
+    // 12. offset of baalsAttestation (bytes) = 384 (12 * 32)
     let mut offset_slot = [0u8; 32];
-    offset_slot[24..].copy_from_slice(&offset.to_be_bytes());
+    offset_slot[30..32].copy_from_slice(&384u16.to_be_bytes());
 
-    // Signature tail: 32-byte length + padded data
-    let sig_len = sig_bytes.len() as u64;
-    let mut sig_len_slot = [0u8; 32];
-    sig_len_slot[24..].copy_from_slice(&sig_len.to_be_bytes());
-    // Pad sig to 32-byte boundary
-    let padded_len = (sig_bytes.len() + 31) / 32 * 32;
-    let mut sig_padded = vec![0u8; padded_len];
-    sig_padded[..sig_bytes.len()].copy_from_slice(&sig_bytes);
+    // 13. length of baalsAttestation (bytes)
+    let att_sig_bytes = hex::decode(&attestation.baals_signature)?;
+    let mut att_len_slot = [0u8; 32];
+    att_len_slot[24..].copy_from_slice(&(att_sig_bytes.len() as u64).to_be_bytes());
+
+    // 14. data of baalsAttestation (padded to 32-byte boundary)
+    let padded_att_len = (att_sig_bytes.len() + 31) / 32 * 32;
+    let mut att_padded = vec![0u8; padded_att_len];
+    att_padded[..att_sig_bytes.len()].copy_from_slice(&att_sig_bytes);
 
     let mut calldata = Vec::new();
-    calldata.extend_from_slice(&submit_dormancy_selector());
+    calldata.extend_from_slice(&submit_legacy_claim_selector());
     calldata.extend_from_slice(&chain_id_slot);
+    calldata.extend_from_slice(&address_hash_slot);
     calldata.extend_from_slice(&wallet_slot);
-    calldata.extend_from_slice(&dormant_slot);
-    calldata.extend_from_slice(&current_slot);
-    calldata.extend_from_slice(&threshold_slot);
-    calldata.extend_from_slice(&pubkey_slot);
+    calldata.extend_from_slice(&proof_hash_slot);
+    calldata.extend_from_slice(&source_tx_hash_slot);
+    calldata.extend_from_slice(&claim_type_slot);
+    calldata.extend_from_slice(&confidence_tier_slot);
+    calldata.extend_from_slice(&timestamp_slot);
+    calldata.extend_from_slice(&dormancy_slot);
+    calldata.extend_from_slice(&reward_slot);
+    calldata.extend_from_slice(&campaign_id_slot);
     calldata.extend_from_slice(&offset_slot);
-    calldata.extend_from_slice(&sig_len_slot);
-    calldata.extend_from_slice(&sig_padded);
+    calldata.extend_from_slice(&att_len_slot);
+    calldata.extend_from_slice(&att_padded);
 
     Ok(calldata)
 }
 
 /// ABI-encode a call to submitZkDormancyClaim.
-/// Parameters:
-///   groth16Proof    = dynamic bytes (SP1 Groth16 proof)
-///   publicInputs    = dynamic bytes (SP1 public inputs)
-///   chainId         = bytes32
-///   proofHash       = bytes32
-///   evmWallet       = address
-///   claimType       = uint8
-///   dormantSinceBlock / currentBlock / thresholdBlocks / lastSeenTimestamp = uint256
 fn encode_submit_zk_dormancy(
     groth16_proof: &[u8],
     public_inputs: &[u8],
-    chain_id_str: &str,
-    proof_hash_hex: &str,
-    evm_wallet_hex: &str,
-    claim_type: u8,
+    wallet_address: &str,
     dormant_since_block: u64,
     current_block: u64,
     threshold_blocks: u64,
-    last_seen_timestamp: u64,
+    attestation: &OracleAttestation,
+    evm_wallet_hex: &str,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    // chainId: left-aligned bytes32
-    let chain_id_bytes = chain_id_str.as_bytes();
+    let proof = &attestation.proof;
+
+    // 1. sourceChainId: left-aligned bytes32
+    let chain_id_bytes = proof.chain_id.as_bytes();
     let mut chain_id_slot = [0u8; 32];
     let copy_len = chain_id_bytes.len().min(32);
     chain_id_slot[..copy_len].copy_from_slice(&chain_id_bytes[..copy_len]);
 
-    // proofHash: bytes32
-    let proof_hash_bytes = hex::decode(proof_hash_hex.trim_start_matches("0x"))?;
-    let mut proof_hash_slot = [0u8; 32];
-    let ph_copy = proof_hash_bytes.len().min(32);
-    proof_hash_slot[..ph_copy].copy_from_slice(&proof_hash_bytes[..ph_copy]);
+    // 2. sourceAddressHash: Sha256 of address
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(proof.address.as_bytes());
+    let source_address_hash = hasher.finalize();
+    let mut address_hash_slot = [0u8; 32];
+    address_hash_slot.copy_from_slice(&source_address_hash);
 
-    // evmWallet: address (20 bytes, left-padded)
+    // 3. evmWallet: address (20 bytes, left-padded with 12 zeros)
     let wallet_hex = evm_wallet_hex.trim_start_matches("0x");
     let wallet_bytes = hex::decode(wallet_hex)?;
+    if wallet_bytes.len() != 20 {
+        return Err(format!("evm_wallet must be 20 bytes, got {}", wallet_bytes.len()).into());
+    }
     let mut wallet_slot = [0u8; 32];
     wallet_slot[12..].copy_from_slice(&wallet_bytes);
 
-    // claimType: uint8 → uint256
+    // 4. proofHash: bytes32
+    let mut proof_hash_slot = [0u8; 32];
+    if let Some(ph_str) = &attestation.proof_hash {
+        let ph_bytes = hex::decode(ph_str.trim_start_matches("0x"))?;
+        let ph_copy = ph_bytes.len().min(32);
+        proof_hash_slot[..ph_copy].copy_from_slice(&ph_bytes[..ph_copy]);
+    }
+
+    // 5. sourceTxHash: bytes32
+    let mut source_tx_hash_slot = [0u8; 32];
+    if let Some(tx_str) = &proof.source_tx_hash {
+        let tx_bytes = hex::decode(tx_str.trim_start_matches("0x"))?;
+        let tx_copy = tx_bytes.len().min(32);
+        source_tx_hash_slot[..tx_copy].copy_from_slice(&tx_bytes[..tx_copy]);
+    }
+
+    // 6. claimType: uint8 -> uint256
     let mut claim_type_slot = [0u8; 32];
-    claim_type_slot[31] = claim_type;
+    claim_type_slot[31] = proof.claim_type;
 
-    // uint256 slots
-    let mut dormant_slot = [0u8; 32];
-    dormant_slot[24..].copy_from_slice(&dormant_since_block.to_be_bytes());
-    let mut current_slot = [0u8; 32];
-    current_slot[24..].copy_from_slice(&current_block.to_be_bytes());
-    let mut threshold_slot = [0u8; 32];
-    threshold_slot[24..].copy_from_slice(&threshold_blocks.to_be_bytes());
+    // 7. confidenceTier: uint8 -> uint256
+    let mut confidence_tier_slot = [0u8; 32];
+    confidence_tier_slot[31] = proof.confidence_tier;
+
+    // 8. lastSeenTimestamp: uint256
     let mut timestamp_slot = [0u8; 32];
-    timestamp_slot[24..].copy_from_slice(&last_seen_timestamp.to_be_bytes());
+    timestamp_slot[24..].copy_from_slice(&attestation.created_at.to_be_bytes());
 
-    // Dynamic bytes: groth16Proof and publicInputs
-    let static_len: u64 = 10 * 32;
+    // 9. dormancySeconds: uint256
+    let blocks = proof.current_block.saturating_sub(proof.dormant_since_block);
+    let block_time = if proof.chain_id.to_lowercase().contains("bitcoin") || proof.chain_id.to_lowercase().contains("btc") {
+        600
+    } else if proof.chain_id.to_lowercase().contains("doge") {
+        60
+    } else {
+        60
+    };
+    let dormancy_seconds = blocks * block_time;
+    let mut dormancy_slot = [0u8; 32];
+    dormancy_slot[24..].copy_from_slice(&dormancy_seconds.to_be_bytes());
 
-    let groth16_offset = static_len;
-    let public_inputs_offset = static_len + 32 + ((groth16_proof.len() as u64 + 31) / 32 * 32);
+    // 10. rewardAmount: uint256
+    let base_reward: u64 = 1000;
+    let conf_mult = match proof.claim_type {
+        2 => 1.10, // BurnProof
+        3 => 0.90, // LockProof
+        8 => 1.00, // ZkDormancyProof
+        1 => 1.00, // TransferToVault
+        4 => 0.80, // SignatureDormancyProof
+        5 => 0.60, // PublicRpcEvidenceProof
+        6 => 0.40, // ExplorerEvidenceProof
+        _ => 1.00,
+    };
+    let dorm_mult = if dormancy_seconds >= 315_360_000 {
+        3.0
+    } else if dormancy_seconds >= 157_680_000 {
+        2.0
+    } else if dormancy_seconds >= 94_608_000 {
+        1.5
+    } else if dormancy_seconds >= 31_536_000 {
+        1.0
+    } else {
+        0.5
+    };
+    let reward_tokens = (base_reward as f64 * conf_mult * dorm_mult) as u128;
+    let reward_wei = reward_tokens * 1_000_000_000_000_000_000;
+    let mut reward_slot = [0u8; 32];
+    reward_slot[16..].copy_from_slice(&reward_wei.to_be_bytes());
+
+    // 11. campaignId: uint256
+    let campaign_id_slot = [0u8; 32];
+
+    // Static integers for function arguments (dormantSinceBlock, currentBlock, thresholdBlocks)
+    let mut dormant_since_slot = [0u8; 32];
+    dormant_since_slot[24..].copy_from_slice(&dormant_since_block.to_be_bytes());
+    let mut current_block_slot = [0u8; 32];
+    current_block_slot[24..].copy_from_slice(&current_block.to_be_bytes());
+    let mut threshold_blocks_slot = [0u8; 32];
+    threshold_blocks_slot[24..].copy_from_slice(&threshold_blocks.to_be_bytes());
+
+    // Dynamic arguments offsets:
+    let static_head_len: u64 = 17 * 32;
+
+    let groth16_offset = static_head_len;
+    let public_inputs_offset = groth16_offset + 32 + ((groth16_proof.len() as u64 + 31) / 32 * 32);
+    let wallet_address_bytes = wallet_address.as_bytes();
+    let wallet_address_offset = public_inputs_offset + 32 + ((public_inputs.len() as u64 + 31) / 32 * 32);
 
     let mut groth16_offset_slot = [0u8; 32];
     groth16_offset_slot[24..].copy_from_slice(&groth16_offset.to_be_bytes());
     let mut public_inputs_offset_slot = [0u8; 32];
     public_inputs_offset_slot[24..].copy_from_slice(&public_inputs_offset.to_be_bytes());
+    let mut wallet_address_offset_slot = [0u8; 32];
+    wallet_address_offset_slot[24..].copy_from_slice(&wallet_address_offset.to_be_bytes());
 
+    // Tails
     let mut groth16_len_slot = [0u8; 32];
     groth16_len_slot[24..].copy_from_slice(&(groth16_proof.len() as u64).to_be_bytes());
     let groth16_padded_len = (groth16_proof.len() + 31) / 32 * 32;
@@ -198,22 +325,40 @@ fn encode_submit_zk_dormancy(
     let mut pi_padded = vec![0u8; pi_padded_len];
     pi_padded[..public_inputs.len()].copy_from_slice(public_inputs);
 
+    let mut wallet_addr_len_slot = [0u8; 32];
+    wallet_addr_len_slot[24..].copy_from_slice(&(wallet_address_bytes.len() as u64).to_be_bytes());
+    let wallet_addr_padded_len = (wallet_address_bytes.len() + 31) / 32 * 32;
+    let mut wallet_addr_padded = vec![0u8; wallet_addr_padded_len];
+    wallet_addr_padded[..wallet_address_bytes.len()].copy_from_slice(wallet_address_bytes);
+
     let mut calldata = Vec::new();
     calldata.extend_from_slice(&submit_zk_dormancy_selector());
-    calldata.extend_from_slice(&chain_id_slot);
-    calldata.extend_from_slice(&proof_hash_slot);
-    calldata.extend_from_slice(&wallet_slot);
-    calldata.extend_from_slice(&claim_type_slot);
-    calldata.extend_from_slice(&dormant_slot);
-    calldata.extend_from_slice(&current_slot);
-    calldata.extend_from_slice(&threshold_slot);
-    calldata.extend_from_slice(&timestamp_slot);
+    
     calldata.extend_from_slice(&groth16_offset_slot);
     calldata.extend_from_slice(&public_inputs_offset_slot);
+    calldata.extend_from_slice(&wallet_address_offset_slot);
+    calldata.extend_from_slice(&dormant_since_slot);
+    calldata.extend_from_slice(&current_block_slot);
+    calldata.extend_from_slice(&threshold_blocks_slot);
+    
+    calldata.extend_from_slice(&chain_id_slot);
+    calldata.extend_from_slice(&address_hash_slot);
+    calldata.extend_from_slice(&wallet_slot);
+    calldata.extend_from_slice(&proof_hash_slot);
+    calldata.extend_from_slice(&source_tx_hash_slot);
+    calldata.extend_from_slice(&claim_type_slot);
+    calldata.extend_from_slice(&confidence_tier_slot);
+    calldata.extend_from_slice(&timestamp_slot);
+    calldata.extend_from_slice(&dormancy_slot);
+    calldata.extend_from_slice(&reward_slot);
+    calldata.extend_from_slice(&campaign_id_slot);
+
     calldata.extend_from_slice(&groth16_len_slot);
     calldata.extend_from_slice(&groth16_padded);
     calldata.extend_from_slice(&pi_len_slot);
     calldata.extend_from_slice(&pi_padded);
+    calldata.extend_from_slice(&wallet_addr_len_slot);
+    calldata.extend_from_slice(&wallet_addr_padded);
 
     Ok(calldata)
 }
@@ -480,8 +625,8 @@ impl EVMSubmitter {
 
     /// Background loop — polls every 30 s.
     pub async fn run(&self, storage: &dyn Storage) {
-        if self.config.evm_rpc.is_empty() || self.config.reward_distributor.is_empty() {
-            error!("[EVM] Missing evm_rpc or reward_distributor config — submitter disabled");
+        if self.config.evm_rpc.is_empty() || self.config.legacy_claim_registry.is_empty() {
+            error!("[EVM] Missing evm_rpc or legacy_claim_registry config — submitter disabled");
             return;
         }
         loop {
@@ -633,39 +778,20 @@ impl EVMSubmitter {
         Ok(())
     }
 
-    /// Build, sign, and send a submitDormancyProof transaction.
+    /// Build, sign, and send a submitLegacyClaim transaction.
     fn submit_attestation(
         &self,
         attestation: &OracleAttestation,
         evm_wallet: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let proof = &attestation.proof;
-
-        let signer_pubkey = proof
-            .signer_pubkey
-            .as_deref()
-            .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
-        let signature = proof
-            .signature
-            .as_deref()
-            .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
-
-        let calldata = encode_submit_dormancy(
-            &proof.chain_id,
-            evm_wallet,
-            proof.dormant_since_block,
-            proof.current_block,
-            proof.threshold_blocks,
-            signer_pubkey,
-            signature,
-        )?;
+        let calldata = encode_submit_legacy_claim(attestation, evm_wallet)?;
 
         let nonce = get_nonce(&self.config.evm_rpc, &self.evm_address)?;
         let gas_price = get_gas_price(&self.config.evm_rpc)?;
 
         debug!(
             "[EVM] Building tx: nonce={} gasPrice={} to={}",
-            nonce, gas_price, self.config.reward_distributor
+            nonce, gas_price, self.config.legacy_claim_registry
         );
 
         let raw_tx = sign_legacy_tx(
@@ -673,7 +799,7 @@ impl EVMSubmitter {
             nonce,
             gas_price,
             500_000,
-            &self.config.reward_distributor,
+            &self.config.legacy_claim_registry,
             &calldata,
             self.config.evm_chain_id,
         )?;
@@ -695,14 +821,12 @@ impl EVMSubmitter {
         let calldata = encode_submit_zk_dormancy(
             groth16_proof,
             public_inputs,
-            &proof.chain_id,
-            attestation.proof_hash.as_deref().unwrap_or("0x0000000000000000000000000000000000000000000000000000000000000000"),
-            evm_wallet,
-            proof.claim_type,
+            &proof.address,
             proof.dormant_since_block,
             proof.current_block,
             proof.threshold_blocks,
-            attestation.attested_at_block,
+            attestation,
+            evm_wallet,
         )?;
 
         let nonce = get_nonce(&self.config.evm_rpc, &self.evm_address)?;
@@ -710,7 +834,7 @@ impl EVMSubmitter {
 
         debug!(
             "[EVM] Building SP1 tx: nonce={} gasPrice={} to={}",
-            nonce, gas_price, self.config.reward_distributor
+            nonce, gas_price, self.config.legacy_claim_registry
         );
 
         let raw_tx = sign_legacy_tx(
@@ -718,7 +842,7 @@ impl EVMSubmitter {
             nonce,
             gas_price,
             800_000,
-            &self.config.reward_distributor,
+            &self.config.legacy_claim_registry,
             &calldata,
             self.config.evm_chain_id,
         )?;
@@ -1035,28 +1159,52 @@ mod tests {
 
     #[test]
     fn test_function_selector() {
-        // Selector for submitDormancyProof(bytes32,address,uint256,uint256,uint256,bytes32,bytes)
-        // Verified against cast sig "submitDormancyProof(bytes32,address,uint256,uint256,uint256,bytes32,bytes)"
-        let sel = submit_dormancy_selector();
-        // The 4-byte selector is deterministic; ensure it's non-zero placeholder is gone
+        let sel = submit_legacy_claim_selector();
         assert_ne!(sel, [0x12, 0x34, 0x56, 0x78], "selector must not be placeholder");
         assert_eq!(sel.len(), 4);
     }
 
     #[test]
     fn test_abi_encoding_length() {
-        let calldata = encode_submit_dormancy(
-            "bitcoin",
+        let proof = crate::oracle::DormancyProof {
+            version: "chrononode:dormancy:v1".to_string(),
+            chain_id: "bitcoin".to_string(),
+            address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".to_string(),
+            dormant_since_block: 800_000,
+            current_block: 850_000,
+            threshold_blocks: 52_560,
+            signer_pubkey: None,
+            signature: None,
+            evm_wallet: Some("0x201624cBa366250D08bCdA95e6eF64151687A447".to_string()),
+            claim_type: 4,
+            confidence_tier: 2,
+            source_tx_hash: None,
+            zk_proof: None,
+            public_inputs: None,
+        };
+        let attestation = crate::oracle::OracleAttestation {
+            proof,
+            baals_pubkey: String::new(),
+            baals_signature: "b".repeat(128),
+            attested_at_block: 100,
+            baals_block_hash: String::new(),
+            attestation_id: String::new(),
+            claim_id: None,
+            evm_tx_hash: None,
+            baals_tx_hash: None,
+            proof_hash: Some("0x".to_string() + &"a".repeat(64)),
+            status: "pending".to_string(),
+            created_at: 1716600000,
+            submitted_at: None,
+            error: None,
+        };
+        let calldata = encode_submit_legacy_claim(
+            &attestation,
             "0x201624cBa366250D08bCdA95e6eF64151687A447",
-            800_000,
-            850_000,
-            52_560,
-            &"a".repeat(64),
-            &"b".repeat(128),
         )
         .unwrap();
-        // 4 (selector) + 7*32 (head) + 32 (sig len) + 64 (128 hex = 64 bytes, padded to 64) = 4 + 224 + 32 + 64 = 324
-        assert_eq!(calldata.len(), 324, "unexpected calldata length: {}", calldata.len());
+        // 4 (selector) + 11*32 (struct) + 32 (offset) + 32 (length) + 64 (sig) = 484
+        assert_eq!(calldata.len(), 484, "unexpected calldata length: {}", calldata.len());
     }
 
     #[test]
@@ -1121,8 +1269,8 @@ mod tests {
         let sel = mint_for_relay_selector();
         assert_eq!(sel.len(), 4);
         assert_ne!(sel, [0u8; 4]);
-        // Must differ from submitDormancyProof selector
-        assert_ne!(sel, submit_dormancy_selector());
+        // Must differ from submitLegacyClaim selector
+        assert_ne!(sel, submit_legacy_claim_selector());
     }
 
     #[test]

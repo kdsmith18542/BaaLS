@@ -157,6 +157,7 @@ mod phase_k_oracle_tests {
             enabled: true,
             evm_rpc: "https://arb-sepolia.g.alchemy.com/v2/demo".to_string(),
             reward_distributor: "0xabcd1234567890abcd1234567890abcd12345678".to_string(),
+            legacy_claim_registry: "0xa7FacCdA878b7C25e445f239d44411E33dDf2D3F".to_string(),
             amoy_rpc: "https://rpc-amoy.polygon.technology/".to_string(),
             evm_private_key_env: "BAALS_EVM_PRIVATE_KEY".to_string(),
             evm_chain_id: 421614,

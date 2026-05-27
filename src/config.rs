@@ -144,6 +144,9 @@ pub struct OracleConfig {
     /// RewardDistributor contract address on the hub chain
     #[serde(default)]
     pub reward_distributor: String,
+    /// LegacyClaimRegistry contract address on the hub chain
+    #[serde(default)]
+    pub legacy_claim_registry: String,
     /// Amoy (Polygon) JSON-RPC for spoke-chain verification
     #[serde(default)]
     pub amoy_rpc: String,
