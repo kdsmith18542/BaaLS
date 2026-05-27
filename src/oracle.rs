@@ -73,8 +73,10 @@ pub struct OracleAttestation {
     /// BaaLS block index at time of attestation (chain anchor)
     pub attested_at_block: u64,
     /// BaaLS block hash at time of attestation (hex, 32 bytes)
+    #[serde(default)]
     pub baals_block_hash: String,
     /// Unique attestation ID (hash of proof + block)
+    #[serde(default)]
     pub attestation_id: String,
     /// Canonical claim ID (computed from proof fields)
     pub claim_id: Option<String>,
